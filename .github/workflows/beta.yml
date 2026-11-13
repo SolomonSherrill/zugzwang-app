@@ -1,0 +1,218 @@
+# Beta builds (BETA item 7, BETA-PUB): macOS arm64, macOS x86_64 and Windows x86_64.
+#
+# On a `v*` tag push, and by hand (workflow_dispatch). Each target: the Python tests, the
+# frontend tests and type check, Stockfish 18 fetched by hash with its bench signature
+# asserted (2050811 nodes — labels stay comparable across machines) for every build that
+# ships (x86-64 ships two, BETA-PUB Q6), the sidecar frozen, its live-database guard and its
+# smoke test run (including an analysed game), the app bundled, then launched to confirm its
+# window, its sidecar and its engine start. A `v*` tag on the public repository
+# (SolomonSherrill/zugzwang-app) also gets a DRAFT release with every artifact and the
+# updater's latest.json; nothing reaches testers until a person publishes the draft. The
+# update address compiled into the app is that repository's
+# releases/latest/download/latest.json, and never changes.
+#
+# Secrets, none in the repo: TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) sign the updater
+# artifacts (BETA item 8). Without them the bundles still build, unsigned for updates.
+#
+# The Python suite skips the three tests that need the opening book (W20): the book is
+# gitignored and not available to CI, and CLAUDE.md records them as failing on purpose.
+
+name: beta
+
+on:
+  push:
+    # v*: a release (builds + a draft release). ci-*: builds and checks only.
+    tags: ["v*", "ci-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.15"
+  NODE_VERSION: "24"
+  BOOK_TESTS: >-
+    --deselect tests/test_openings.py::test_book_loads
+    --deselect tests/test_openings.py::test_starting_position_has_book_moves
+    --deselect tests/test_openings.py::test_is_book_move_true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-15
+            target: darwin/arm64
+            triple: aarch64-apple-darwin
+            key: darwin-aarch64
+            two_builds: false
+          - name: macOS x86_64
+            os: macos-15-intel
+            target: darwin/x86_64
+            triple: x86_64-apple-darwin
+            key: darwin-x86_64
+            two_builds: true
+          - name: Windows x86_64
+            os: windows-2025
+            target: windows/x86_64
+            triple: x86_64-pc-windows-msvc
+            key: windows-x86_64
+            two_builds: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Python dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt pyinstaller==6.22.3
+
+      - name: Stockfish 18 — hashes and bench signature, every build shipped
+        run: |
+          python tools/get_stockfish.py --target ${{ matrix.target }} --bench --tauri ${{ matrix.triple }}
+          if [ "${{ matrix.two_builds }}" = "true" ]; then
+            python tools/get_stockfish.py --target ${{ matrix.target }} --variant avx2 --bench --tauri ${{ matrix.triple }}
+          fi
+
+      - name: Python tests
+        run: python -m pytest tests/ -q -p no:cacheprovider $BOOK_TESTS
+
+      - name: Type check (findings.py, describe.py)
+        run: python -m mypy zugzwang/core/findings.py zugzwang/core/describe.py
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Frontend dependencies
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: Frontend tests and type check
+        working-directory: desktop
+        run: |
+          npm test
+          npm run check
+
+      - name: Freeze the sidecar
+        run: python packaging/build_sidecar.py --beta --triple ${{ matrix.triple }}
+
+      - name: Live-database guard on the frozen sidecar
+        run: |
+          exe=build/sidecar-dist/zugzwang-sidecar/zugzwang-sidecar
+          [ "$RUNNER_OS" = "Windows" ] && exe="$exe.exe"
+          python packaging/guard_check.py "$exe"
+
+      - name: Packaged sidecar smoke test (play, import, one analysed game, flags, puzzles)
+        run: |
+          exe=build/sidecar-dist/zugzwang-sidecar/zugzwang-sidecar
+          [ "$RUNNER_OS" = "Windows" ] && exe="$exe.exe"
+          # Outside the app the frozen sidecar has no Stockfish beside it: point it at the
+          # binary verified above. (Inside the app it finds its own — the launch check.)
+          export ZUGZWANG_STOCKFISH="$PWD/stockfish/$(python -c "import zugzwang.config as C; print(C.STOCKFISH_ASSETS[C.host_target()]['binary'])")"
+          python sidecar/smoke_test.py --sidecar "$exe" --skip-trainer
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Bundle
+        working-directory: desktop
+        env:
+          CI: "true"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          os=$([ "$RUNNER_OS" = "Windows" ] && echo windows || echo macos)
+          extra=()
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set: building without updater artifacts"
+            extra=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+          fi
+          if [ "${{ matrix.two_builds }}" = "true" ]; then
+            extra+=(--config '{"bundle":{"externalBin":["binaries/stockfish","binaries/stockfish-avx2"]}}')
+          fi
+          npx tauri build --config src-tauri/tauri.beta.conf.json \
+            --config src-tauri/tauri.beta.$os.conf.json "${extra[@]}"
+
+      - name: Launch the app (window, sidecar, engine)
+        timeout-minutes: 10
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            installer=$(ls desktop/src-tauri/target/release/bundle/nsis/*-setup.exe)
+            # Through PowerShell: Git Bash rewrites a bare "/S" into a path, and the
+            # installer then opens its interactive UI and waits forever (ci-beta-3).
+            powershell -NoProfile -Command "Start-Process -FilePath '$(cygpath -w "$installer")' -ArgumentList '/S' -Wait"
+            exe="$LOCALAPPDATA/Zugzwang/Zugzwang.exe"
+            [ -f "$exe" ] || exe=$(find "$LOCALAPPDATA" -maxdepth 3 -name Zugzwang.exe | head -1)
+            echo "installed: $exe"
+            ls "$(dirname "$exe")" "$(dirname "$exe")/sidecar"
+          else
+            exe=desktop/src-tauri/target/release/bundle/macos/Zugzwang.app/Contents/MacOS/Zugzwang
+            codesign --verify --deep --strict desktop/src-tauri/target/release/bundle/macos/Zugzwang.app
+          fi
+          python packaging/launch_check.py --exe "$exe" --timeout 180
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist-out
+          b=desktop/src-tauri/target/release/bundle
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp $b/nsis/*-setup.exe dist-out/
+            cp $b/nsis/*-setup.exe.sig dist-out/ 2>/dev/null || true
+          else
+            cp $b/dmg/*.dmg dist-out/
+            for f in $b/macos/*.app.tar.gz $b/macos/*.app.tar.gz.sig; do
+              [ -f "$f" ] && cp "$f" "dist-out/$(basename "${f/Zugzwang.app/Zugzwang_${{ matrix.key }}.app}")"
+            done
+          fi
+          ls -la dist-out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zugzwang-${{ matrix.key }}
+          path: dist-out/*
+          if-no-files-found: error
+
+  release:
+    name: Draft release + latest.json
+    # Releases come only from the public repository: its tag is the exact source.
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'SolomonSherrill/zugzwang-app'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: latest.json
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: python packaging/make_latest_json.py artifacts "$TAG" > artifacts/latest.json && cat artifacts/latest.json
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Not --prerelease: the updater's endpoint is .../releases/latest/download/latest.json,
+          # and GitHub's "latest" skips prereleases. A draft stays invisible until published.
+          gh release create "$TAG" artifacts/* --draft \
+            --title "Zugzwang $TAG" \
+            --notes "Beta build $TAG. Which file to download and how to open it: [TESTERS.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/TESTERS.md). Source: the tag $TAG."

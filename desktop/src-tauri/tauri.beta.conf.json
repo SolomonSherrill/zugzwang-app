@@ -1,0 +1,42 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "version": "0.1.0-beta.1",
+  "build": {
+    "beforeBuildCommand": "npm run build:beta"
+  },
+  "app": {
+    "security": {
+      "capabilities": [
+        "beta"
+      ]
+    }
+  },
+  "bundle": {
+    "externalBin": [
+      "binaries/stockfish"
+    ],
+    "copyright": "Copyright (C) 2026 Solomon Sherrill. GPL-3.0-or-later. Bundles Stockfish 18 (GPLv3).",
+    "shortDescription": "Chess game review",
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "11.0"
+    },
+    "resources": {
+      "../../build/sidecar-dist/zugzwang-sidecar/": "sidecar/",
+      "../public/licenses/": "licenses/"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "mainBinaryName": "Zugzwang",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBOTRGRUM1OTBFNTQ5NEYKUldSUFNlV1F4ZjZVNm1PS1FWdFJEeU5wRjh6R3Jrd0Z4a3JQOUJEcFBEckFFV0pMN1JKMm9SR0sK",
+      "endpoints": [
+        "https://github.com/SolomonSherrill/zugzwang-app/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

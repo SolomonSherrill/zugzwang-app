@@ -1,0 +1,24 @@
+Zugzwang (beta) — third-party software it contains
+
+Zugzwang itself: Copyright (C) 2026 Solomon Sherrill, GPL-3.0-or-later (zugzwang-LICENSE.txt).
+  Source of every release: https://github.com/SolomonSherrill/zugzwang-app (tag v<version>)
+
+Stockfish 18 — GNU General Public License v3 (full text: stockfish-COPYING.txt)
+  The unmodified official sf_18 release binary for your platform.
+  Exact source: https://github.com/official-stockfish/Stockfish/tree/sf_18
+  Release:      https://github.com/official-stockfish/Stockfish/releases/tag/sf_18
+
+python-chess 1.11.2 — GPL-3.0-or-later — https://github.com/niklasf/python-chess
+chessground — GPL-3.0-or-later — https://github.com/lichess-org/chessground
+Cburnett chess pieces — GPL-2.0-or-later — by Colin M.L. Burnett, via chessground and python-chess
+chess.js — BSD-2-Clause — https://github.com/jhlywa/chess.js
+Chart.js — MIT — https://github.com/chartjs/Chart.js
+Svelte — MIT — https://github.com/sveltejs/svelte
+Tauri and its plugins — Apache-2.0 OR MIT — https://github.com/tauri-apps/tauri
+Inter (via @fontsource/inter) — SIL Open Font License 1.1 — https://github.com/rsms/inter
+certifi — MPL-2.0 — https://github.com/certifi/python-certifi
+Python — PSF License — https://docs.python.org/3/license.html
+PyInstaller bootloader — GPL-2.0-or-later with the bootloader exception — https://pyinstaller.org
+ECO opening names — lichess-org/chess-openings, CC0 — https://github.com/lichess-org/chess-openings
+
+The GNU GPL v3 text is in stockfish-COPYING.txt beside this file.

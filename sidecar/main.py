@@ -1,0 +1,2608 @@
+#!/usr/bin/env python3
+"""
+Zugzwang sidecar — exposes the existing Python core to the Tauri frontend.
+
+Protocol: newline-delimited JSON over stdio (stdout = protocol, stderr = logs).
+
+  Request   →  {"id": 1, "method": "new_game", "params": {...}}
+  Response  ←  {"id": 1, "result": {...}}            (or {"id": 1, "error": {"message": ...}})
+  Event     ←  {"event": "engine_move", "data": {...}}   (pushed, no id)
+
+Threading mirrors the PyQt app's model:
+  • app thread  — owns GameSession and the sqlite connection (the Qt "main
+    thread" role); processes one inbox item at a time, so all state mutation
+    and DB writes are serialized.
+  • stdin thread — parses requests and enqueues them (never blocks on work).
+  • engine thread — runs Stockfish searches; results re-enter the app thread
+    through the inbox, like a queued signal. A generation counter discards
+    stale results the same way StockfishWorker._skip does.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import logging
+import os
+import queue
+import sqlite3
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+import chess
+import chess.engine
+import chess.pgn
+
+import zugzwang.config as C
+from zugzwang.config import DB_PATH, ENGINE_MOVE_TIME_MS, SKILL_DEFAULT, skill_to_elo
+from zugzwang.core.analysis import (
+    analyze_game_from_evals,
+    analyze_game_plies,
+    analyze_position,
+    analyze_position_multipv,
+    configure_engine_for_analysis,
+    eval_coverage,
+)
+from zugzwang.core.database import (
+    AttributionPending,
+    Database,
+    GameRecord,
+    IncompleteRun,
+    MoveAnalysis,
+    rated_from_pgn,
+)
+from zugzwang.core.engine_locator import find_stockfish, persist_path, popen_engine
+from zugzwang.core.engine_supervisor import (
+    ENGINE_GONE,
+    DeathBreaker,
+    SupervisedEngine,
+    bury,
+    is_engine_death,
+)
+from zugzwang.core.explain import RULE_VERSION, stored_ply_row
+from zugzwang.core.compose import explain_ply_full
+from zugzwang.core.explain_text import UNKNOWN_SIDE
+from zugzwang.core import provenance
+from zugzwang.core.positions import legal_board
+from zugzwang.core.game_report import build_report, opening_exit, opening_sentence
+from zugzwang.core.retry import judge as judge_try
+from zugzwang.core.game import GameEnd, GameSession
+from zugzwang.core.import_pgn import parse_pgn_report
+from zugzwang.core.insights import build_insights
+from zugzwang.core.platform_sync import (
+    SyncError,
+    fetch_chesscom_games,
+    fetch_lichess_games,
+)
+from zugzwang.core.openings import OpeningsBook
+from zugzwang.core.puzzle_core import (
+    alternate_final_mates,
+    glicko2_update,
+    import_puzzles_csv,
+)
+from zugzwang.core.trainer import (
+    accepted_book_moves,
+    has_coverage,
+    parse_pgn_moves,
+    top_book_reply,
+    uniform_random_reply,
+    weighted_random_reply,
+)
+
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="[sidecar] %(message)s")
+logger = logging.getLogger(__name__)
+
+#: Rotated at 1 MB, three old files kept: a month of ordinary use is well under that.
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUPS = 3
+
+
+def _log_path() -> Path:
+    """`logs/sidecar.log` beside the database in use, so a test's temp DB logs to its
+    own temp directory, not the user's."""
+    return Path(os.environ.get("ZUGZWANG_DB", DB_PATH)).parent / "logs" / "sidecar.log"
+
+
+def _setup_file_logging() -> Path | None:
+    """W21: stderr reaches only the webview's `console.debug` (`sidecar.ts`), and the
+    Tauri log file stayed 0 bytes while the sidecar reported a missing book. So the
+    sidecar keeps its own log file, timestamped, for every build. Uncaught exceptions,
+    on the main thread or a worker, go to it too. A log that cannot be opened is
+    reported on stderr and is not fatal."""
+    from logging.handlers import RotatingFileHandler
+    path = _log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=LOG_MAX_BYTES,
+                                      backupCount=LOG_BACKUPS, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("cannot open the log file %s: %s", path, exc)
+        return None
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    if root.getEffectiveLevel() > logging.INFO:     # basicConfig is a no-op if the root
+        root.setLevel(logging.INFO)                 # already has a handler
+    logging.captureWarnings(True)
+
+    def log_uncaught(exc_type, exc, tb) -> None:
+        logger.critical("uncaught exception", exc_info=(exc_type, exc, tb))
+
+    def log_thread_uncaught(args) -> None:
+        if args.exc_type is not SystemExit:
+            logger.critical("uncaught exception in thread %s",
+                            args.thread.name if args.thread else "?",
+                            exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = log_uncaught
+    threading.excepthook = log_thread_uncaught
+    logger.info("sidecar starting: protocol %s, pid %s, python %s, log %s",
+                PROTOCOL_VERSION, os.getpid(), sys.version.split()[0], path)
+    return path
+
+PROTOCOL_VERSION = 2
+
+_out_lock = threading.Lock()
+
+
+def _send(obj: dict) -> None:
+    with _out_lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+
+def _reply(req_id, result: dict) -> None:
+    _send({"id": req_id, "result": result})
+
+
+def _reply_error(req_id, message: str) -> None:
+    _send({"id": req_id, "error": {"message": message}})
+
+
+def _emit(event: str, data: dict) -> None:
+    _send({"event": event, "data": data})
+
+
+def _analysis_engine_starter(label: str):
+    """How every bulk engine is opened — and reopened after a death, so a respawned
+    engine has exactly the configuration of the one it replaces."""
+    def start() -> chess.engine.SimpleEngine:
+        path = find_stockfish()
+        if path is None:
+            raise RuntimeError("Stockfish not found — cannot run analysis.")
+        engine = popen_engine(path)
+        configure_engine_for_analysis(engine)
+        logger.info("%s started: %s", label, path)
+        return engine
+    return start
+
+
+def _move_label(fen: str) -> str:
+    """'23.' or '23...' — the move a ply's position is waiting for."""
+    board = chess.Board(fen)
+    return f"{board.fullmove_number}{'.' if board.turn == chess.WHITE else '...'}"
+
+
+def _death_message(fen: str, exc: BaseException) -> str:
+    if getattr(exc, "poison", False):
+        return (f"The engine crashed twice on the position before {_move_label(fen)}, "
+                "so this game was skipped.")
+    return f"The engine stopped and could not be restarted ({exc})."
+
+
+class RunHalted(Exception):
+    """The death breaker stopped a bulk run (VAL-DEATH)."""
+
+
+def _pgn_label(pgn: str) -> str:
+    """"White vs Black" from a PGN's headers, for an import issue."""
+    import re as _re
+    tags = dict(_re.findall(r'^\[(\w+) "(.*)"\]', pgn or "", _re.M))
+    return f"{tags.get('White', '?')} vs {tags.get('Black', '?')}"
+
+
+class EngineBudget:
+    """How many single-threaded engines bulk analysis may run at once (ENG-ALLOC,
+    ENGINE-BUDGET-M4B).
+
+    Two numbers. With an interactive screen open, the budget is `ENGINE_BUDGET_CORES`,
+    the performance cores, and interactive engines are reserved from it first: live
+    play while the Play screen is showing, the FEN path while Review or a puzzle is. A
+    running Re-analyse takes a slot too. Bulk sync gets what is left, and never fewer
+    than one engine, so a sync always makes progress. With **no** interactive screen
+    open, bulk may use up to `ENGINE_BUDGET_IDLE_CEILING` engines (8 on the 10-core M4),
+    less any running Re-analyse.
+
+    On the M4 (4 performance cores): sync runs two engines while the user reviews a
+    game with a Re-analyse running, three on Play or Review alone, eight otherwise.
+    The screen comes from the frontend (`set_active_screen`); the sidecar cannot see
+    it, and an engine that is merely *started* is no evidence anyone is using it. A
+    worker already in a game finishes it, so after switching to Play the extra engines
+    stop at their next game boundary, not at once.
+    """
+
+    PLAY_SCREENS = frozenset({"play"})
+    FEN_SCREENS = frozenset({"review", "puzzles"})
+
+    def __init__(self, cores: int = C.ENGINE_BUDGET_CORES,
+                 idle_ceiling: int = C.ENGINE_BUDGET_IDLE_CEILING) -> None:
+        self._cores = max(1, cores)
+        self._ceiling = max(self._cores, idle_ceiling)
+        self._screen: str | None = None
+        self._reanalysing = 0
+        self._lock = threading.Lock()
+
+    def set_screen(self, screen: str | None) -> None:
+        with self._lock:
+            self._screen = screen
+
+    def reanalysis(self, running: bool) -> None:
+        with self._lock:
+            self._reanalysing = max(0, self._reanalysing + (1 if running else -1))
+
+    def _interactive(self) -> bool:
+        return self._screen in self.PLAY_SCREENS or self._screen in self.FEN_SCREENS
+
+    def reserved(self) -> int:
+        with self._lock:
+            return (
+                (self._screen in self.PLAY_SCREENS)
+                + (self._screen in self.FEN_SCREENS)
+                + self._reanalysing
+            )
+
+    def bulk_slots(self) -> int:
+        with self._lock:
+            interactive = self._interactive()
+        if not interactive:
+            return max(1, self._ceiling - self.reserved())
+        return max(1, self._cores - self.reserved())
+
+    @property
+    def cores(self) -> int:
+        return self._cores
+
+    @property
+    def ceiling(self) -> int:
+        """The most engines bulk can ever run: how many workers a sync starts."""
+        return self._ceiling
+
+
+class EngineWorker:
+    """StockfishWorker's contract on a plain thread: one engine, one job queue,
+    a generation counter instead of the _skip flag."""
+
+    def __init__(self) -> None:
+        self._jobs: queue.Queue = queue.Queue()
+        self._engine: chess.engine.SimpleEngine | None = None
+        self._path: str | None = None
+        self._configured_skill: int | None = None
+        self._generation = 0
+        self._gen_lock = threading.Lock()
+        self.ready = threading.Event()
+        self.error: str | None = None
+        threading.Thread(target=self._run, name="engine", daemon=True).start()
+
+    def start(self, path: str) -> None:
+        """Queue an engine (re)start. Clears the previous outcome first: on a
+        second attempt — the user locating a binary after a failed boot — a
+        stale `ready`/`error` would be read as the new result."""
+        self.ready.clear()
+        self.error = None
+        self._jobs.put(("init", path))
+
+    def request_move(self, fen: str, skill: int, on_move) -> None:
+        with self._gen_lock:
+            self._generation += 1
+            gen = self._generation
+        self._jobs.put(("move", (fen, skill, gen, on_move)))
+
+    def cancel(self) -> None:
+        """Discard any in-flight or queued search result."""
+        with self._gen_lock:
+            self._generation += 1
+
+    def shutdown(self) -> None:
+        self.cancel()
+        self._jobs.put(("quit", None))
+
+    # ── worker thread ─────────────────────────────────────────────────────────
+
+    def _run(self) -> None:
+        while True:
+            kind, payload = self._jobs.get()
+            if kind == "quit":
+                self._quit_engine()
+                return
+            if kind == "init":
+                self._init_engine(payload)
+            elif kind == "move":
+                self._search(*payload)
+
+    def _init_engine(self, path: str) -> None:
+        self._quit_engine()          # a re-init would otherwise orphan the old process
+        self._configured_skill = None
+        self._path = path
+        try:
+            self._engine = popen_engine(path)
+            logger.info("Stockfish ready: %s", path)
+        except Exception as exc:
+            logger.error("Stockfish init failed: %s", exc)
+            self.error = str(exc)
+        self.ready.set()
+
+    def _configure(self, skill: int) -> None:
+        if self._engine is None or skill == self._configured_skill:
+            return
+        # `Skill Level` is deliberately not sent: the engine ignores it whenever
+        # UCI_LimitStrength is on, and at the top level we want full strength.
+        elo = skill_to_elo(skill)
+        opts: dict = (
+            {"UCI_LimitStrength": True, "UCI_Elo": elo}
+            if elo is not None
+            else {"UCI_LimitStrength": False}
+        )
+        try:
+            self._engine.configure(opts)
+            self._configured_skill = skill
+        except Exception as exc:
+            logger.warning("configure error: %s", exc)
+
+    def _search(self, fen: str, skill: int, gen: int, on_move) -> None:
+        """Play one move. If the engine dies — before this, a silent `return` that left
+        the Play screen waiting forever (VAL-DEATH) — restart it, re-apply the skill
+        level and retry once; failing that, say so with `engine_error`."""
+        board = chess.Board(fen)
+        limit = chess.engine.Limit(time=ENGINE_MOVE_TIME_MS / 1000)
+        for attempt in (1, 2):
+            if self._engine is None:
+                self._fail(gen, self.error or "The engine is not running.")
+                return
+            self._configure(skill)
+            try:
+                result = self._engine.play(board, limit)
+                break
+            except ENGINE_GONE as exc:
+                code = bury(self._engine)
+                self._engine = None
+                logger.error("live engine died (exit code %s) on %s: %s", code, fen, exc)
+                if attempt == 2 or not self._restart():
+                    self._fail(gen, "The engine stopped unexpectedly and could not be "
+                                    "restarted, so it has not moved. Start a new game to "
+                                    "try again.")
+                    return
+            except Exception as exc:
+                logger.error("play error: %s", exc)
+                _emit("engine_error", {"message": str(exc)})
+                return
+        with self._gen_lock:
+            stale = gen != self._generation
+        if not stale and result.move is not None:
+            on_move(result.move)
+
+    def _restart(self) -> bool:
+        """Reopen the engine on the path it was started with; the skill level is
+        re-applied by the next `_configure`."""
+        self._configured_skill = None
+        if self._path is None:
+            return False
+        try:
+            self._engine = popen_engine(self._path)
+            logger.info("live engine restarted: %s", self._path)
+            return True
+        except Exception as exc:
+            logger.error("live engine restart failed: %s", exc)
+            self.error = str(exc)
+            return False
+
+    def _fail(self, gen: int, message: str) -> None:
+        with self._gen_lock:
+            stale = gen != self._generation
+        if not stale:
+            _emit("engine_error", {"message": message})
+
+    def _quit_engine(self) -> None:
+        if self._engine is not None:
+            try:
+                self._engine.quit()
+            except Exception:
+                pass
+            self._engine = None
+
+
+class AnalysisRunner:
+    """AnalysisWorker's contract on a plain thread: separate engine from live
+    play so the user can keep playing while a game is analysed. Results are
+    marshalled back to the app thread (which owns the DB) via post_call."""
+
+    def __init__(self, post_call, budget: EngineBudget | None = None) -> None:
+        self._jobs: queue.Queue = queue.Queue()
+        self._engine = SupervisedEngine(_analysis_engine_starter("Analysis engine"),
+                                        label="analysis engine")
+        self._cancel = False
+        self._post = post_call
+        self._budget = budget
+        threading.Thread(target=self._run, name="analysis", daemon=True).start()
+
+    def analyze_game(self, game_id: int, run_id: int, pgn: str, depth: int,
+                     openings: OpeningsBook | None, on_event) -> None:
+        self._jobs.put(("game", (game_id, run_id, pgn, depth, openings, on_event)))
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def shutdown(self) -> None:
+        self._cancel = True
+        self._jobs.put(("quit", None))
+
+    # ── worker thread ─────────────────────────────────────────────────────────
+
+    def _run(self) -> None:
+        while True:
+            kind, payload = self._jobs.get()
+            if kind == "quit":
+                self._engine.quit()
+                return
+            try:
+                if kind == "game":
+                    self._do_game(*payload)
+            except Exception as exc:
+                logger.exception("analysis job failed")
+                _emit("analysis_error", {"message": str(exc)})
+
+    def _do_game(self, game_id, run_id, pgn, depth, openings, on_event) -> None:
+        # The supervisor restarts a dead engine itself; touching `.engine` here only
+        # surfaces a missing binary before the first ply.
+        self._engine.engine
+        engine = self._engine
+        self._cancel = False  # reset at job start, as AnalysisWorker.start does
+        if self._budget is not None:
+            self._budget.reanalysis(True)
+        try:
+            for event in analyze_game_plies(
+                engine, pgn, depth, openings=openings,
+                is_cancelled=lambda: self._cancel,
+            ):
+                # bind via default arg — the app thread saves to DB and emits
+                self._post(lambda ev=event: on_event(game_id, run_id, ev))
+        finally:
+            if self._budget is not None:
+                self._budget.reanalysis(False)
+
+
+class FenAnalysisRunner:
+    """Live analysis of the one position the user is looking at.
+
+    Its own thread and its own engine, because it used to share both with whole-game
+    analysis: ask for a variation while a game is being analysed and the request sat
+    behind every remaining ply of that game. Nothing about the two jobs makes them
+    want the same queue — one is a background sweep the user is not waiting on, the
+    other is the position in front of them.
+
+    **One slot, not a queue.** A FIFO would faithfully analyse every position the
+    user stepped through on the way to the one they stopped at, each at depth 18,
+    and hand back answers for positions they had already left. Requests are
+    coalesced instead: the newest wins and a superseded search is stopped mid-flight
+    rather than run out and discarded, which is what makes stepping through a line
+    cost roughly one search instead of one per step. `review/scratch/fen_queue_cost.py`
+    measures both.
+
+    A superseded search emits nothing at all. Letting it emit and having the webview
+    filter by fen would mean the panel briefly shows the eval of a position that is
+    no longer on the board.
+
+    **Judging a Try is a second slot**, served first and *not* superseded by position
+    requests: playing the Try move puts a new position on the board, which asks for
+    live analysis at once, and in a one-slot runner that would cancel the judgement
+    it was waiting for. Only a newer judgement (or shutdown) supersedes one.
+    """
+
+    def __init__(self) -> None:
+        self._engine: chess.engine.SimpleEngine | None = None
+        self._lock = threading.Lock()
+        self._pending: tuple[int, str] | None = None
+        self._generation = 0
+        self._judge_pending: tuple[int, str, str] | None = None
+        self._judge_generation = 0
+        self._quit = False
+        self._wake = threading.Event()
+        threading.Thread(target=self._run, name="fen-analysis", daemon=True).start()
+
+    def analyze(self, fen: str) -> int:
+        """Supersede whatever is in flight with `fen`. Returns its generation."""
+        with self._lock:
+            self._generation += 1
+            gen = self._generation
+            self._pending = (gen, fen)
+        self._wake.set()
+        return gen
+
+    def superseded(self, gen: int) -> bool:
+        with self._lock:
+            return gen != self._generation
+
+    def judge(self, fen: str, uci: str) -> int:
+        """Queue a Try judgement; supersedes only an earlier judgement. Returns its token."""
+        with self._lock:
+            self._judge_generation += 1
+            token = self._judge_generation
+            self._judge_pending = (token, fen, uci)
+        self._wake.set()
+        return token
+
+    def _judge_superseded(self, token: int) -> bool:
+        with self._lock:
+            return self._quit or token != self._judge_generation
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._quit = True
+            self._generation += 1  # stops a search that is already running
+        self._wake.set()
+
+    # ── worker thread ─────────────────────────────────────────────────────────
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait()
+            with self._lock:
+                self._wake.clear()
+                if self._quit:
+                    break
+                judge = self._judge_pending
+                self._judge_pending = None
+                job = None if judge is not None else self._pending
+                if judge is None:
+                    self._pending = None
+            if judge is not None:
+                # A position request that arrived meanwhile waits for the next pass.
+                self._wake.set()
+                try:
+                    self._do_judge(*judge)
+                except Exception as exc:
+                    logger.exception("judging a try failed")
+                    _emit("move_judged", {"token": judge[0],
+                                          "error": self._failed(exc)})
+                continue
+            if job is None:
+                continue
+            try:
+                self._do_fen(*job)
+            except Exception as exc:
+                logger.exception("fen analysis failed")
+                _emit("analysis_error", {"message": self._failed(exc)})
+        if self._engine is not None:
+            try:
+                self._engine.quit()
+            except Exception:
+                pass
+            self._engine = None
+
+    def _ensure_engine(self) -> chess.engine.SimpleEngine:
+        if self._engine is None:
+            self._engine = _analysis_engine_starter("Live-analysis engine")()
+        return self._engine
+
+    def _failed(self, exc: Exception) -> str:
+        """The message for a failed request. A dead engine is replaced now, so the next
+        request works — it used to be kept, and every later request failed with
+        "engine event loop dead" until the app restarted (VAL-DEATH). The request in
+        hand is not retried: the user is looking at it and can ask again."""
+        if not is_engine_death(exc):
+            return str(exc)
+        code = bury(self._engine)
+        self._engine = None
+        try:
+            self._ensure_engine()
+            return (f"The engine stopped unexpectedly (exit code {code}) and has been "
+                    "restarted — try again.")
+        except Exception as again:
+            return f"The engine stopped unexpectedly and could not be restarted: {again}"
+
+    def _do_judge(self, token: int, fen: str, uci: str) -> None:
+        verdict = judge_try(self._ensure_engine(), fen, uci,
+                            is_cancelled=lambda: self._judge_superseded(token))
+        if verdict is None or self._judge_superseded(token):
+            return
+        _emit("move_judged", {"token": token, "fen": fen, **verdict})
+
+    def _do_fen(self, gen: int, fen: str) -> None:
+        self._ensure_engine()
+        lines = analyze_position_multipv(
+            self._engine, fen, C.ANALYSIS_DEPTH, multipv=3, pv_len=6,
+            is_cancelled=lambda: self.superseded(gen),
+        )
+        if self.superseded(gen):
+            return
+        top = lines[0] if lines else None
+        best_uci = top["uci"][0] if top and top["uci"] else None
+        cp = top["cp"] if top else None
+        mate = top["mate"] if top else None
+        _emit(
+            "fen_analyzed",
+            {"fen": fen, "bestUci": best_uci, "cp": cp, "mate": mate, "lines": lines},
+        )
+
+
+class PuzzleImportRunner:
+    """PuzzleImporter's contract on a plain thread: one-shot CSV import with
+    its own SQLite connection (via import_puzzles_csv). Progress events go
+    straight to stdout; completion is marshalled to the app thread so the
+    meta flags are written on the DB-owning thread."""
+
+    def __init__(self, post_call) -> None:
+        self._post = post_call
+        self._cancel = False
+        self._thread: threading.Thread | None = None
+
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, csv_path: Path, db_path: Path, on_done) -> None:
+        if self.running():
+            raise RuntimeError("an import is already running")
+        self._cancel = False
+        self._thread = threading.Thread(
+            target=self._run, args=(csv_path, db_path, on_done),
+            name="puzzle-import", daemon=True,
+        )
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def _run(self, csv_path: Path, db_path: Path, on_done) -> None:
+        try:
+            for event in import_puzzles_csv(
+                csv_path, db_path, is_cancelled=lambda: self._cancel,
+            ):
+                kind = event[0]
+                if kind == "progress":
+                    _emit("puzzle_import_progress", {"imported": event[1], "total": event[2]})
+                elif kind == "done":
+                    self._post(lambda count=event[1]: on_done(count))
+                elif kind == "cancelled":
+                    _emit("puzzle_import_cancelled", {})
+                elif kind == "error":
+                    _emit("puzzle_import_error", {"message": event[1]})
+        except Exception as exc:
+            logger.exception("puzzle import failed")
+            _emit("puzzle_import_error", {"message": str(exc)})
+
+
+class CoverageRunner:
+    """The lobby's _CoverageWorker on a plain thread: probes the Polyglot book
+    for every ECO entry × color and writes results on its own connection."""
+
+    def __init__(self, post_call) -> None:
+        self._post = post_call
+        self._cancel = False
+        self._thread: threading.Thread | None = None
+
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, entries: list, db_path: Path, book_path: Path, on_done) -> None:
+        if self.running():
+            return
+        self._cancel = False
+        self._thread = threading.Thread(
+            target=self._run, args=(entries, db_path, book_path, on_done),
+            name="coverage", daemon=True,
+        )
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def _run(self, entries: list, db_path: Path, book_path: Path, on_done) -> None:
+        import sqlite3
+
+        import chess.polyglot
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            reader = chess.polyglot.open_reader(str(book_path))
+            batch: list[tuple] = []
+            total = len(entries) * 2
+            done = 0
+            for eco, name, fen, _pgn in entries:
+                if self._cancel:
+                    break
+                try:
+                    board = chess.Board(fen)
+                except Exception:
+                    done += 2
+                    continue
+                for color_str, chess_color in (("white", chess.WHITE), ("black", chess.BLACK)):
+                    batch.append((eco, name, color_str, int(has_coverage(reader, board, chess_color))))
+                    done += 1
+                if len(batch) >= 200:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO opening_book_coverage"
+                        " (eco, name, color, has_moves) VALUES (?,?,?,?)",
+                        batch,
+                    )
+                    conn.commit()
+                    batch = []
+                    _emit("trainer_index_progress", {"done": done, "total": total})
+            if batch and not self._cancel:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO opening_book_coverage"
+                    " (eco, name, color, has_moves) VALUES (?,?,?,?)",
+                    batch,
+                )
+                conn.commit()
+            reader.close()
+            conn.close()
+            if not self._cancel:
+                self._post(on_done)
+        except Exception as exc:
+            logger.exception("coverage indexing failed")
+            _emit("trainer_index_error", {"message": str(exc)})
+
+
+class SyncRunner:
+    """Background platform sync on its own thread + own DB connection (the
+    PuzzleImportRunner / CoverageRunner pattern). Two phases, both resumable:
+
+      1. fetch the player's recent rated games and save the new ones (dedup by
+         external_id) — these land with no analysis_run yet;
+      2. drain the 'pending analysis' queue (every synced game lacking a run,
+         including leftovers from an interrupted earlier sync), classifying each
+         from embedded [%eval]s when coverage is high enough, else with a local
+         Stockfish search at the shallower bulk depth.
+
+    If the app closes mid-sync, the saved-but-unanalysed games are picked up by
+    games_pending_analysis() on the next run, so progress is never lost."""
+
+    def __init__(self, post_call, budget: EngineBudget | None = None) -> None:
+        self._post = post_call
+        self._cancel = False
+        self._thread: threading.Thread | None = None
+        self._budget = budget or EngineBudget()
+        self._engines: dict[int, SupervisedEngine] = {}
+        self._engines_lock = threading.Lock()
+        self._breaker = DeathBreaker()
+
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    _FETCHERS = {
+        "lichess": fetch_lichess_games,
+        "chesscom": fetch_chesscom_games,
+    }
+
+    def start(self, *, jobs: list[tuple[str, str]], usernames: list[str],
+              db_path: Path, depth: int) -> None:
+        """*jobs* is a list of (source, username) pairs, processed in order.
+        *depth* is the Stockfish search depth for games analysed locally."""
+        if self.running():
+            raise RuntimeError("a sync is already running")
+        self._cancel = False
+        self._thread = threading.Thread(
+            target=self._run, args=(jobs, usernames, db_path, depth),
+            name="sync", daemon=True,
+        )
+        self._thread.start()
+
+    def start_analyze(self, *, sources: list[str], db_path: Path, depth: int,
+                      count: int | None = None) -> None:
+        """Analyse already-synced games that still lack a satisfying run, with no
+        network fetch. Shares the running()/cancel machinery with full sync so the
+        two can never overlap on the engine or DB connection. *count* is "Analyse
+        more" in a step: the *count* most recent pending games across *sources*;
+        None is all of them (BETA-PUB Q4)."""
+        if self.running():
+            raise RuntimeError("a sync is already running")
+        self._cancel = False
+        self._thread = threading.Thread(
+            target=self._run_analyze, args=(sources, db_path, depth, count),
+            name="analyze-pending", daemon=True,
+        )
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def shutdown(self) -> None:
+        self._cancel = True
+        self._quit_engine()
+
+    # ── worker thread ─────────────────────────────────────────────────────────
+
+    def _run(self, jobs, usernames, db_path, depth) -> None:
+        db: Database | None = None
+        openings: OpeningsBook | None = None
+        try:
+            db = Database(db_path)
+            openings = OpeningsBook()
+            for source, username in jobs:
+                if self._cancel:
+                    break
+                try:
+                    new_count, analyzed = self._sync_source(
+                        db, openings, source, username, usernames, depth
+                    )
+                    _emit("sync_done",
+                          {"source": source, "new": new_count, "analyzed": analyzed})
+                except SyncError as exc:
+                    # One platform failing shouldn't abort the others.
+                    _emit("sync_error", {"source": source, "message": str(exc)})
+                except RunHalted as exc:
+                    # A failing engine fails every platform alike: stop the run.
+                    _emit("sync_error", {"source": source, "message": str(exc)})
+                    break
+            if self._cancel:
+                _emit("sync_cancelled", {})
+        except Exception as exc:
+            logger.exception("sync failed")
+            _emit("sync_error", {"source": "", "message": str(exc)})
+        finally:
+            self._quit_engine()
+            if openings is not None:
+                openings.close()
+            if db is not None:
+                db.close()
+            _emit("sync_finished", {})
+
+    @staticmethod
+    def _newest_pending(db, sources, depth, count) -> dict[str, list]:
+        """The *count* most recent pending games across *sources*, by source, each list
+        newest first. One step of "Analyse more" (BETA-PUB Q4)."""
+        merged = [rec for source in sources
+                  for rec in db.games_pending_analysis(source, depth, limit=count)]
+        merged.sort(key=lambda r: (r.played_at or "", r.id), reverse=True)
+        picked = merged[:count]
+        return {s: [r for r in picked if r.source == s] for s in sources}
+
+    def _run_analyze(self, sources, db_path, depth, count=None) -> None:
+        db: Database | None = None
+        openings: OpeningsBook | None = None
+        try:
+            db = Database(db_path)
+            openings = OpeningsBook()
+            chosen = (self._newest_pending(db, sources, depth, count)
+                      if count is not None else None)
+            for source in sources:
+                if self._cancel:
+                    break
+                if chosen is not None and not chosen[source]:
+                    continue
+                try:
+                    total = self._analyze_pending(
+                        db, openings, source, depth,
+                        records=None if chosen is None else chosen[source])
+                    _emit("sync_done", {"source": source, "new": 0, "analyzed": total})
+                except RunHalted as exc:
+                    _emit("sync_error", {"source": source, "message": str(exc)})
+                    break
+                except Exception as exc:
+                    _emit("sync_error", {"source": source, "message": str(exc)})
+            if self._cancel:
+                _emit("sync_cancelled", {})
+        except Exception as exc:
+            logger.exception("analyze-pending failed")
+            _emit("sync_error", {"source": "", "message": str(exc)})
+        finally:
+            self._quit_engine()
+            if openings is not None:
+                openings.close()
+            if db is not None:
+                db.close()
+            _emit("sync_finished", {})
+
+    def _sync_source(self, db, openings, source, username, usernames, depth):
+        fetch = self._FETCHERS.get(source)
+        if fetch is None:
+            raise SyncError(f"unknown sync source: {source}")
+
+        _emit("sync_progress",
+              {"phase": "fetching", "source": source, "done": 0, "total": 0})
+        games = fetch(username, usernames=usernames, openings=openings)
+
+        existing = db.existing_external_ids(source)
+        new_count = 0
+        for pg in games:
+            if self._cancel:
+                break
+            if pg.external_id and pg.external_id in existing:
+                continue
+            try:
+                db.save_game(
+                    played_at=pg.played_at,
+                    player_color=pg.player_color,
+                    skill_level=0,
+                    result=pg.result,
+                    termination=pg.termination,
+                    move_count=pg.move_count,
+                    pgn=pg.pgn,
+                    final_fen=pg.final_fen,
+                    opening_eco=pg.opening_eco,
+                    opening_name=pg.opening_name,
+                    source=source,
+                    external_id=pg.external_id,
+                    not_owner=pg.not_owner,
+                )
+            except AttributionPending as exc:
+                # Skipped, not guessed: it stays unsynced, so a later sync with the
+                # right handle (or after the migration) picks it up.
+                _emit("sync_warning", {"source": source,
+                                       "message": f"Skipped {_pgn_label(pg.pgn)}: {exc}"})
+                continue
+            new_count += 1
+
+        # Only the account's most recent games are analysed by a sync (BETA-PUB Q4).
+        total = self._analyze_pending(db, openings, source, depth,
+                                      recent=C.SYNC_AUTO_ANALYSE_RECENT)
+        return new_count, total
+
+    def _analyze_pending(self, db, openings, source, depth, *,
+                         recent: int | None = None, records=None) -> int:
+        """Drain the analysis queue for *source*, emitting 'analyzing' progress.
+        Shared by full sync and the standalone analyze-pending job. Returns the
+        number of games processed.
+
+        Games with embedded Lichess evals are classified here, on the sync thread.
+        The rest go to up to `EngineBudget.ceiling` worker threads, each with its own
+        single-threaded engine; worker *i* starts a game only while *i* is below
+        `bulk_slots()`, so the number searching follows the screen the user is on,
+        at game granularity — a game already started finishes. Workers only
+        *compute*: every write happens here, on this thread's connection, and a
+        game is saved whole or not at all, so a cancelled sync leaves no partial run
+        (which `games_pending_analysis` would otherwise count as done).
+
+        Engine death (VAL-DEATH): each worker's engine restarts itself and retries the
+        search it died on once. A game whose position kills it twice is recorded in
+        `engine_failures` and skipped, unsaved — still pending — and the run moves on.
+        More than `ENGINE_BREAKER_DEATHS` deaths in the last
+        `ENGINE_BREAKER_WINDOW_GAMES` games stops the run with `RunHalted`.
+
+        Newest first (BETA-PUB Q4). *recent* limits the queue to the source's *recent*
+        most recent games (a sync's automatic analysis); *records* is an explicit queue
+        ("Analyse more" in a step)."""
+        self._breaker = DeathBreaker()
+        pending = (records if records is not None
+                   else db.games_pending_analysis(source, depth, recent=recent))
+        total = len(pending)
+        done = 0
+        _emit("sync_progress",
+              {"phase": "analyzing", "source": source, "done": 0, "total": total})
+
+        def progressed() -> None:
+            nonlocal done
+            done += 1
+            _emit("sync_progress",
+                  {"phase": "analyzing", "source": source, "done": done, "total": total})
+
+        todo: queue.Queue = queue.Queue()
+        stuck: set[int] | None = None
+        for rec in pending:
+            if self._cancel:
+                return total
+            try:
+                if self._analyze_from_evals(db, openings, rec):
+                    progressed()
+                    continue
+            except Exception as exc:
+                self._skipped(source, rec, exc)
+                progressed()
+                continue
+            if stuck is None:
+                # Needs an engine version, so asked once, when the first game needs one.
+                stuck = db.needs_attention_ids(source, self._ensure_engine(0).version)
+                if stuck:
+                    _emit("sync_warning", {"source": source, "message": (
+                        f"Not analysing {len(stuck)} game(s): the engine crashed on each "
+                        f"in {C.ENGINE_POISON_MAX_ATTEMPTS} separate runs. They need "
+                        "attention (see engine_failures).")})
+            if rec.id in stuck:
+                progressed()
+                continue
+            todo.put(rec)
+        if todo.empty():
+            return total
+
+        finished: queue.Queue = queue.Queue()
+        workers = [
+            threading.Thread(target=self._worker, args=(i, todo, finished, depth),
+                             name=f"sync-engine-{i}", daemon=True)
+            for i in range(min(self._budget.ceiling, todo.qsize()))
+        ]
+        for w in workers:
+            w.start()
+        while any(w.is_alive() for w in workers) or not finished.empty():
+            try:
+                rec, analyses, (summary, final_lines), error, died = finished.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if died is not None:
+                _, ply, fen, exc = died
+                db.record_engine_failure(
+                    context="sync", fen=getattr(exc, "fen", None) or fen, message=str(exc),
+                    source=rec.source,
+                    external_id=rec.external_id, game_id=rec.id, ply=ply,
+                    exit_code=getattr(exc, "exit_code", None),
+                    engine=getattr(exc, "version", None),
+                )
+                self._skipped(source, rec, _death_message(fen, exc))
+            elif error is not None:
+                self._skipped(source, rec, error)
+            elif summary is not None:
+                try:
+                    self._save_run(db, rec.id, "Stockfish", depth, analyses, summary,
+                                   final_lines, provenance=provenance.engine_run(
+                                       engine_name=self._ensure_engine(0).version,
+                                       engine_path=find_stockfish(), depth=depth,
+                                       has_book=openings is not None and openings.has_book))
+                except IncompleteRun as exc:
+                    self._skipped(source, rec, exc)
+            else:
+                continue            # cancelled mid-game: nothing saved, still pending
+            progressed()
+        if self._breaker.tripped:
+            raise RunHalted(self._breaker.message())
+        return total
+
+    def _skipped(self, source, rec, exc) -> None:
+        # A single malformed/variant game must not abort the whole run.
+        logger.warning("analysis failed for game %s: %s", rec.id, exc)
+        _emit("sync_warning", {"source": source, "message": f"Skipped a game: {exc}"})
+
+    def _analyze_from_evals(self, db: Database, openings: OpeningsBook,
+                            rec: GameRecord) -> bool:
+        """Prefer embedded Lichess evals — no engine needed. True if it saved a run."""
+        if eval_coverage(rec.pgn) < C.SYNC_MIN_EVAL_COVERAGE:
+            return False
+        result = analyze_game_from_evals(rec.pgn, openings)
+        if result is None:
+            return False
+        analyses, summary = result
+        self._save_run(db, rec.id, "Lichess evals", 0, analyses, summary,
+                       provenance=provenance.evals_run(
+                           has_book=openings is not None and openings.has_book))
+        return True
+
+    def _worker(self, index: int, todo: queue.Queue, finished: queue.Queue,
+                depth: int) -> None:
+        """One single-threaded engine, taking games while the budget allows it."""
+        openings = OpeningsBook()
+        stopped = lambda: self._cancel or self._breaker.tripped  # noqa: E731
+        try:
+            while not stopped():
+                # Checked before the gate, not after: a worker the budget is holding
+                # back must still notice the queue has drained, or it waits for a
+                # slot forever and the sync never finishes (found by the ENG-ALLOC
+                # timing run, which hung on Review with 3 slots and 4 workers).
+                if todo.empty():
+                    return
+                if index >= self._budget.bulk_slots():
+                    time.sleep(0.25)
+                    continue
+                try:
+                    rec = todo.get_nowait()
+                except queue.Empty:
+                    return
+                analyses: list[MoveAnalysis] = []
+                summary: dict | None = None
+                error: Exception | None = None
+                died: tuple | None = None
+                final_lines: list[dict] = []
+                self._breaker.game_started()
+                try:
+                    engine = self._ensure_engine(index)
+                    for event in analyze_game_plies(
+                        engine, rec.pgn, depth, openings=openings,
+                        is_cancelled=stopped,
+                    ):
+                        if event[0] == "ply":
+                            analyses.append(event[3])
+                        elif event[0] == "done":
+                            summary, final_lines = event[1], event[2]
+                        elif event[0] == "error":
+                            error = RuntimeError(event[1])
+                        elif event[0] == "engine_died":
+                            died = event
+                except Exception as exc:
+                    error = exc
+                finished.put((rec, analyses, (summary, final_lines), error, died))
+        finally:
+            openings.close()
+
+    def _save_run(self, db: Database, game_id: int, engine_name: str, depth: int,
+                  analyses: list[MoveAnalysis], summary: dict,
+                  final_lines: list[dict] | None = None,
+                  provenance: dict | None = None) -> None:
+        run_id = db.save_analysis_run(
+            game_id=game_id, engine_name=engine_name, depth=depth, provenance=provenance,
+        )
+        white = (summary.get("white") or {}).get("accuracy")
+        black = (summary.get("black") or {}).get("accuracy")
+        try:
+            db.complete_analysis_run(
+                run_id, summary, white_accuracy=white, black_accuracy=black,
+                plies=analyses, final_lines=final_lines,
+            )
+        except IncompleteRun:
+            db.discard_analysis_run(run_id)
+            raise
+
+    def _ensure_engine(self, index: int = 0) -> SupervisedEngine:
+        with self._engines_lock:
+            engine = self._engines.get(index)
+            if engine is None:
+                engine = SupervisedEngine(
+                    _analysis_engine_starter(f"Sync engine {index}"),
+                    label=f"sync engine {index}")
+                self._engines[index] = engine
+        # Every death counts toward this run's breaker, recovered or not.
+        engine.set_on_death(self._breaker.death)
+        engine.engine           # surfaces a missing binary as this game's error
+        return engine
+
+    def _quit_engine(self) -> None:
+        with self._engines_lock:
+            engines, self._engines = list(self._engines.values()), {}
+        for engine in engines:
+            try:
+                engine.quit()
+            except Exception:
+                pass
+
+
+class InsightsRunner:
+    """Builds the Insights aggregate off the dispatch thread.
+
+    build_insights() scans every analysed ply and takes ~11 s on a real
+    database. Run inline it blocks the single request loop, so the whole app —
+    board, navigation, every other RPC — stops responding for the duration.
+
+    Replies are written straight from this thread; _send holds the stdout lock,
+    so frames never interleave. The DB connection is opened here rather than
+    shared: sqlite3 connections are check_same_thread=True.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
+        self._jobs: queue.Queue = queue.Queue()
+        self._db: Database | None = None
+        self._generation = 0
+        self._gen_lock = threading.Lock()
+        self._stopping = False
+        self.closed = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="insights", daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self, req_id, params: dict) -> None:
+        with self._gen_lock:
+            self._generation += 1
+            gen = self._generation
+        self._jobs.put((req_id, params, gen))
+
+    def shutdown(self, timeout: float = 1.0) -> None:
+        """Stop the worker and close its connection.
+
+        The join timeout is what actually bounds exit: profiling shows the build
+        is mostly Python rather than SQLite, so interrupt() usually
+        lands between queries and does nothing. It is still worth calling for the
+        case where we are inside a long scan. Past the timeout we give up and let
+        the daemon thread die with the process — the connection is read-only, so
+        abandoning it cannot lose or corrupt anything.
+        """
+        if self.closed.is_set():
+            return
+        self._stopping = True
+        self._jobs.put((None, None, 0))
+        db = self._db
+        if db is not None:
+            try:
+                db.interrupt()
+            except sqlite3.ProgrammingError:
+                pass  # the worker closed it between the read and the call
+        self._thread.join(timeout)
+
+    def _stale(self, gen: int) -> bool:
+        with self._gen_lock:
+            return gen != self._generation
+
+    def _run(self) -> None:
+        try:
+            while True:
+                req_id, params, gen = self._jobs.get()
+                if params is None:
+                    return
+                if self._stale(gen):
+                    # A newer request landed while this one sat in the queue.
+                    # Skip the build — but still reply, or the frontend's pending
+                    # promise never settles.
+                    _reply(req_id, {"superseded": True})
+                    continue
+                self._build(req_id, params)
+        finally:
+            if self._db is not None:
+                self._db.close()
+                self._db = None
+            self.closed.set()
+
+    def _build(self, req_id, params: dict) -> None:
+        try:
+            if self._db is None:
+                self._db = Database(self._db_path, read_only=True)
+            with self._db.snapshot():
+                result = build_insights(self._db, **params)
+        except Exception as exc:
+            if self._stopping:
+                return  # interrupted by shutdown; nobody is listening
+            logger.exception("insights build failed")
+            _reply_error(req_id, str(exc))
+            return
+        _reply(req_id, result)
+
+
+def _ma_dict(ma: MoveAnalysis) -> dict:
+    return {
+        "ply": ma.ply,
+        "playedUci": ma.played_uci,
+        "bestUci": ma.best_uci or None,
+        "pvUci": ma.pv_uci,
+        "scoreBeforeCp": ma.score_before_cp,
+        "scoreBeforeMate": ma.score_before_mate,
+        "scoreAfterCp": ma.score_after_cp,
+        "scoreAfterMate": ma.score_after_mate,
+        "classification": ma.classification,
+        "isBook": ma.is_book,
+        "lines": ma.lines,
+    }
+
+
+def _parse_elo(raw: str | None) -> int | None:
+    """PGN Elo headers are strings; platform games use a number, unrated games
+    often use '?' or omit the tag. Returns the int rating or None."""
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _game_names(pgn: str | None) -> tuple[str | None, str | None, int | None, int | None]:
+    """Cheaply read the White/Black names and Elos from a stored PGN (header
+    block only, no move parse). Each field is None if absent or unparseable."""
+    if not pgn:
+        return None, None, None, None
+    try:
+        headers = chess.pgn.read_headers(io.StringIO(pgn))
+    except Exception:
+        return None, None, None, None
+    if headers is None:
+        return None, None, None, None
+    white = headers.get("White") or None
+    black = headers.get("Black") or None
+    white_elo = _parse_elo(headers.get("WhiteElo"))
+    black_elo = _parse_elo(headers.get("BlackElo"))
+    return white, black, white_elo, black_elo
+
+
+def _game_dict(rec: GameRecord) -> dict:
+    white, black, white_elo, black_elo = _game_names(rec.pgn)
+    return {
+        "id": rec.id,
+        "playedAt": rec.played_at,
+        "playerColor": rec.player_color,
+        "skillLevel": rec.skill_level,
+        "ladderVersion": rec.ladder_version,
+        "result": rec.result,
+        "termination": rec.termination,
+        "moveCount": rec.move_count,
+        "openingEco": rec.opening_eco,
+        "openingName": rec.opening_name,
+        "source": rec.source,
+        "externalId": rec.external_id,
+        "speed": rec.speed,
+        "rated": rated_from_pgn(rec.pgn),
+        "white": white,
+        "black": black,
+        "whiteElo": white_elo,
+        "blackElo": black_elo,
+    }
+
+
+# Methods that reply from a worker thread instead of returning a result.
+# _handle_request passes req_id through and does not reply on their behalf.
+_DEFERRED_METHODS = {"insights"}
+
+
+class RelabelRunner:
+    """Relabel on update (BETA item 5): on open, runs an older classifier labelled are
+    relabelled from their stored rows (`core/relabel.py`) on this thread, after a verified
+    backup, with `relabel_progress` / `relabel_done` / `relabel_error` events. Its own
+    connection, one transaction per run, so the app stays usable while it works.
+
+    Only in the packaged app, or with `ZUGZWANG_AUTO_RELABEL=1`: the owner's database is
+    relabelled by hand with the stage-6 tool and its approval checks, so a dev run only
+    reports stale runs (state `manual`) and changes nothing."""
+
+    def __init__(self) -> None:
+        self.state = "idle"     # idle | manual | running | done | error
+        self.done = 0
+        self.total = 0
+        self.result: dict | None = None
+        self.error: str | None = None
+        self._cancel = False
+        self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def enabled() -> bool:
+        return C.FROZEN or os.environ.get("ZUGZWANG_AUTO_RELABEL") == "1"
+
+    def check(self, db_path: Path) -> None:
+        from zugzwang.core import relabel
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            stale = relabel.stale_run_ids(con)
+        finally:
+            con.close()
+        if not stale:
+            return
+        self.total = len(stale)
+        if not self.enabled():
+            self.state = "manual"
+            logger.warning("%d complete runs carry an older classifier version; relabel "
+                           "them with review/baselines/cls_v3_relabel.py (auto-relabel is "
+                           "for the packaged app)", len(stale))
+            return
+        self.state = "running"
+        _emit("relabel_progress", {"done": 0, "total": self.total, "phase": "backup"})
+        self._thread = threading.Thread(target=self._run, args=(db_path,),
+                                        name="relabel", daemon=True)
+        self._thread.start()
+
+    def _run(self, db_path: Path) -> None:
+        from zugzwang.core import relabel
+        t0 = time.monotonic()
+
+        def progress(i: int, n: int) -> None:
+            self.done, self.total = i, n
+            if i == n or i % 10 == 0:
+                _emit("relabel_progress", {"done": i, "total": n, "phase": "relabel"})
+
+        try:
+            out = relabel.relabel_stale(db_path, progress=progress,
+                                        cancelled=lambda: self._cancel)
+        except Exception as exc:
+            logger.exception("relabel on update failed")
+            self.state, self.error = "error", str(exc)
+            _emit("relabel_error", {"message": str(exc)})
+            return
+        out["seconds"] = round(time.monotonic() - t0, 1)
+        self.result = out
+        self.state = "done" if out["integrity"] == "ok" and not out["unstamped"] else "error"
+        if self.state == "error":
+            self.error = (f"relabel incomplete: integrity {out['integrity']}, "
+                          f"{out['unstamped']} runs left")
+        logger.info("relabel on update: %s", out)
+        _emit("relabel_done" if self.state == "done" else "relabel_error",
+              {**out, "message": self.error})
+
+    def status(self) -> dict:
+        return {"state": self.state, "done": self.done, "total": self.total,
+                "result": self.result, "error": self.error}
+
+    def shutdown(self) -> None:
+        self._cancel = True
+        if self._thread is not None:
+            self._thread.join(timeout=10)
+
+
+class Server:
+    """Runs on the app thread; everything that touches the session or the DB
+    goes through the inbox."""
+
+    def __init__(self) -> None:
+        self._inbox: queue.Queue = queue.Queue()
+        self._engine = EngineWorker()
+        self._budget = EngineBudget()
+        self._analysis = AnalysisRunner(self.post_call, self._budget)
+        self._live = FenAnalysisRunner()
+        self._importer = PuzzleImportRunner(self.post_call)
+        self._coverage = CoverageRunner(self.post_call)
+        self._sync = SyncRunner(self.post_call, self._budget)
+        self._insights: InsightsRunner | None = None  # created in _boot, needs db_path
+        self._relabel = RelabelRunner()
+        self._openings: OpeningsBook | None = None
+        self._db: Database | None = None
+        self._db_path: Path | None = None
+        self._session: GameSession | None = None
+        self._skill = SKILL_DEFAULT
+        self._running = True
+
+    # ── app-thread loop ───────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        self._boot()
+        while self._running:
+            kind, payload = self._inbox.get()
+            if kind == "request":
+                self._handle_request(payload)
+            elif kind == "call":
+                try:
+                    payload()
+                except Exception:
+                    logger.exception("queued call failed")
+            elif kind == "stop":
+                self._running = False
+        self._engine.shutdown()
+        self._analysis.shutdown()
+        self._live.shutdown()
+        self._sync.shutdown()
+        self._relabel.shutdown()
+        if self._insights:
+            self._insights.shutdown()
+        if self._openings:
+            self._openings.close()
+        if self._db:
+            self._db.close()
+        logger.info("sidecar stopped")
+
+    def post_request(self, req: dict) -> None:
+        self._inbox.put(("request", req))
+
+    def post_call(self, fn) -> None:
+        self._inbox.put(("call", fn))
+
+    def post_stop(self) -> None:
+        self._inbox.put(("stop", None))
+
+    def _boot(self) -> None:
+        db_path = Path(os.environ.get("ZUGZWANG_DB", DB_PATH))
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
+        self._db = Database(db_path)
+        self._insights = InsightsRunner(db_path)
+        # After the migrations (Database() ran them), before anything reads labels.
+        try:
+            self._relabel.check(db_path)
+        except Exception:
+            logger.exception("relabel check failed")
+        # Before the engine, and unconditionally: nothing the book feeds —
+        # opening labels, the whole trainer — needs Stockfish, so gating it on
+        # the engine would take the trainer down with a missing binary.
+        self._openings = OpeningsBook()
+        self._start_engine(find_stockfish())
+
+    def _start_engine(self, sf_path: Path | None) -> bool:
+        """Bring the engine up and announce the outcome as `ready`.
+
+        Shared by boot and `set_stockfish_path`, so a user who locates the binary
+        after a failed boot lands in the state a successful boot would have left.
+        """
+        if sf_path is None:
+            logger.warning("engine not found")
+            _emit("ready", {"ok": False, "error": "Stockfish not found"})
+            return False
+        self._engine.start(str(sf_path))
+        self._engine.ready.wait(timeout=15)
+        ok = self._engine.error is None
+        # The launch check (packaging/launch_check.py) and a tester's log both read this.
+        if ok:
+            logger.info("engine ready: %s", sf_path)
+        else:
+            logger.warning("engine failed to start: %s (%s)", sf_path, self._engine.error)
+        _emit("ready", {
+            "ok": ok,
+            "error": self._engine.error,
+            "protocol": PROTOCOL_VERSION,
+            "stockfish": str(sf_path),
+        })
+        return ok
+
+    # ── dispatch ──────────────────────────────────────────────────────────────
+
+    def _handle_request(self, req: dict) -> None:
+        req_id = req.get("id")
+        method = req.get("method", "")
+        params = req.get("params") or {}
+        handler = getattr(self, f"rpc_{method}", None)
+        if handler is None:
+            _reply_error(req_id, f"unknown method: {method}")
+            return
+        try:
+            if method in _DEFERRED_METHODS:
+                handler(req_id, **params)  # replies from its own thread
+            else:
+                _reply(req_id, handler(**params))
+        except Exception as exc:
+            logger.exception("error in %s", method)
+            _reply_error(req_id, str(exc))
+
+    # ── methods ───────────────────────────────────────────────────────────────
+
+    def rpc_ping(self) -> dict:
+        return {"pong": True, "protocol": PROTOCOL_VERSION}
+
+    def rpc_app_info(self) -> dict:
+        """What this build is and where it keeps things (BETA items 2 and 4): the
+        Settings "About this build" card and the "flag this" record read it."""
+        from zugzwang.build_info import info
+        from zugzwang.core.classification import CLASSIFIER_VERSION
+        b = info()
+        sf = find_stockfish()
+        return {
+            "version": b["version"], "beta": b["beta"], "commit": b["commit"],
+            "builtAt": b["built_at"], "target": b["target"], "frozen": C.FROZEN,
+            "dataDir": str(self._db_path.parent if self._db_path else C.USER_DIR),
+            "dbPath": str(self._db_path) if self._db_path else None,
+            "logPath": str(_log_path()),
+            "flagsPath": str(self._flags_path()),
+            "flagsDir": str(self._flags_dir_ready()),
+            "classifierVersion": CLASSIFIER_VERSION, "ruleVersion": RULE_VERSION,
+            "stockfish": str(sf) if sf else None,
+            "stockfishSource": C.STOCKFISH_SOURCE_URL,
+            "source": C.source_url(b["version"]),
+            "licence": "GPL-3.0-or-later",
+        }
+
+    def rpc_relabel_status(self) -> dict:
+        """Relabel on update (BETA item 5): idle | manual | running | done | error."""
+        return self._relabel.status()
+
+    # ── "flag this" (BETA item 4) ─────────────────────────────────────────────
+
+    def _flags_path(self) -> Path:
+        base = self._db_path.parent if self._db_path else C.USER_DIR
+        return base / "flags" / "zugzwang-flags.jsonl"
+
+    def _flags_dir_ready(self) -> Path:
+        """The flags folder, created so "Show in folder" has something to reveal."""
+        d = self._flags_path().parent
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return d
+
+    def rpc_flag_item(self, kind: str, shown: str, note: str = "",
+                      game_id: int | None = None, ply: int | None = None,
+                      label: str | None = None, context: str | None = None) -> dict:
+        """Append one tester flag to `<data>/flags/zugzwang-flags.jsonl` and return its path.
+
+        Keyed the house way (platform game id + ply, CLAUDE.md "Measurement house rule"),
+        so the owner can find the ply whatever the tester's database ids are. Written
+        locally only: nothing is sent anywhere (BETA scope 4). `kind` is what was flagged
+        — label, claim, description, report line, report moment — and `shown` the exact
+        text on screen."""
+        from zugzwang.build_info import info
+        from zugzwang.core.classification import CLASSIFIER_VERSION
+        kind = str(kind or "").strip()[:40]
+        shown = str(shown or "").strip()
+        if not kind or not shown:
+            raise RuntimeError("Nothing to flag.")
+        rec: dict = {
+            "flagged_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "kind": kind, "shown": shown[:2000], "label": label,
+            "note": " ".join(str(note or "").split())[:500],
+            "context": context,
+            "app_version": info()["version"], "build_commit": info()["commit"],
+            "classifier_version_app": CLASSIFIER_VERSION, "rule_version": RULE_VERSION,
+            "source": None, "platform_game_id": None, "game_id": game_id,
+            "ply": ply, "move": None, "fen_before": None, "played_uci": None,
+            "run_classifier_version": None, "run_depth": None,
+        }
+        if game_id is not None and self._db is not None:
+            g = self._db.get_game(int(game_id))
+            if g is not None:
+                rec["source"] = g.source
+                rec["platform_game_id"] = g.external_id
+                rec["played_at"] = g.played_at
+                rec["white"], rec["black"], _, _ = _game_names(g.pgn)
+            run = self._db.load_latest_run(int(game_id))
+            if run is not None:
+                row = self._db._conn.execute(
+                    "SELECT classifier_version, depth FROM analysis_runs WHERE id=?",
+                    (run.id,)).fetchone()
+                if row is not None:
+                    rec["run_classifier_version"], rec["run_depth"] = row[0], row[1]
+                if ply is not None:
+                    ma = next((m for m in self._db.load_move_analyses(run.id)
+                               if m.ply == int(ply)), None)
+                    if ma is not None:
+                        rec["fen_before"], rec["played_uci"] = ma.fen_before, ma.played_uci
+                        rec["move"] = f"{int(ply) // 2 + 1}{'.' if int(ply) % 2 == 0 else '...'}"
+        path = self._flags_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with path.open(encoding="utf-8") as fh:
+            count = sum(1 for line in fh if line.strip())
+        logger.info("flag saved: %s ply %s (%s)", rec["platform_game_id"], ply, kind)
+        return {"path": str(path), "count": count}
+
+    def rpc_set_active_screen(self, screen: str | None = None) -> dict:
+        """The screen the user is looking at, so the engine budget reserves live play
+        and the FEN path only while their screens are open (ENG-ALLOC)."""
+        self._budget.set_screen(screen)
+        return {"screen": screen, "bulkSlots": self._budget.bulk_slots(),
+                "cores": self._budget.cores, "ceiling": self._budget.ceiling}
+
+    def rpc_engine_status(self) -> dict:
+        """Where Stockfish was resolved from, for the settings screen. Recomputed
+        rather than cached because `set_stockfish_path` can change the answer."""
+        path = find_stockfish()
+        return {"ok": path is not None, "path": None if path is None else str(path)}
+
+    def rpc_set_stockfish_path(self, path: str) -> dict:
+        """Adopt a user-picked Stockfish binary, persist it, and re-announce `ready`.
+
+        Validation is a real UCI handshake, not an executable-bit check as the
+        PyQt picker does: the mistake worth catching is picking the wrong
+        *program*, and only starting it can tell that from a working engine. The
+        handshake runs on a throwaway process so a rejected pick leaves the
+        currently-running engine, if any, untouched.
+        """
+        p = Path(path).expanduser()
+        try:
+            probe = popen_engine(p)
+        except Exception as exc:
+            raise RuntimeError(f"Not a usable UCI engine: {exc}") from exc
+        name = probe.id.get("name", "")
+        probe.quit()
+        # Persisted before the restart so the choice survives even if starting
+        # the real engine then fails for an unrelated reason.
+        persist_path(p)
+        ok = self._start_engine(p)
+        return {"ok": ok, "path": str(p), "name": name}
+
+    def rpc_new_game(self, color: str = "white", skill: int = SKILL_DEFAULT,
+                     fen: str | None = None) -> dict:
+        self._engine.cancel()
+        player_color = chess.WHITE if color == "white" else chess.BLACK
+        self._skill = skill
+        self._session = GameSession(
+            player_color, skill, openings=self._openings, starting_fen=fen,
+        )
+        self._session.set_opening_listener(
+            lambda eco, name: _emit("opening", {"eco": eco, "name": name})
+        )
+        engine_to_move = not self._session.is_player_turn()
+        if engine_to_move:
+            self._request_engine_move()
+        return {"fen": self._session.board.fen(), "engineToMove": engine_to_move}
+
+    def rpc_user_move(self, uci: str) -> dict:
+        session = self._require_session()
+        move = chess.Move.from_uci(uci)
+        if move not in session.board.legal_moves:
+            return {"ok": False, "fen": session.board.fen()}
+        san = session.board.san(move)
+        end = session.push(move)
+        if end is None:
+            self._request_engine_move()
+        return {"ok": True, "san": san, "fen": session.board.fen(),
+                "end": self._finish(end)}
+
+    def rpc_resign(self) -> dict:
+        session = self._require_session()
+        self._engine.cancel()
+        return {"end": self._finish(session.resign())}
+
+    def rpc_draw(self) -> dict:
+        session = self._require_session()
+        self._engine.cancel()
+        return {"end": self._finish(session.draw_agreed())}
+
+    def rpc_flag(self, loser: str) -> dict:
+        """A clock hit zero. The frontend owns clock timing (as the Qt UI did);
+        the sidecar finalizes and saves the result."""
+        session = self._require_session()
+        self._engine.cancel()
+        result = "0-1" if loser == "white" else "1-0"
+        end = session._finalize("timeout", result)
+        return {"end": self._finish(end)}
+
+    def rpc_abandon(self) -> dict:
+        session = self._require_session()
+        self._engine.cancel()
+        return {"end": self._finish(session.abandon())}
+
+    def rpc_get_state(self) -> dict:
+        session = self._session
+        if session is None:
+            return {"active": False}
+        return {
+            "active": not session.over,
+            "fen": session.board.fen(),
+            "playerColor": "white" if session.player_color == chess.WHITE else "black",
+            "skill": session.skill_level,
+        }
+
+    # ── games / review ────────────────────────────────────────────────────────
+
+    def rpc_list_games(self, limit: int | None = None) -> dict:
+        games = []
+        for rec, run in self._db.list_games_with_runs(limit):
+            d = _game_dict(rec)
+            d["whiteAccuracy"] = run.white_accuracy if run else None
+            d["blackAccuracy"] = run.black_accuracy if run else None
+            d["analyzed"] = run is not None
+            games.append(d)
+        return {"games": games}
+
+    def rpc_get_game(self, game_id: int) -> dict:
+        rec = self._db.get_game(game_id)
+        if rec is None:
+            raise RuntimeError(f"no game with id {game_id}")
+        game = chess.pgn.read_game(io.StringIO(rec.pgn))
+        if game is None:
+            raise RuntimeError("stored PGN could not be parsed")
+
+        board = game.board()
+        start_fen = board.fen()
+        plies = []
+        last_opening: tuple[str, str] | None = None
+        for move in game.mainline_moves():
+            uci = move.uci()
+            san = board.san(move)
+            board.push(move)
+            if self._openings is not None:
+                found = self._openings.name_after(board)
+                if found is not None:
+                    last_opening = found
+            plies.append({
+                "san": san,
+                "uci": uci,
+                "fen": board.fen(),
+                "check": board.is_check(),
+                "opening": (
+                    {"eco": last_opening[0], "name": last_opening[1]}
+                    if last_opening else None
+                ),
+            })
+
+        out = _game_dict(rec)
+        out["startFen"] = start_fen
+        out["plies"] = plies
+        out["white"] = game.headers.get("White", "White")
+        out["black"] = game.headers.get("Black", "Black")
+
+        run = self._db.load_latest_run(rec.id)
+        if run is not None:
+            analyses = self._db.load_move_analyses(run.id)
+            out["analysis"] = {
+                "depth": run.depth,
+                "whiteAccuracy": run.white_accuracy,
+                "blackAccuracy": run.black_accuracy,
+                "summary": json.loads(run.payload_json or "{}"),
+                "moves": [_ma_dict(ma) for ma in analyses],
+            }
+        else:
+            out["analysis"] = None
+        return out
+
+    def rpc_explain_move(self, game_id: int, ply: int) -> dict:
+        """Structured findings plus rendered sentences for one analysed ply.
+
+        Reads the stored row rather than taking the position from the caller. The
+        frontend has `fen` and `playedUci` already and could pass them, but then the
+        frontend would be assembling the rule layer's inputs — and an omitted engine
+        score there is silent, not an error. See `explain_stored_ply`.
+
+        No engine, no network, no state. Cheap enough to serve on demand; see
+        `review/scratch/explain_rpc_cost.py` for the measurement behind that.
+
+        The game is loaded for one field, `player_color`, which decides whether a
+        sentence about the played move addresses the reader or names the side. The
+        stored ply does not carry it.
+        """
+        run = self._db.load_latest_run(game_id)
+        if run is None:
+            return {"ply": ply, "findings": [], "sentences": [], "analysed": False}
+        by_ply = {ma.ply: ma for ma in self._db.load_move_analyses(run.id)}
+        match = by_ply.get(ply)
+        if match is None:
+            return {"ply": ply, "findings": [], "sentences": [], "analysed": False}
+        rec = self._db.get_game(game_id)
+        # The rest of the run: an ignored threat repeated move after move is said in
+        # full once, where the lesson is, then "still hanging" (EXPLANATIONS.md); the
+        # next ply's line is this move's refutation (stage 2); D1/D3 remember the game.
+        rows = {p: {**stored_ply_row(ma), "pv_uci": ma.pv_uci, "lines": ma.lines,
+                    "hard_only_move": ma.hard_only_move}
+                for p, ma in by_ply.items()}
+        full = explain_ply_full(
+            rows, ply,
+            # A game whose side is unknown names both players (O5).
+            (rec.player_color or UNKNOWN_SIDE) if rec is not None else None,
+            final_lines=run.final_lines,
+        )
+        return {
+            "ply": ply,
+            "findings": [f.to_dict() for f in full.findings],
+            # Unchanged: the rule layer's sentences only (layer 5).
+            "sentences": full.sentences,
+            # Layer 5: claims and descriptions in separate arrays, never joined. A claim
+            # from the engine's line passed gate P; a description carries no causation.
+            # What the Review callout shows: the engine-line claim where there is one
+            # (reversed precedence, owner 2026-11-09, provisional), else the rule sentences.
+            "claims": [{"type": "claim", "source": src, "text": t,
+                        **({"line": list(full.pv_claim_line)} if src == "engine_line" else {})}
+                       for src, t in full.shown_claims],
+            "descriptions": [{"type": "description", "descriptor": k, "text": str(t)}
+                             for k, t in full.descriptions],
+            "bestSan": full.best_san,
+            "analysed": True,
+            "ruleVersion": RULE_VERSION,
+        }
+
+    def rpc_game_report(self, game_id: int) -> dict:
+        """The game report: moments, point of no return, ending, what it cost.
+
+        Engine-free and computed on every call from the stored run; see
+        `core/game_report.py` and GAME_REPORT.md. The game length comes from the
+        PGN, not `games.move_count`, because a run shorter than the game (W12)
+        has to be detected, and that comparison needs the true ply count.
+        """
+        rec = self._db.get_game(game_id)
+        if rec is None:
+            raise RuntimeError(f"no game with id {game_id}")
+        game = chess.pgn.read_game(io.StringIO(rec.pgn))
+        nodes = list(game.mainline()) if game is not None else []
+        # (fen before, uci) per move, for the opening line — which needs the book,
+        # not the engine, so an unanalysed game still gets it.
+        pgn_moves = []
+        board = game.board() if game is not None else None
+        for n in nodes:   # one walk: `node.board()` replays from the root each call
+            pgn_moves.append((board.fen(), n.move.uci()))
+            board.push(n.move)
+        book = getattr(self, "_openings", None)
+        run = self._db.load_latest_run(game_id)
+        if run is None:
+            op = opening_exit(pgn_moves, book)
+            return {
+                "analysed": False,
+                "opening": op,
+                "lines": [opening_sentence(op, rec.player_color, None)] if op else [],
+            }
+        return build_report(
+            self._db.load_move_analyses(run.id),
+            game_plies=len(nodes),
+            result=rec.result,
+            termination=rec.termination,
+            player_color=rec.player_color,
+            depth=run.depth,
+            clocks=[n.clock() for n in nodes],
+            time_control=game.headers.get("TimeControl") if game is not None else None,
+            pgn_moves=pgn_moves,
+            book=book,
+            final_lines=run.final_lines,
+        )
+
+    def rpc_analyze_game(self, game_id: int, depth: int | None = None) -> dict:
+        rec = self._db.get_game(game_id)
+        if rec is None:
+            raise RuntimeError(f"no game with id {game_id}")
+        depth = depth or C.ANALYSIS_DEPTH
+        self._analysis.cancel()  # stop any in-flight run first
+        run_id = self._db.save_analysis_run(
+            game_id=game_id, engine_name="Stockfish", depth=depth,
+            provenance=provenance.engine_run(
+                engine_name=self._live_engine_version() or self._analysis_engine_version(),
+                engine_path=find_stockfish(), depth=depth,
+                has_book=self._openings is not None and self._openings.has_book),
+        )
+        self._analysis.analyze_game(
+            game_id, run_id, rec.pgn, depth, self._openings, self._on_analysis_event,
+        )
+        return {"runId": run_id, "depth": depth}
+
+    def rpc_cancel_analysis(self) -> dict:
+        self._analysis.cancel()
+        return {"ok": True}
+
+    def _on_analysis_event(self, game_id: int, run_id: int, event: tuple) -> None:
+        """Runs on the app thread: persist then emit, mirroring
+        MainWindow._on_ply_analyzed / _on_analysis_finished."""
+        kind = event[0]
+        if kind == "ply":
+            _, ply, total, ma = event
+            self._db.save_move_analysis(run_id, ma)
+            _emit("analysis_ply", {
+                "gameId": game_id, "ply": ply, "total": total,
+                "analysis": _ma_dict(ma),
+            })
+        elif kind == "done":
+            summary = event[1]
+            white_acc = (summary.get("white") or {}).get("accuracy")
+            black_acc = (summary.get("black") or {}).get("accuracy")
+            try:
+                # The run becomes the game's analysis only here, whole (VAL-DEATH).
+                self._db.complete_analysis_run(
+                    run_id, summary, white_accuracy=white_acc, black_accuracy=black_acc,
+                    final_lines=event[2],
+                )
+            except IncompleteRun as exc:
+                _emit("analysis_error", {"gameId": game_id, "message": str(exc)})
+                return
+            _emit("analysis_done", {
+                "gameId": game_id, "summary": summary,
+                "whiteAccuracy": white_acc, "blackAccuracy": black_acc,
+            })
+        elif kind == "cancelled":
+            _emit("analysis_cancelled", {"gameId": game_id})
+        elif kind == "error":
+            _emit("analysis_error", {"message": event[1]})
+        elif kind == "engine_died":
+            # The run stays incomplete — never shown, never counted — and the game's
+            # previous analysis, if it had one, is untouched.
+            _, ply, fen, exc = event
+            message = _death_message(fen, exc)
+            rec = self._db.get_game(game_id)
+            self._db.record_engine_failure(
+                context="reanalyse", fen=getattr(exc, "fen", None) or fen, message=str(exc),
+                source=rec.source if rec else None,
+                external_id=rec.external_id if rec else None,
+                game_id=game_id, ply=ply, exit_code=getattr(exc, "exit_code", None),
+                engine=getattr(exc, "version", None) or self._analysis_engine_version(),
+            )
+            _emit("analysis_error", {"gameId": game_id, "message": message})
+
+    def _live_engine_version(self) -> str | None:
+        """The binary's version as the running live engine reports it — the same
+        binary every analysis engine resolves to."""
+        engine = getattr(getattr(self, "_engine", None), "_engine", None)
+        return engine.id.get("name") if engine is not None else None
+
+    def _analysis_engine_version(self) -> str | None:
+        return self._analysis._engine.version
+
+    def rpc_import_pgn(self, pgn: str = "", usernames: list | None = None,
+                       path: str | None = None) -> dict:
+        """Import every game in the PGN (Gap A), detecting the user's colour
+        from the White/Black headers via *usernames* (Gap B).
+
+        *path* is the file-picker route and takes precedence over *pgn*. The file
+        is read here rather than in the webview because an archive export runs to
+        tens of megabytes, and sending that through the NDJSON pipe would mean
+        holding three copies of it (JS string, JSON encoding, Python string) to
+        move a file the sidecar can open directly.
+
+        Reports per game. The single catch-all this replaces fired only when
+        *nothing* parsed, which meant the worse case said nothing at all: a game
+        python-chess gave up partway through was stored truncated and counted as a
+        success.
+        """
+        if path:
+            p = Path(path).expanduser()
+            try:
+                pgn = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise RuntimeError(f"Could not read {p.name}: {exc}") from exc
+        report = parse_pgn_report(
+            pgn, usernames=usernames or [], openings=self._openings,
+        )
+        parsed = report.games
+        if not parsed:
+            # There is no way to say "this isn't a PGN": python-chess returns a
+            # game with default headers and no moves for *any* non-empty text, so
+            # a paste of prose and a file of aborted games are literally the same
+            # parse. Hence one message that covers both causes rather than a
+            # confident guess between them.
+            n = len(report.issues)
+            raise RuntimeError(
+                f"Found {n} game(s) in the PGN but none had any moves — the games "
+                "may be aborted, or this may not be PGN at all."
+                if n
+                else "Nothing to import — the PGN is empty."
+            )
+
+        game_ids: list[int] = []
+        refused: list[dict] = []
+        # The platform game id is stored (FIXPLAN IMPORT-EXTID), so a game already in
+        # the library — synced, or imported before, or twice in this file — is skipped
+        # and reported, not duplicated. Games 32, 42 and 278 were such duplicates.
+        known = self._db.all_external_ids()
+        for n, pg in enumerate(parsed):
+            if pg.external_id and pg.external_id in known:
+                refused.append({"index": n, "label": _pgn_label(pg.pgn),
+                                "reason": f"already in your library (game {pg.external_id})",
+                                "imported": False})
+                continue
+            try:
+                game_ids.append(self._db.save_game(
+                    played_at=pg.played_at,
+                    player_color=pg.player_color,
+                    skill_level=0,
+                    result=pg.result,
+                    termination=pg.termination,
+                    move_count=pg.move_count,
+                    pgn=pg.pgn,
+                    final_fen=pg.final_fen,
+                    opening_eco=pg.opening_eco,
+                    opening_name=pg.opening_name,
+                    source="imported",
+                    external_id=pg.external_id,
+                    not_owner=pg.not_owner,
+                ))
+                if pg.external_id:
+                    known.add(pg.external_id)
+            except AttributionPending as exc:
+                # Per game, not per file: one game nobody can attribute must not
+                # abort the rest, and must not be stored under a guessed colour.
+                refused.append({"index": n, "label": _pgn_label(pg.pgn),
+                                "reason": str(exc), "imported": False})
+        if not game_ids:
+            raise RuntimeError(refused[0]["reason"] if refused else "Nothing imported.")
+        # gameId kept for back-compat (first game); gameIds is the full list.
+        return {
+            "gameId": game_ids[0],
+            "gameIds": game_ids,
+            "count": len(game_ids),
+            "issues": [
+                {
+                    "index": i.index,
+                    "label": i.label,
+                    "reason": i.reason,
+                    "imported": i.imported,
+                }
+                for i in report.issues
+            ] + refused,
+        }
+
+    def rpc_analyze_fen(self, fen: str) -> dict:
+        legal_board(fen)  # legality, not just syntax, before an engine sees it (VAL-FEN)
+        self._live.analyze(fen)
+        return {"ok": True}
+
+    def rpc_judge_move(self, fen: str, uci: str) -> dict:
+        """Judge a move played from a game-report moment ("Try it"), on the live
+        engine; the verdict arrives as a `move_judged` event carrying this token.
+        See `core/retry.py` — the judge errs toward accepting."""
+        board = legal_board(fen)
+        if chess.Move.from_uci(uci) not in board.legal_moves:
+            raise RuntimeError(f"{uci} is not legal here")
+        return {"token": self._live.judge(fen, uci)}
+
+    def rpc_probe_move(self, fen: str, uci: str) -> dict:
+        """Play one move on a throwaway board and report where it lands.
+
+        Exploration in the review screen needs a position per node, and board truth
+        belongs here rather than in the webview's chess.js. No engine and no
+        database: this is pure python-chess, so it answers on the dispatch thread.
+
+        `legal: false` carries no position — an illegal move has no landing square,
+        and inventing one is how a node ends up holding a fen nobody can reach.
+        Its result feeds the FEN path, so an illegal start is refused here too.
+        """
+        board = legal_board(fen)
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            return {"legal": False}
+        if move not in board.legal_moves:
+            return {"legal": False}
+        san = board.san(move)
+        board.push(move)
+        return {
+            "legal": True,
+            "fen": board.fen(),
+            "san": san,
+            "check": board.is_check(),
+            "gameOver": board.is_game_over(),
+        }
+
+    # ── platform sync ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _clamp_depth(depth: int | None) -> int:
+        """Clamp a requested sync-analysis depth into the supported range,
+        falling back to the bulk default when unset."""
+        if depth is None:
+            return C.ANALYSIS_BULK_DEPTH
+        return max(C.ANALYSIS_DEPTH_MIN, min(C.ANALYSIS_DEPTH_MAX, int(depth)))
+
+    def rpc_sync_status(self, depth: int | None = None) -> dict:
+        min_depth = self._clamp_depth(depth)
+
+        def counts(source: str) -> dict:
+            total = self._db._conn.execute(
+                "SELECT count(*) FROM games WHERE source=?", (source,)
+            ).fetchone()[0]
+            pending = len(self._db.games_pending_analysis(source, min_depth))
+            # Queued no more (VAL-DEATH-2), so counted apart from the work one click does.
+            stuck = self._db.needs_attention_ids(source, self._live_engine_version())
+            # `pending` mixes two things a label must not conflate (W15): games with
+            # no run at all, and games analysed below *min_depth*, which the bulk
+            # action re-analyses. Only the first are unanalysed.
+            unanalysed = self._db._conn.execute(
+                "SELECT count(*) FROM games g WHERE g.source=? AND NOT EXISTS "
+                "(SELECT 1 FROM analysis_runs r WHERE r.game_id = g.id"
+                " AND r.completed_at IS NOT NULL)",
+                (source,),
+            ).fetchone()[0]
+            return {"synced": total, "pending": pending - len(stuck),
+                    "unanalysed": unanalysed - len(stuck),
+                    "belowDepth": pending - unanalysed, "depth": min_depth,
+                    "needsAttention": len(stuck)}
+
+        return {
+            "syncing": self._sync.running(),
+            "lichess": counts("lichess"),
+            "chesscom": counts("chesscom"),
+        }
+
+    def rpc_start_sync(
+        self, lichess: str = "", chesscom: str = "", depth: int | None = None
+    ) -> dict:
+        """Sync the player's recent rated games from any configured platforms.
+        *usernames* is the full set of the player's handles so colour detection
+        works across platforms. *depth* is the Stockfish search depth for games
+        analysed locally (clamped into the supported range)."""
+        lichess = (lichess or "").strip()
+        chesscom = (chesscom or "").strip()
+        if not lichess and not chesscom:
+            raise RuntimeError("No platform username configured.")
+        if self._sync.running():
+            raise RuntimeError("A sync is already running.")
+        usernames = [u for u in (lichess, chesscom) if u]
+        # Fix any previously-imported games whose colour was stored before the
+        # username was known (they default to white).
+        self._db.repair_player_colors(usernames)
+        jobs: list[tuple[str, str]] = []
+        if lichess:
+            jobs.append(("lichess", lichess))
+        if chesscom:
+            jobs.append(("chesscom", chesscom))
+        self._sync.start(
+            jobs=jobs, usernames=usernames, db_path=self._db_path,
+            depth=self._clamp_depth(depth),
+        )
+        return {"started": True, "sources": [s for s, _ in jobs]}
+
+    def rpc_analyze_pending(self, source: str = "", depth: int | None = None,
+                            count: int | None = None) -> dict:
+        """Analyse already-synced games that still lack a satisfying run, without
+        re-fetching from the network. *source* picks one platform ('lichess' /
+        'chesscom'); empty means all synced platforms. *depth* is clamped like
+        sync, so selecting a deeper depth re-queues shallower games. *count* is
+        "Analyse more" in a step the user chose: the *count* most recent pending
+        games; omitted, all of them (BETA-PUB Q4). Newest first either way."""
+        if self._sync.running():
+            raise RuntimeError("A sync is already running.")
+        if count is not None:
+            count = int(count)
+            if count < 1:
+                raise RuntimeError("count must be at least 1")
+        sources = [source] if source else ["lichess", "chesscom"]
+        self._sync.start_analyze(
+            sources=sources, db_path=self._db_path, depth=self._clamp_depth(depth),
+            count=count,
+        )
+        return {"started": True, "sources": sources, "count": count}
+
+    def rpc_cancel_sync(self) -> dict:
+        self._sync.cancel()
+        return {"ok": True}
+
+    def rpc_repair_colors(self, lichess: str = "", chesscom: str = "") -> dict:
+        """Re-detect stored game colours from their PGN headers (fixes games
+        imported before the username was set)."""
+        usernames = [u for u in ((lichess or "").strip(), (chesscom or "").strip()) if u]
+        changed = self._db.repair_player_colors(usernames)
+        return {"changed": changed}
+
+    # ── insights ──────────────────────────────────────────────────────────────
+
+    def rpc_insights(
+        self,
+        req_id,
+        color: str = "all",
+        speeds: list[str] | None = None,
+        since: str | None = None,
+        rated: str = "all",
+        include_local: bool = False,
+    ) -> None:
+        """Deferred: hands off to InsightsRunner, which replies when done."""
+        self._insights.submit(
+            req_id,
+            {
+                "color": color,
+                "speeds": speeds,
+                "since": since,
+                "rated": rated,
+                "include_local": include_local,
+            },
+        )
+
+    # ── puzzles ───────────────────────────────────────────────────────────────
+
+    def rpc_puzzle_status(self) -> dict:
+        rating, rd, _vol = self._db.get_puzzle_rating()
+        count_row = self._db._conn.execute("SELECT count(*) FROM puzzles").fetchone()
+        return {
+            "imported": self._db.puzzles_imported(),
+            "count": count_row[0] if count_row else 0,
+            "importing": self._importer.running(),
+            "rating": rating,
+            "rd": rd,
+            "csvPath": str(C.PUZZLE_CSV_PATH),
+            "csvExists": C.PUZZLE_CSV_PATH.exists(),
+        }
+
+    def rpc_import_puzzles(self, csv_path: str | None = None) -> dict:
+        path = Path(csv_path).expanduser() if csv_path else C.PUZZLE_CSV_PATH
+        # Checked here, on the request, rather than in the import thread: those
+        # failures arrive as an error *event* well after the click, and this one
+        # is the likeliest first-run mistake — Lichess only publishes the file
+        # compressed, so the thing a user has just downloaded is the .zst.
+        if path.suffix == ".zst":
+            raise RuntimeError(
+                f"{path.name} is still compressed. Decompress it first "
+                f"(`zstd -d {path.name}`) and pick the .csv."
+            )
+        if not path.exists():
+            raise RuntimeError(f"No such file: {path}")
+        self._importer.start(path, self._db_path, self._on_import_done)
+        return {"started": True}
+
+    def rpc_cancel_puzzle_import(self) -> dict:
+        self._importer.cancel()
+        return {"ok": True}
+
+    def _on_import_done(self, count: int) -> None:
+        """App thread: write meta flags on the DB-owning connection."""
+        self._db.mark_puzzles_imported(count)
+        _emit("puzzle_import_done", {"count": count})
+
+    def rpc_get_puzzle_rating(self) -> dict:
+        rating, rd, volatility = self._db.get_puzzle_rating()
+        return {"rating": rating, "rd": rd, "volatility": volatility}
+
+    def rpc_next_puzzles(self, target_rating: float, rating_range: int,
+                         themes: list[str] | None = None, limit: int = 10) -> dict:
+        records = self._db.select_puzzles(
+            user_rating=target_rating,
+            rating_range=rating_range,
+            themes=themes if themes else None,
+            limit=limit,
+        )
+        return {"puzzles": [
+            {
+                "id": p.id,
+                "fen": p.fen,
+                "movesUci": p.moves_uci,
+                "rating": p.rating,
+                "ratingDeviation": p.rating_deviation,
+                "themes": p.themes,
+                # Precomputed here, not in Svelte: deciding what mates is chess
+                # knowledge, and the replay it needs is cheap at fetch time (one
+                # pass over a handful of puzzles) where the frontend would need a
+                # full move generator to answer the same question per move.
+                "finalMates": alternate_final_mates(p.fen, p.moves_uci),
+            }
+            for p in records
+        ]}
+
+    def rpc_rate_puzzle(self, puzzle_rating: int, puzzle_rd: int, outcome: float) -> dict:
+        """Apply the Glicko-2 update for one puzzle result (the rating math
+        stays in the Python core)."""
+        r, rd, v = self._db.get_puzzle_rating()
+        nr, nrd, nv = glicko2_update(r, rd, v, puzzle_rating, puzzle_rd, outcome)
+        self._db.save_puzzle_rating(nr, nrd, nv)
+        return {"before": r, "rating": nr, "rd": nrd}
+
+    def rpc_save_puzzle_attempt(self, *, puzzle_id: str, session_id: int | None,
+                                mode: str, solved: bool, failed: bool,
+                                used_hint: bool, gave_up: bool,
+                                solve_time_s: float | None,
+                                rating_before: float | None,
+                                rating_after: float | None) -> dict:
+        attempt_id = self._db.save_puzzle_attempt(
+            puzzle_id=puzzle_id, session_id=session_id, mode=mode,
+            solved=solved, failed=failed, used_hint=used_hint, gave_up=gave_up,
+            solve_time_s=solve_time_s,
+            rating_before=rating_before, rating_after=rating_after,
+        )
+        return {"attemptId": attempt_id}
+
+    def rpc_start_puzzle_session(self, mode: str, time_limit_s: int | None = None) -> dict:
+        return {"sessionId": self._db.save_puzzle_session(mode=mode, time_limit_s=time_limit_s)}
+
+    def rpc_update_puzzle_session(self, session_id: int, score: int,
+                                  peak_rating: int | None = None) -> dict:
+        self._db.update_puzzle_session(session_id, score=score, peak_rating=peak_rating)
+        return {"ok": True}
+
+    def rpc_count_theme_puzzles(self, themes: list[str], rating_range: int) -> dict:
+        rating, _rd, _v = self._db.get_puzzle_rating()
+        return {"count": self._db.count_puzzles_for_themes(themes, rating, rating_range)}
+
+    def rpc_puzzle_leaderboard(self, mode: str, time_limit_s: int | None = None,
+                               limit: int = 10) -> dict:
+        entries, new_rank = self._db.get_leaderboard(mode, time_limit_s, limit)
+        return {
+            "entries": [{"score": s, "date": d} for s, d in entries],
+            "newRank": new_rank,
+        }
+
+    # ── opening trainer ───────────────────────────────────────────────────────
+
+    def _line_progress(self, eco: str, name: str) -> dict:
+        """Per-line mastery display values (max over colors, as the PyQt panel
+        shows) plus the mastered flag (any single color meets both thresholds)."""
+        best_dl = 0
+        best_acc: float | None = None
+        mastered = False
+        for color in ("white", "black"):
+            prog = self._db.get_trainer_progress(eco, name, color)
+            if not prog:
+                continue
+            dl = prog.get("distinct_lines", 0) or 0
+            acc = prog.get("best_accuracy")
+            best_dl = max(best_dl, dl)
+            if acc is not None and (best_acc is None or acc > best_acc):
+                best_acc = acc
+            if (dl >= C.TRAINER_MASTERY_DISTINCT_LINES
+                    and acc is not None and acc >= C.TRAINER_MASTERY_MIN_ACCURACY):
+                mastered = True
+        return {"distinctLines": best_dl, "bestAccuracy": best_acc, "mastered": mastered}
+
+    def _family_progress(
+        self, pairs: set[tuple[str, str]], progress: dict
+    ) -> tuple[int, int]:
+        """(drilled, mastered) over a family's (eco, name) line pairs."""
+        drilled = mastered = 0
+        for eco, name in pairs:
+            done = False
+            done_master = False
+            for color in ("white", "black"):
+                prog = progress.get((eco, name, color))
+                if not prog:
+                    continue
+                if (prog.get("completions", 0) or 0) >= 1:
+                    done = True
+                dl = prog.get("distinct_lines", 0) or 0
+                acc = prog.get("best_accuracy")
+                if (dl >= C.TRAINER_MASTERY_DISTINCT_LINES
+                        and acc is not None and acc >= C.TRAINER_MASTERY_MIN_ACCURACY):
+                    done_master = True
+            drilled += int(done)
+            mastered += int(done_master)
+        return drilled, mastered
+
+    def rpc_trainer_lobby(self) -> dict:
+        index = self._openings.family_index() if self._openings else []
+        progress = self._db.get_all_trainer_progress()
+        families = []
+        for fi in index:
+            pairs = {(eco, name) for eco, name, _fen, _pgn in fi.lines}
+            drilled, mastered = self._family_progress(pairs, progress)
+            families.append({
+                "name": fi.name,
+                "ecoLo": fi.eco_lo,
+                "ecoHi": fi.eco_hi,
+                "firstMove": fi.first_move,
+                "popularity": fi.total_weight,
+                "lineCount": fi.line_count,
+                "threshold": fi.threshold,
+                "available": fi.available,
+                "sampleMoves": fi.sample_moves,
+                "drilled": drilled,
+                "mastered": mastered,
+            })
+        return {
+            "indexed": self._db.coverage_indexed(),
+            "indexing": self._coverage.running(),
+            # Reported so the lobby can explain an untrainable list instead of
+            # showing every family gated as "limited coverage" with no reason.
+            # Read off the loaded reader, not inferred from the line counts —
+            # a book that is present but thin is a different fact from no book.
+            "bookAvailable": self._openings.has_book if self._openings else False,
+            "bookPath": str(C.OPENINGS_BOOK_PATH),
+            "families": families,
+        }
+
+    def rpc_trainer_index_coverage(self) -> dict:
+        if self._openings is None or not self._openings.entries():
+            raise RuntimeError("ECO data not loaded — cannot index coverage")
+        self._coverage.start(
+            self._openings.entries(), self._db_path, C.OPENINGS_BOOK_PATH,
+            lambda: _emit("trainer_index_done", {}),
+        )
+        return {"started": True}
+
+    def rpc_trainer_family(self, name: str) -> dict:
+        index = self._openings.family_index() if self._openings else []
+        fam = next((fi for fi in index if fi.name == name), None)
+        if fam is None:
+            raise RuntimeError(f"unknown opening family: {name!r}")
+        out = []
+        drilled_pairs: set[tuple[str, str]] = set()
+        mastered_pairs: set[tuple[str, str]] = set()
+        for eco, line_name, fen, pgn in fam.lines:
+            prog = self._line_progress(eco, line_name)
+            if prog["distinctLines"] > 0:
+                drilled_pairs.add((eco, line_name))
+            if prog["mastered"]:
+                mastered_pairs.add((eco, line_name))
+            out.append({
+                "eco": eco,
+                "name": line_name,
+                "fen": fen,
+                "pgn": pgn,
+                "uci": [m.uci() for m in parse_pgn_moves(pgn)],
+                "coverage": {
+                    "white": self._db.get_coverage(eco, line_name, "white"),
+                    "black": self._db.get_coverage(eco, line_name, "black"),
+                },
+                "progress": prog,
+            })
+        return {
+            "label": fam.name,
+            "lines": out,
+            "mastered": len(mastered_pairs),
+            "drilled": len(drilled_pairs),
+        }
+
+    def rpc_book_moves(self, fen: str, threshold: float = C.TRAINER_WEIGHT_THRESHOLD) -> dict:
+        board = chess.Board(fen)
+        reader = self._openings.reader if self._openings else None
+        return {"accepted": [m.uci() for m in accepted_book_moves(reader, board, threshold)]}
+
+    def rpc_book_reply(self, fen: str, mode: str = "varied") -> dict:
+        board = chess.Board(fen)
+        reader = self._openings.reader if self._openings else None
+        if mode == "pinned":
+            move = top_book_reply(reader, board)
+        elif mode == "random":
+            move = uniform_random_reply(reader, board)
+        else:
+            move = weighted_random_reply(reader, board)
+        return {"uci": move.uci() if move else None}
+
+    def rpc_opening_at(self, fen: str) -> dict:
+        found = self._openings.name_after(chess.Board(fen)) if self._openings else None
+        return {"opening": {"eco": found[0], "name": found[1]} if found else None}
+
+    def rpc_trainer_attempt(self, eco: str, name: str, color: str) -> dict:
+        self._db.record_trainer_attempt(eco, name, color)
+        return {"ok": True}
+
+    def rpc_trainer_complete(self, *, eco: str, name: str, color: str, mode: str,
+                             terminal_fen: str, moves_played: int, errors_made: int,
+                             accuracy: float | None) -> dict:
+        import chess.polyglot
+        zobrist_hex = hex(chess.polyglot.zobrist_hash(chess.Board(terminal_fen)))
+        self._db.save_trainer_completion(
+            eco=eco, name=name, color=color, mode=mode,
+            terminal_zobrist_hex=zobrist_hex,
+            moves_played=moves_played, errors_made=errors_made, accuracy=accuracy,
+        )
+        return {"progress": self._line_progress(eco, name)}
+
+    # ── engine reply flow ─────────────────────────────────────────────────────
+
+    def _request_engine_move(self) -> None:
+        fen = self._session.board.fen()
+        # callback runs on the engine thread → marshal back to the app thread
+        self._engine.request_move(
+            fen, self._skill,
+            lambda move: self.post_call(lambda: self._apply_engine_move(move)),
+        )
+
+    def _apply_engine_move(self, move: chess.Move) -> None:
+        session = self._session
+        if session is None or session.over or move not in session.board.legal_moves:
+            return
+        san = session.board.san(move)
+        end = session.push(move)
+        _emit("engine_move", {
+            "uci": move.uci(), "san": san, "fen": session.board.fen(),
+            "end": self._finish(end),
+        })
+
+    # ── game end / persistence ────────────────────────────────────────────────
+
+    def _finish(self, end: GameEnd | None) -> dict | None:
+        """Save the finished game (same fields the PyQt app writes, plus the
+        opening, which the schema already has columns for) and describe it."""
+        if end is None:
+            return None
+        session = self._session
+        opening = session.opening
+        game_id = self._db.save_game(
+            played_at=session.started_at,
+            player_color="white" if session.player_color == chess.WHITE else "black",
+            skill_level=session.skill_level,
+            result=end.result,
+            termination=end.termination,
+            move_count=session.ply_count(),
+            pgn=session.to_pgn(),
+            final_fen=session.board.fen(),
+            opening_eco=opening[0] if opening else None,
+            opening_name=opening[1] if opening else None,
+        )
+        return {"result": end.result, "termination": end.termination, "gameId": game_id}
+
+    def _require_session(self) -> GameSession:
+        if self._session is None:
+            raise RuntimeError("no active game")
+        return self._session
+
+
+#: The argument the app passes when it spawns the packaged sidecar (`src/lib/sidecar.ts`,
+#: `capabilities/beta.json`). Nothing else passes it.
+APP_LAUNCH_FLAG = "--app"
+
+#: Exit status of a frozen sidecar that refused to open the default database.
+EXIT_REFUSED_DEFAULT_DB = 2
+
+
+def refuse_default_db(frozen: bool, argv: list[str], env) -> str | None:
+    """The live-database guard (BETA-PUB, owner 2026-11-12): a packaged or frozen sidecar
+    started by anything but the app — a test, a script, `--help` typed at a shell — must
+    not open the user's database. It opens one only when given an explicit path
+    (`ZUGZWANG_DB`, or a data folder in `ZUGZWANG_DATA_DIR`) or when the app launched it
+    (`--app`). Returns why it refuses, or None to go ahead. A checkout (not frozen) is
+    unchanged: the owner's dev run and the test suite pass paths as before.
+
+    The incident it closes: an early BETA session ran a frozen build's `--help`; it opened
+    `~/.zugzwang/zugzwang.db`, ran the migrations and waited on stdin (BETA.md, "Found
+    while building")."""
+    if not frozen:
+        return None
+    if env.get("ZUGZWANG_DB") or env.get("ZUGZWANG_DATA_DIR"):
+        return None
+    if APP_LAUNCH_FLAG in argv[1:]:
+        return None
+    return ("zugzwang-sidecar: refusing to open the default user database "
+            f"({DB_PATH}) — this sidecar was not started by the app. Set ZUGZWANG_DB to a "
+            "database file (or ZUGZWANG_DATA_DIR to a data folder) to run it by hand.")
+
+
+def main() -> None:
+    # The webview writes UTF-8; Windows' locale code page is not (BETA, M13). The packaged
+    # build also runs in UTF-8 mode (packaging/sidecar.spec); this covers a dev run.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    # Before the log file: it lives beside the database, so even opening it would write
+    # into the folder the guard protects.
+    refusal = refuse_default_db(bool(getattr(sys, "frozen", False)), sys.argv, os.environ)
+    if refusal:
+        sys.stderr.write(refusal + "\n")
+        sys.stderr.flush()
+        raise SystemExit(EXIT_REFUSED_DEFAULT_DB)
+    _setup_file_logging()
+    server = Server()
+
+    def read_stdin() -> None:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("bad json: %.120s", line)
+                continue
+            server.post_request(req)
+        # stdin closed → frontend is gone; stop so chess.engine's non-daemon
+        # asyncio threads don't block interpreter exit
+        server.post_stop()
+
+    threading.Thread(target=read_stdin, name="stdin", daemon=True).start()
+    server.run()
+
+
+if __name__ == "__main__":
+    main()

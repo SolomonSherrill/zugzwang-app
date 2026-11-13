@@ -1,0 +1,31 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# ── Node / Tauri build output ────────────────────────────────────────────────
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# ── Large binary assets (fetched separately, see README) ─────────────────────
+# Lichess puzzle database, 1.1 GB
+lichess_db_puzzle.csv
+# Polyglot opening book, 84 MB. NOTE: two copies exist on disk; config.py:16
+# reads zugzwang/assets/openings/book_mingame3.bin — the repo-root copy is unused.
+book_mingame3.bin
+zugzwang/assets/openings/book_mingame3.bin
+# Stockfish binaries, 110 MB
+stockfish/
+
+# ── Local editor / OS / tool state ───────────────────────────────────────────
+.DS_Store
+.claude/settings.local.json
+
+# ── Beta packaging output (BETA) ─────────────────────────────────────────────
+build/
+desktop/src-tauri/binaries/
+zugzwang/build_info.json

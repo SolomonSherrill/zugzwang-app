@@ -1,0 +1,33 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "beta",
+  "description": "The packaged (beta) build's permissions (BETA item 2). The sidecar is PyInstaller one-dir, shipped as a resource under sidecar/ and spawned through $RESOURCE, which the shell plugin resolves (tauri-plugin-shell 2.3.5, scope.rs): no machine path appears here. Two entries because the executable's name differs by OS. The one argument allowed is `--app`, which tells the frozen sidecar the app launched it (the live-database guard, BETA-PUB). tauri.beta.conf.json enables only this capability; the dev run keeps default.json.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "opener:default",
+    "opener:allow-reveal-item-in-dir",
+    "updater:default",
+    "process:allow-restart",
+    "shell:allow-stdin-write",
+    "shell:allow-kill",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "zugzwang-sidecar",
+          "cmd": "$RESOURCE/sidecar/zugzwang-sidecar",
+          "args": ["--app"]
+        },
+        {
+          "name": "zugzwang-sidecar-win",
+          "cmd": "$RESOURCE/sidecar/zugzwang-sidecar.exe",
+          "args": ["--app"]
+        }
+      ]
+    }
+  ]
+}

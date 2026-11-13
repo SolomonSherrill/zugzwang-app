@@ -1,0 +1,249 @@
+@import 'tailwindcss';
+
+/* ── Zugzwang design tokens (palette mirrors zugzwang/config.py) ──────────────
+   Dark is the default theme; light overrides via [data-theme='light'].
+   The wood board is constant across themes — it is the identity anchor.     */
+:root {
+  --bg-deep: #14110d;
+  --bg-surface: #1d1916;
+  --bg-raised: #25201b;
+  --accent: #d4a84b;
+  --accent-ink: #1a1407; /* text on amber */
+  --text: #ece4d2;
+  --text-muted: #8a8073;
+  --divider: #2c2620;
+  --danger: #d64f40;
+  --board-light: #d8b483;
+  --board-dark: #8b6340;
+  /* white/black side chips — fixed across themes, like the board */
+  --side-white: #e8e2d4;
+  --side-white-ink: #2b2620;
+  --side-black: #2b2620;
+  --side-black-ink: #ece6da;
+
+  --bg-tile: #211c17;
+  --accent-soft: rgba(212, 168, 75, 0.14);
+  --accent-line: rgba(212, 168, 75, 0.4);
+  --win: #6bbf5e;
+
+  --shadow-board: 0 10px 28px -14px rgba(0, 0, 0, 0.7);
+  --shadow-tile: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-pop: 0 18px 48px -20px rgba(0, 0, 0, 0.75);
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --font-ui: 'Inter', system-ui, sans-serif;
+}
+
+[data-theme='light'] {
+  --bg-deep: #f4efe5;
+  --bg-surface: #e9e3d6;
+  --bg-raised: #ddd6c6;
+  --accent: #c49628;
+  --accent-ink: #fdf9ef;
+  --text: #28211a;
+  --text-muted: #7a6e60;
+  --divider: #cec5b4;
+  --danger: #b3402f;
+
+  --bg-tile: #efe8da;
+  --accent-soft: rgba(196, 150, 40, 0.16);
+  --accent-line: rgba(196, 150, 40, 0.5);
+  --win: #4f9e44;
+
+  --shadow-board: 0 8px 22px -14px rgba(60, 44, 20, 0.45);
+  --shadow-tile: 0 1px 2px rgba(60, 44, 20, 0.12);
+  --shadow-pop: 0 18px 48px -20px rgba(60, 44, 20, 0.4);
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg-deep);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+#app {
+  height: 100%;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--divider);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ── Shared controls ─────────────────────────────────────────────────────── */
+
+button {
+  font-family: var(--font-ui);
+  border: none;
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 5px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: background-color 90ms ease, color 90ms ease, border-color 90ms ease;
+}
+.btn-accent {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.btn-accent:hover:not(:disabled) {
+  filter: brightness(1.07);
+}
+.btn-accent:disabled {
+  opacity: 0.45;
+}
+.btn-quiet {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--divider);
+}
+.btn-quiet:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+.btn-danger-confirm {
+  background: var(--danger);
+  color: #fff;
+}
+
+select,
+input[type='text'] {
+  appearance: none;
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--divider);
+  border-radius: 5px;
+  padding: 6px 26px 6px 10px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%238a8073'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+select:hover {
+  border-color: var(--text-muted);
+}
+select:focus,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input[type='range'] {
+  appearance: none;
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--divider);
+}
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ── Chessground: Zugzwang wood theme ────────────────────────────────────── */
+
+cg-board {
+  background-color: var(--board-light);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Cdefs%3E%3Cpattern id='c' width='2' height='2' patternUnits='userSpaceOnUse'%3E%3Crect width='2' height='2' fill='%23d8b483'/%3E%3Cpath d='M0 1h1v1H0zM1 0h1v1H1z' fill='%238b6340'/%3E%3C/pattern%3E%3C/defs%3E%3Crect width='8' height='8' fill='url(%23c)'/%3E%3C/svg%3E");
+}
+
+/* amber interaction layer (PyQt app used ACCENT at α55/α80) */
+cg-board square.last-move {
+  background-color: rgba(212, 168, 75, 0.28);
+}
+cg-board square.selected {
+  background-color: rgba(212, 168, 75, 0.38);
+}
+cg-board square.move-dest {
+  background: radial-gradient(rgba(20, 12, 4, 0.32) 19%, rgba(0, 0, 0, 0) 20%);
+}
+cg-board square.oc.move-dest {
+  background: radial-gradient(transparent 0%, transparent 79%, rgba(20, 12, 4, 0.32) 80%);
+}
+cg-board square.move-dest:hover {
+  background: rgba(212, 168, 75, 0.3);
+}
+cg-board square.premove-dest {
+  background: radial-gradient(rgba(212, 168, 75, 0.4) 19%, rgba(0, 0, 0, 0) 20%);
+}
+cg-board square.oc.premove-dest {
+  background: radial-gradient(transparent 0%, transparent 79%, rgba(212, 168, 75, 0.4) 80%);
+}
+cg-board square.premove-dest:hover {
+  background: rgba(212, 168, 75, 0.25);
+}
+cg-board square.current-premove {
+  background-color: rgba(212, 168, 75, 0.45);
+}
+cg-board square.check {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(214, 79, 64, 0.85) 0%,
+    rgba(214, 79, 64, 0.45) 40%,
+    rgba(214, 79, 64, 0) 75%
+  );
+}
+
+.cg-wrap coords {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 600;
+}
+.cg-wrap coords.ranks coord,
+.cg-wrap coords.files coord {
+  color: rgba(40, 24, 10, 0.75);
+}
+.cg-wrap coords.ranks coord:nth-child(2n),
+.cg-wrap coords.files coord:nth-child(2n) {
+  color: rgba(255, 240, 216, 0.8);
+}

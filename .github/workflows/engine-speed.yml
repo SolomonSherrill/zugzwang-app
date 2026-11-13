@@ -1,0 +1,55 @@
+# Q6 (BETA-PUB, owner 2026-11-12): the widest-CPU Stockfish 18 build against the fastest
+# official build that runs on the CI machines — nodes per second (bench, median of 5) and
+# seconds per game at depth 14 (three fixed 60-ply games, the app's own analysis loop).
+# By hand (workflow_dispatch) or on a speed-* tag. Measures; changes nothing.
+
+name: engine-speed
+
+on:
+  push:
+    tags: ["speed-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  speed:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS x86_64
+            os: macos-15-intel
+          - name: Windows x86_64
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: CPU
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors | Format-List"
+          else
+            sysctl -n machdep.cpu.brand_string; sysctl -n machdep.cpu.features; sysctl -n machdep.cpu.leaf7_features
+          fi
+      - name: Measure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/engine_speed.py --repeat 5 --games 3 --json speed.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: engine-speed-${{ runner.os }}
+          path: speed.json

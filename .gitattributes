@@ -1,0 +1,4 @@
+# A file signed by a throwaway key for tests/test_verify_update_feed.py: its bytes must
+# survive checkout unchanged (Git for Windows converted its newline, so the signature
+# failed on the Windows runner, v0.1.0-beta.1's first CI run).
+tests/fixtures/update_sig/* binary
