@@ -28,3 +28,10 @@ tauri-plugin-shell = "2"
 tauri-plugin-opener = "~2.7"
 tauri-plugin-updater = "~2.14"
 tauri-plugin-process = "~2.4"
+
+[dev-dependencies]
+# `test`: Tauri's mock runtime, for the headless dev-spawn check (src/dev_spawn_test.rs).
+# `macos-private-api` only so the mock compiles on macOS: tauri 2.12.0's MockWindowBuilder
+# gates `transparent` behind it while tauri-runtime 2.12.2's trait no longer does. Test
+# builds only (resolver 2 keeps dev-dependency features out of the app).
+tauri = { version = "2.11.2", features = ["test", "macos-private-api"] }

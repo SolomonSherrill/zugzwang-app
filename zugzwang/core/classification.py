@@ -26,7 +26,12 @@ from typing import NamedTuple, Sequence
 # label written today. Bump it with any change that can alter a label, and say in the
 # commit which rows it affects. NULL in the column means "written before the write path
 # stamped one" — every run from I3 until 2026-11-07 (W9, W22).
-CLASSIFIER_VERSION = 3
+CLASSIFIER_VERSION = 7   # 7: X1, brilliant excludes an immune piece behind a pin, a lost position
+                         # (wp before < 0.30) and a cost above WPL_EXCELLENT (2026-11-19; every live
+                         # run carried 6). 6: W, brilliant "nearly best" and B5 dropped (2026-11-19; every
+                         # live run carried 5). 5: K1, J1 only for a material event, never a missed mate (2026-11-14;
+                         # every live run carried 4). 4: brilliant B4b (G1, H2), F1's measure in
+                         # labelling (H3), and J1 (a delayed capture is not a miss), 2026-11-13
 
 
 # ── Constants (overridable via config) ───────────────────────────────────────

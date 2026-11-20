@@ -214,7 +214,7 @@ class GameRecord:
 #: itself by probing `PRAGMA table_info`, which is what lets them run
 #: unconditionally on every open and stay correct on a database whose stored
 #: version says nothing useful. Bump this when adding a migration.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -481,6 +481,7 @@ class Database:
         self._migrate_v16()
         self._migrate_v17()
         self._migrate_v18()
+        self._migrate_v19()
         # Stamped last, and overwritten rather than inserted-if-absent: the old
         # `INSERT OR IGNORE` meant the first value a database ever received was
         # the only one it ever had. On the live database that value was '1',
@@ -790,6 +791,99 @@ class Database:
         }
         if "hard_only_move" not in cols:
             self._conn.execute("ALTER TABLE move_analyses ADD COLUMN hard_only_move INTEGER")
+
+    def _migrate_v19(self) -> None:
+        # R6 (PATTERNS.md §6a; the orchestrator's storage decision, 2026-11-13): each
+        # complete run's report facts for the Insights patterns card, keyed by run and a
+        # facts version. Additive; filled at run completion and by
+        # tools/backfill_pattern_facts.py. A row counts only while its classifier_version
+        # is the run's (a relabel makes it stale).
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS pattern_facts (
+                run_id             INTEGER NOT NULL
+                                   REFERENCES analysis_runs(id) ON DELETE CASCADE,
+                facts_version      INTEGER NOT NULL,
+                classifier_version INTEGER,
+                rule_version       INTEGER,
+                computed_at        TEXT NOT NULL,
+                facts_json         TEXT NOT NULL,
+                PRIMARY KEY (run_id, facts_version)
+            )""")
+
+    # ── pattern facts (R6, PATTERNS.md §6a) ───────────────────────────────────
+
+    def save_pattern_facts(self, rows: list[tuple]) -> None:
+        """Store facts rows (run_id, facts_version, classifier_version, rule_version,
+        facts_json), replacing any for the same run and version, in one transaction."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self._conn.executemany(
+                """INSERT OR REPLACE INTO pattern_facts
+                   (run_id, facts_version, classifier_version, rule_version, computed_at,
+                    facts_json) VALUES (?, ?, ?, ?, ?, ?)""",
+                [(r[0], r[1], r[2], r[3], now, r[4]) for r in rows])
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+
+    def runs_without_pattern_facts(self, facts_version: int, *, rule_version: int,
+                                   every: bool = False) -> list[int]:
+        """Complete runs with no counting facts row (this facts version, the run's classifier
+        version, this `rule_version` — PATTERNS.md §6e: a rule change makes facts stale);
+        every complete run with *every*."""
+        if every:
+            sql = "SELECT id FROM analysis_runs WHERE completed_at IS NOT NULL ORDER BY id"
+            return [r[0] for r in self._conn.execute(sql)]
+        return [r[0] for r in self._conn.execute(
+            """SELECT r.id FROM analysis_runs r
+               WHERE r.completed_at IS NOT NULL AND NOT EXISTS (
+                   SELECT 1 FROM pattern_facts f
+                   WHERE f.run_id = r.id AND f.facts_version = ?
+                     AND f.classifier_version IS r.classifier_version
+                     AND f.rule_version IS ?)
+               ORDER BY r.id""", (facts_version, rule_version))]
+
+    def save_current_pattern_facts(self, rows: list[tuple]) -> int:
+        """`save_pattern_facts` for rows computed on another connection (the sidecar's
+        refill): only those whose run is still complete and still at the classifier version
+        the row was computed from. A run replaced or relabelled meanwhile is skipped — a
+        later refill picks it up. Returns how many rows were written."""
+        if not rows:
+            return 0
+        ids = [r[0] for r in rows]
+        marks = ",".join("?" * len(ids))
+        now = {rid: cv for rid, cv in self._conn.execute(
+            f"SELECT id, classifier_version FROM analysis_runs WHERE completed_at IS NOT NULL "
+            f"AND id IN ({marks})", ids)}
+        keep = [r for r in rows if r[0] in now and now[r[0]] == r[2]]
+        if keep:
+            self.save_pattern_facts(keep)
+        return len(keep)
+
+    def insights_pattern_facts(self, flt: "InsightsFilter | None",
+                               facts_version: int, *, rule_version: int) -> list[tuple]:
+        """(game id, played_at, player_color, facts_json) for each game under the insights
+        filters whose complete run has a counting facts row (this facts version, the run's
+        classifier version, this `rule_version`, PATTERNS.md §6e). A database no read-write
+        connection of this version has opened has no table yet: no rows."""
+        where, params = self._insights_where(flt)
+        try:
+            rows = self._conn.execute(
+                f"""SELECT g.id, g.played_at, g.player_color, f.facts_json
+                    FROM games g
+                    JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                    JOIN pattern_facts f ON f.run_id = r.id AND f.facts_version = ?
+                         AND f.classifier_version IS r.classifier_version
+                         AND f.rule_version IS ?
+                    WHERE {where}
+                    ORDER BY g.played_at, g.id""",
+                [facts_version, rule_version, *params]).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return []
+            raise
+        return [(r[0], r[1], r[2], r[3]) for r in rows]
 
     def save_game(
         self,

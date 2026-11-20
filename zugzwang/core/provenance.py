@@ -59,10 +59,15 @@ def code_commit() -> dict:
     return {"commit": head, "dirty": (bool(status) if status is not None else None)}
 
 
-def book_state(has_book: bool, book_path: Path = C.OPENINGS_BOOK_PATH) -> dict | None:
-    """None when no book was loaded — the run's plies cannot be `book`."""
+def book_state(has_book: bool, book_path: Path | None = None) -> dict | None:
+    """None when no book was loaded — the run's plies cannot be `book`. With no path, the
+    book in use (BOOK-DL), named by its manifest digest, which was checked when it was
+    installed: hashing a 1.3 GB book per run would cost seconds each."""
     if not has_book:
         return None
+    if book_path is None:
+        from zugzwang.core import books
+        return books.active_stamp()
     return {"file": book_path.name, "sha256": file_sha256(str(book_path))}
 
 

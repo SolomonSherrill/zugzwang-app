@@ -17,6 +17,7 @@ from .stats import benjamini_hochberg, normal_two_sided_p
 from .tactics import analyze_castling
 
 from .database import InsightsFilter
+from zugzwang.core.patterns import patterns_for
 
 if TYPE_CHECKING:
     from .database import Database
@@ -573,4 +574,6 @@ def build_insights(
         "phase_quality": _shape_phase_quality(phase_games),
         "phase_verdict": _phase_verdict(phase_games),
         "castling": _shape_castling(db.insights_castling_rows(flt)),
+        # R6 (PATTERNS.md §6a): from the stored per-run facts only.
+        "patterns": patterns_for(db, flt, overview["analyzed"]),
     }

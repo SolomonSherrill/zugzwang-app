@@ -22,7 +22,8 @@ where a rule proved one of two things, it says which in `pattern` and the templa
 reads it. A template that recomputed geometry could disagree with the rule that
 proved the material, leaving the layer with two answers and no way to choose.
 
-**Mood is decided by which move the sentence names, not by `subject`.** A sentence
+**Mood is decided by which move the sentence names, not by `subject`** — the move each
+finding carries in `Finding.about` (STAGE5-MOVE, 2026-11-19), read through `lead_move`. A sentence
 about a move that was not played is conditional throughout: "the rook would fall",
 not "the rook falls". `subject` is the wrong field for this, because
 `missed_material` and `missed_mate` carry `subject="played"` while the sentence
@@ -45,12 +46,13 @@ from .explain import (
     _MATE_KINDS,
     MATE_CUTOFF,
     is_long_mate_against,
-    NAMES_MOVE,
+    MoveRef,
     PATTERN_BACK_RANK,
     PATTERN_DISCOVERED_CHECK,
     PATTERN_FORCED,
     Finding,
     deep_after,
+    refutation_after,
     explain_stored_ply,
     rank_findings,
 )
@@ -132,7 +134,18 @@ _SENTENCE_RANK = {
 
 
 def names_move(f: Finding) -> str:
-    return NAMES_MOVE.get(f.kind, f.subject)
+    """Whose move the sentence names: "played", "best" or "reply" (`Finding.about`,
+    STAGE5-MOVE)."""
+    return f.about.role.value
+
+
+def lead_move(f: Finding) -> MoveRef | None:
+    """The move the sentence names, read from `Finding.about` and nothing else
+    (STAGE5-MOVE, owner 2026-11-10). None where the finding knows no such move."""
+    a = f.about
+    if a is None or a.uci is None:
+        return None
+    return MoveRef(uci=a.uci, san=a.san)
 
 
 def is_conditional(f: Finding) -> bool:
@@ -300,7 +313,7 @@ def is_mate(f: Finding) -> bool:
     checkmate is already stated in the notation the rule stored, and no board is
     consulted.
     """
-    lead = f.moves.get(names_move(f))
+    lead = lead_move(f)
     return lead is not None and lead.san.endswith("#")
 
 
@@ -408,7 +421,7 @@ def cannot_mate(fen: str, f: Finding) -> bool:
     """
     if f.material is None or not f.pieces:
         return False
-    played = f.moves.get(names_move(f))
+    played = lead_move(f)
     if played is None:
         return False
     board = chess.Board(fen)
@@ -521,7 +534,7 @@ def render(
     if classification in SILENT_CLASSES or suppressed(f):
         return None
     cond = is_conditional(f)
-    lead = f.moves.get(names_move(f))
+    lead = lead_move(f)
     qual = qualifier(f, p_before, cond, voice) if qualify else ""
 
     if f.kind in CLAIMS:
@@ -681,7 +694,7 @@ def one_sentence_per_move(findings: list[Finding]) -> list[Finding]:
     best: dict[tuple[str, str], Finding] = {}
     group: dict[tuple[str, str], list[Finding]] = {}
     for f in findings:
-        lead = f.moves.get(names_move(f))
+        lead = lead_move(f)
         if lead is None or suppressed(f):
             continue
         key = (lead.uci, names_move(f))
@@ -966,7 +979,7 @@ def missed_material_contradicted(f: Finding, row, run: RunPlies | None) -> str |
     """
     if f.kind != "missed_material":
         return None
-    best = f.moves.get("best")
+    best = lead_move(f)
     if best is None:
         return None
     fen = row["fen_before"]
@@ -1074,7 +1087,7 @@ def motif_piece_does_not_fall(f: Finding, row, run: RunPlies | None) -> str | No
         if "lines" not in set(row.keys()) and "lines_json" not in set(row.keys()):
             return None
         pv = _first_line(_lines_of(row))
-        move = f.moves.get("best")
+        move = lead_move(f)
         ucis = pv if pv and move is not None and pv[0] == move.uci else None
     if ucis is None:
         return "no stored line starts with the move"
@@ -1100,7 +1113,7 @@ def rescue_taken_anyway(f: Finding, row) -> str | None:
     if f.kind not in RESCUE_KINDS or not f.pieces:
         return None
     pv = _first_line(_lines_of(row))
-    move = f.moves.get("best")
+    move = lead_move(f)
     if not pv or move is None or pv[0] != move.uci or len(pv) < 2:
         return None
     from zugzwang.core import pv_reading as P
@@ -1222,7 +1235,9 @@ def _only_move_second(line: dict) -> str:
 def render_only_move(row) -> ClaimText | None:
     """Owner ruling T4 (2026-11-12): a critical-move miss shows the one fact the stored
     lines prove — "X was the only move that kept the advantage; the next best, Y, was
-    level." — with both clauses read off the stored first and second lines. None where
+    level." — with both clauses read off the stored first and second lines. Approved as
+    built (D5, 2026-11-13), with "the move played, Y, was the next best and …" where the
+    stored next best is the move played. None where
     `only_move_lines` does not hold. Whether a claim or rule sentence already explains
     the move is `compose`'s question."""
     got = only_move_lines(row)
@@ -1233,6 +1248,18 @@ def render_only_move(row) -> ClaimText | None:
     x, y = _first_move_san(fen, first), _first_move_san(fen, second)
     if x is None or y is None:
         return None
+    if second["uci"][0] == row["played_uci"]:
+        # D5 (owner, 2026-11-13): where the stored next best is the move played, say so —
+        # the band is still read off the stored second line, and said only where the
+        # move's own depth-14 after-score falls in the same band. Where they differ (5 of 67
+        # on the owner's games, review/scratch/game_report_2/s/d5_check.out) the sentence is
+        # not said: firing less, never rewording.
+        band = _only_move_second(second)
+        if band != _only_move_second({"cp": _row_get(row, "score_after_cp"),
+                                      "mate": _row_get(row, "score_after_mate")}):
+            return None
+        return ClaimText(f"{x} was the only move that {_only_move_first(first)}; "
+                         f"the move played, {y}, was the next best and {band}.")
     return ClaimText(f"{x} was the only move that {_only_move_first(first)}; "
                      f"the next best, {y}, {_only_move_second(second)}.")
 
@@ -1295,7 +1322,9 @@ def chain_forms(findings: list[Finding], run: RunPlies | None) -> dict[tuple[str
             if row is None or row["classification"] in SILENT_CLASSES:
                 seen[ply] = None
             else:
-                fs = explain_stored_ply(row, deep=deep_of(replace(run, ply=ply)))
+                at_ply = replace(run, ply=ply)
+                fs = explain_stored_ply(row, deep=deep_of(at_ply),
+                                        refutation=refutation_of(at_ply))
                 seen[ply] = (_ignored_keys(fs), mate_leads(fs))
         return seen[ply]
 
@@ -1456,6 +1485,13 @@ def rendered_pairs_stored_ply(
     return _stored_pairs(row, player_color, CAP, run)[1]
 
 
+def refutation_of(run: RunPlies | None) -> tuple[str, ...]:
+    """`explain.refutation_after` for the ply `run` is at (L1). () without a run."""
+    if run is None:
+        return ()
+    return refutation_after(run.rows.get(run.ply + 1), run.final_lines)
+
+
 def deep_of(run: RunPlies | None) -> tuple[bool, int | None]:
     """`explain.deep_after` for the ply `run` is at: ply N+1's stored row, or the run's
     final lines on the last ply. `(False, None)` without a run."""
@@ -1469,7 +1505,7 @@ def _stored_pairs(
 ) -> tuple[list[Finding], list[tuple[Finding, str]]]:
     # The mate rules read the deeper stored search after the move where there is one
     # (owner rulings AUDIT-4, -5, -13, 2026-11-11).
-    findings = explain_stored_ply(row, deep=deep_of(run))
+    findings = explain_stored_ply(row, deep=deep_of(run), refutation=refutation_of(run))
     if run is not None:
         # The adjacent-ply check: a capture claim ply N+1 contradicts stays silent.
         findings = [f for f in findings if next_ply_contradicts(f, run) is None]

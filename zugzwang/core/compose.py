@@ -12,6 +12,9 @@ First form, minimal (owner, 2026-11-08, third rulings: "wire it up minimally"):
   rule sentences (provisional where the two are about different moves or kinds) — else
   the rule layer's sentences, after the adjacent-ply check. `sentences` stays the rule
   layer's own output, unchanged.
+- **mechanism names** (MECH-NAME, owner 2026-11-14; P1 2026-11-19 adds pin and skewer): back rank, discovered attack/check, pin, skewer,
+  appended as a clause to the engine-line claim's own sentence (`mechanisms.with_name`) where
+  its printed line shows them; never on a summarised claim, never alone.
 - **descriptions** = the PV description (a non-forcing engine line, same condition), then
   D1 / D3 (`describe.describe`, through `GameMemory` over the game so far), at most
   `describe.MAX_DESCRIPTIONS` — and **only on a ply where no rule sentence and no
@@ -26,6 +29,7 @@ from typing import Mapping
 import chess
 
 from zugzwang.core import describe as D
+from zugzwang.core import mechanisms as M
 from zugzwang.core import pv_reading as P
 from zugzwang.core.explain_text import (
     ClaimText,
@@ -38,6 +42,7 @@ from zugzwang.core.explain_text import (
     render_pv_claim,
 )
 from zugzwang.core.findings import Description, ProvenClaim
+from zugzwang.core.labelling import captured_on_next_move
 
 
 @dataclass(frozen=True)
@@ -85,18 +90,11 @@ def taken_next_move(rows: Mapping[int, Mapping], ply: int, claim: ProvenClaim) -
     if claim.subject != "best" or not claim.proof.line:
         return False
     row, later_row = rows[ply], rows.get(ply + 2)
-    if later_row is None or not later_row["played_uci"]:
+    if later_row is None:
         return False
-    board = chess.Board(row["fen_before"])
-    first = chess.Move.from_uci(claim.proof.line[0])
-    if first not in board.legal_moves or not board.is_capture(first):
-        return False
-    target = first.to_square
-    victim = board.piece_at(target)
-    later = chess.Board(later_row["fen_before"])
-    move = chess.Move.from_uci(later_row["played_uci"])
-    return (victim is not None and later.piece_at(target) == victim
-            and move.to_square == target and later.is_capture(move))
+    # One board test for the card and the label (J1, `labelling.delayed_not_missed`).
+    return captured_on_next_move(row["fen_before"], claim.proof.line[0],
+                                 later_row["fen_before"], later_row["played_uci"])
 
 
 def _engine_output(rows: Mapping[int, Mapping], ply: int,
@@ -184,8 +182,15 @@ def explain_ply_full(rows: Mapping[int, Mapping], ply: int, player_color: str | 
             # and an engine-line claim both exist, the engine-line claim is shown.
             # PROVISIONAL for the plies where they are about different moves or kinds,
             # pending the owner's reading of review/samples/precedence-complementary.md.
-            pv_claims.append(render_pv_claim(out, fen_before=fen, best_san=best_san,
-                                             player_color=player_color))
+            text = render_pv_claim(out, fen_before=fen, best_san=best_san,
+                                   player_color=player_color)
+            # MECH-NAME (owner rulings M1–M7, 2026-11-14): the mechanism, named only inside
+            # the claim's own printed line, as a clause after it. Never a claim of its own.
+            name = M.name_claim(out)
+            if name is not None:
+                text = ClaimText(M.with_name(text, name))
+                notes["mechanism"] = name.mechanism
+            pv_claims.append(text)
             pv_line = out.proof.line
             if sentences:
                 notes["precedence"] = "engine line over the rule sentences (provisional)"

@@ -29,3 +29,6 @@ stockfish/
 build/
 desktop/src-tauri/binaries/
 zugzwang/build_info.json
+
+# Scratch dumps over 1 MB are not committed (P0, 2026-11-13); scripts, .out, .set.txt are.
+review/scratch/**/*.jsonl

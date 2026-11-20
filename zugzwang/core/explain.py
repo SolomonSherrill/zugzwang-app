@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 import chess
 
 from .. import config as C
+from .findings import MoveAbout, MoveRole
 
 # 17 (CLS-V3, 2026-11-11): king-ring descriptions silent beside a forced mate on a non-error
 # move (ruling 11), and classifier version 3's labels feed every label gate (ERROR_CLASSES,
@@ -29,7 +30,15 @@ from .. import config as C
 # review/CLS_V3_REPORT.md.
 # 18 (CLS-V3 third round, 2026-11-12): D1/D3 descriptions silent on a move labelled an
 # error (T10), and the critical-move miss's only-move sentence from the stored lines (T4).
-RULE_VERSION = 18
+# 19 (T-HOLD, 2026-11-14): a capture claim names a piece only where what the capture holds
+# after the reply is at least that piece's value (`_capture_claims`).
+# 20 (L1, owner 2026-11-14): T-HOLD replaced — a capture claim whose two-ply hold falls short
+# is silenced only where the stored refutation (ply N+1's line) does not confirm the named
+# loss by F1's measure; otherwise it stands (`_capture_claims`).
+# 21 (MECH-NAME, owner rulings M1–M7, 2026-11-14): back rank and discovered attack/check named
+# as a clause on a shown engine-line claim (`mechanisms`, `compose`).
+# 22 (P1, owner 2026-11-19): pin and skewer named the same way, only at the claim's hold.
+RULE_VERSION = 22
 
 # Two mate lengths, deliberately not one (owner rulings, stage B and 2026-10-21).
 #
@@ -103,6 +112,16 @@ class Finding:
     mate_in: int | None = None
     pattern: str | None = None         # an annotation on the finding, not a claim
     rule_version: int = RULE_VERSION
+    # STAGE5-MOVE (owner, 2026-11-10; built 2026-11-19): the move this finding's sentence
+    # names — UCI, SAN and whose move it is (played, best, the opponent's reply). Every rule
+    # sets it explicitly; the renderer reads the move from here and from nothing else.
+    # `subject` is a different question: `missed_material` is about the played move
+    # (subject "played") but its sentence names the best move (about.role BEST).
+    about: MoveAbout | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.about, MoveAbout):
+            raise TypeError("a rule finding names the move it is about (Finding.about)")
 
     def to_dict(self) -> dict:
         return {
@@ -132,6 +151,11 @@ def _piece_on(board: chess.Board, square: int) -> PieceOn | None:
 def _ref(board: chess.Board, move: chess.Move) -> MoveRef:
     """A move with its SAN, taken in `board`'s position."""
     return MoveRef(uci=move.uci(), san=board.san(move))
+
+
+def _about(role: MoveRole, ref: MoveRef | None) -> MoveAbout:
+    """`Finding.about` from the move a rule names (STAGE5-MOVE)."""
+    return MoveAbout(role=role, uci=ref.uci if ref else None, san=ref.san if ref else None)
 
 
 # ── static exchange evaluation ───────────────────────────────────────────────
@@ -801,7 +825,49 @@ def _surviving_captures(
     return out
 
 
-def _capture_claims(board: chess.Board, threshold: float) -> dict[int, tuple[chess.Move, float]]:
+def _takes_on(board: chess.Board, line, square: int) -> bool:
+    """Whether `line` (UCI from `board`, the capturer to move) captures the piece on `square`
+    with one of the side-to-move's moves before that piece moves away."""
+    capturer = board.turn
+    b = board.copy(stack=False)
+    for uci in line:
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            return False
+        if move not in b.legal_moves:
+            return False
+        if b.turn == capturer and move.to_square == square and b.is_capture(move):
+            return True
+        if b.turn != capturer and move.from_square == square:
+            return False                      # the piece ran (or took something)
+        b.push(move)
+    return False
+
+
+def _confirmed_by_line(board: chess.Board, line, square: int, named: float) -> bool:
+    """L1: whether the stored refutation `line` (UCI moves from `board`, the position after the
+    played move, the opponent to move) confirms the named loss: it **takes the piece on
+    `square`** (a check or another capture may come first) and the opponent keeps at least
+    `named` less a pawn by F1's measure (`pv_reading.kept_first`; a line that mates keeps
+    everything). A line that wins material some other way — the piece runs, or the engine mates
+    without taking it — does not confirm "— X wins it". No line, or one that does not start
+    legally, confirms nothing."""
+    if not line or not _takes_on(board, line, square):
+        return False
+    from zugzwang.core import pv_reading as P     # pv_reading imports this module
+    try:
+        lr = P.read_line(board.fen(), list(line), not board.turn, attack_from=0)
+    except (ValueError, AssertionError):
+        return False
+    if lr.stopped_at == 0 or not lr.steps:
+        return False
+    return P.kept_first(lr) >= named - _VALUE[chess.PAWN] - 1e-9
+
+
+def _capture_claims(board: chess.Board, threshold: float, *,
+                    hold_names_piece: bool = True,
+                    refutation=None) -> dict[int, tuple[chess.Move, float]]:
     """The captures a rule may claim *work*, judged by `_holds_after_reply`.
 
     This is `exposed` — what rules 1, 7 and 12 say the opponent wins. The safety side
@@ -816,8 +882,42 @@ def _capture_claims(board: chess.Board, threshold: float) -> dict[int, tuple[che
     rule — the best move *against* the played move — so material loose under both
     branches belongs to the position, and `_survives_reply`'s discount is right for it.
     Its own differential test is specified, unbuilt: EX-MM-DIFF.
+
+    **T-HOLD (2026-11-14; EXPLANATIONS.md "T-HOLD").** A claim names the piece on its
+    square. "You left the queen on c8 hanging — Rxc8 wins it." was false where Nc4 attacked
+    the other queen: Rxc8 Nxb6 Bxb6 holds a knight (3.0), not the queen (SEE 9). So a claim
+    is kept only where the hold is within a pawn of what the capture was said to win — the
+    piece, or SEE's exchange on its square where that is less: the reply may take back a
+    pawn, not the piece. Silent otherwise; the engine-line claim may speak instead. (As
+    written, "the hold at least the piece's value", the decision also silenced SEE's own
+    exchanges — game 285's knight for a pawn, `ignored_threat`'s required case, and GR2-2's
+    queen for a rook; measured, not built: EXPLANATIONS.md "T-HOLD as built".)
+    `hold_names_piece=False` keeps the pre-T-HOLD set: labelling's T3
+    (`labelling.hangs_material`) reads the material lost, not the name, and labels must not
+    move with a wording fix.
+
+    **L1 (owner, 2026-11-14; EXPLANATIONS.md "L1") replaces T-HOLD's silence.** The two-ply
+    hold is a static witness; the engine's stored refutation is the deeper one. A claim whose
+    hold falls short is silenced **only where the stored line from this position does not
+    confirm the named loss**: `refutation`, ply N+1's stored line (the engine's best reply to
+    the played move), must take the named piece and win the opponent at least what the claim
+    names — by F1's measure, within the same pawn as the hold test. T-HOLD's case stays silent (20.Nc4: the
+    refutation keeps a knight, not the queen); a piece the line does win comes back. Without a
+    refutation (a caller holding one ply alone) nothing confirms, so it stays silent.
     """
-    return _surviving_captures(board, threshold, gate=_holds_after_reply)
+    claims = _surviving_captures(board, threshold, gate=_holds_after_reply)
+    if not hold_names_piece:
+        return claims
+    def named(sq: int) -> float:     # en passant lands on an empty square: a pawn
+        pc = board.piece_at(sq)
+        return _VALUE[pc.piece_type] if pc is not None else _VALUE[chess.PAWN]
+    out = {}
+    for sq, (move, net) in claims.items():
+        said = min(named(sq), see(board, move))
+        if net >= said - _VALUE[chess.PAWN] - 1e-9 or \
+                _confirmed_by_line(board, refutation, sq, said):
+            out[sq] = (move, net)
+    return out
 
 
 # ── rules ────────────────────────────────────────────────────────────────────
@@ -832,6 +932,8 @@ def explain_ply(
     threshold: float | None = None,
     deep_after_stored: bool = False,
     deep_after_mate: int | None = None,
+    hold_names_piece: bool = True,
+    refutation=None,
 ) -> list[Finding]:
     """Every finding this layer can prove about one ply.
 
@@ -849,6 +951,13 @@ def explain_ply(
     the mover's side, `None` meaning no forced mate; it is read only when
     `deep_after_stored` says one exists. `score_after_mate` (the depth-10 after-search)
     is read only where none is.
+
+    `hold_names_piece` (T-HOLD, `_capture_claims`): False only for labelling's T3, which
+    must not move with the wording.
+
+    `refutation` (L1): ply N+1's stored line, UCI moves from the position after the played
+    move (the run's final lines on the last ply) — what confirms a capture claim whose
+    two-ply hold falls short (`_capture_claims`).
     """
     threshold = C.EXPLAIN_MIN_MATERIAL if threshold is None else threshold
 
@@ -875,7 +984,8 @@ def explain_ply(
 
     after = board.copy(stack=False)
     after.push(played)
-    exposed = _capture_claims(after, threshold)
+    exposed = _capture_claims(after, threshold, hold_names_piece=hold_names_piece,
+                              refutation=refutation)
 
     findings: list[Finding] = []
     findings += _rule_hangs_piece(
@@ -945,6 +1055,7 @@ def _rule_hangs_piece(
             moves={"played": played_ref, "refutation": _ref(after, capture)},
             material=round(material, 2),
             pattern=PATTERN_FORCED if forced else None,
+            about=_about(MoveRole.PLAYED, played_ref),
         ))
     return out
 
@@ -970,13 +1081,15 @@ def _rule_missed_material(board, played, played_ref, played_see, best, threshold
     if delta < threshold:
         return []
     victim = _piece_on(board, best.to_square)
+    best_ref = _ref(board, best)
     return [Finding(
         kind="missed_material",
         subject="played",
         basis=BASIS_SEE,
         pieces=(victim,) if victim else (),
-        moves={"played": played_ref, "best": _ref(board, best)},
+        moves={"played": played_ref, "best": best_ref},
         material=round(delta, 2),
+        about=_about(MoveRole.BEST, best_ref),
     )]
 
 
@@ -1008,14 +1121,16 @@ def _rule_missed_mate(
     mate_move = _mate_in_one(board)
     if mate_move is not None:
         pawns = _back_rank(board, mate_move)
+        mate_ref = _ref(board, mate_move)
         return [Finding(
             kind="missed_mate",
             subject="played",
             basis=BASIS_BOARD,
             pieces=pawns,
-            moves={"played": played_ref, "best": _ref(board, mate_move)},
+            moves={"played": played_ref, "best": mate_ref},
             mate_in=1,
             pattern=PATTERN_BACK_RANK if pawns else None,
+            about=_about(MoveRole.BEST, mate_ref),
         )]
     if score_before_mate is not None and score_before_mate > 0:
         moves = {"played": played_ref}
@@ -1027,6 +1142,7 @@ def _rule_missed_mate(
             basis=BASIS_ENGINE,
             moves=moves,
             mate_in=score_before_mate,
+            about=_about(MoveRole.BEST, moves.get("best")),
         )]
     return []
 
@@ -1063,6 +1179,7 @@ def _rule_walks_into_mate(after, played_ref, score_before_mate, score_after_mate
             moves={"played": played_ref, "refutation": _ref(after, mate_move)},
             mate_in=1,
             pattern=PATTERN_BACK_RANK if pawns else None,
+            about=_about(MoveRole.PLAYED, played_ref),
         )]
     if score_after_mate is not None and score_after_mate < 0:
         mate_in = abs(score_after_mate)
@@ -1076,6 +1193,7 @@ def _rule_walks_into_mate(after, played_ref, score_before_mate, score_after_mate
             basis=BASIS_ENGINE,
             moves={"played": played_ref},
             mate_in=mate_in,
+            about=_about(MoveRole.PLAYED, played_ref),
         )]
     return []
 
@@ -1177,12 +1295,14 @@ def _rule_best_saves(board, played, best, baseline, exposed, threshold):
                 continue
         elif not _defence_is_caused(board, after_best, best, square):
             continue
+        best_ref = _ref(board, best)
         out.append(Finding(
             kind="best_saves_piece" if moved_away else "best_defends_piece",
             subject="best",
             basis=BASIS_SEE,
             pieces=(piece_before,),
-            moves={"best": _ref(board, best)},
+            moves={"best": best_ref},
+            about=_about(MoveRole.BEST, best_ref),
         ))
     return out
 
@@ -1245,6 +1365,7 @@ def _rule_ignored_threat(
             pieces=(victim,),
             moves={"played": played_ref, "refutation": _ref(after, capture)},
             material=round(-value, 2),
+            about=_about(MoveRole.PLAYED, played_ref),
         ))
     return out
 
@@ -1341,35 +1462,21 @@ def _rule_motifs(board, move, move_ref, subject, threshold):
             moves={subject: move_ref},
             material=material,
             pattern=pattern,
+            about=_about(MoveRole(subject), move_ref),
         ))
     return out
 
 
 _MATE_KINDS = ("missed_mate", "walks_into_mate")
 
-# Which move each sentence will open with. Motifs use `subject`; everything else
-# is fixed by the kind.
-#
-# This lives here rather than in `explain_text`, which owns the rendering, because
-# `rank_findings` needs it and `explain_text` imports from this module — the other
-# direction would be a cycle. `explain_text.names_move` is the accessor.
-#
-# **It is not the same question as `subject`.** `missed_material` and
-# `missed_mate` carry `subject="played"` because they are findings *about* the
-# played move, yet the sentence they produce names the best move. Ordering on
-# `subject` therefore mixes "what this move cost" with "what a different move
-# offered" into one tier and sorts the two by material against each other, which
-# is how a 5-pawn rook the player never won came to outrank the 3-pawn knight they
-# actually dropped.
-NAMES_MOVE = {
-    "hangs_piece": "played",
-    "ignored_threat": "played",
-    "walks_into_mate": "played",
-    "missed_material": "best",
-    "missed_mate": "best",
-    "best_defends_piece": "best",
-    "best_saves_piece": "best",
-}
+# Which move each sentence opens with is carried by each finding (`Finding.about`,
+# STAGE5-MOVE, built 2026-11-19); the table that implied it from the kind (`NAMES_MOVE`)
+# is gone. **It is not the same question as `subject`.** `missed_material` and
+# `missed_mate` carry `subject="played"` because they are findings *about* the played
+# move, yet the sentence they produce names the best move. Ordering on `subject` therefore
+# mixed "what this move cost" with "what a different move offered" into one tier, which is
+# how a 5-pawn rook the player never won came to outrank the 3-pawn knight they actually
+# dropped.
 
 
 # The columns `explain_stored_ply` reads. Exported so a caller builds its SELECT
@@ -1414,7 +1521,19 @@ def deep_after(after_row=None, after_lines=None) -> tuple[bool, int | None]:
     return False, None
 
 
-def explain_stored_ply(row, *, deep: tuple[bool, int | None] = (False, None)) -> list[Finding]:
+def refutation_after(after_row=None, after_lines=None) -> tuple[str, ...]:
+    """The engine's stored refutation of a move: ply N+1's best line (`pv_uci`, the line
+    `compose` reads as the refutation), or the run's final lines on the last ply. UCI moves
+    from the position after the move; () where nothing is stored."""
+    if after_row is not None:
+        return tuple((after_row["pv_uci"] or "").split()) if "pv_uci" in set(after_row.keys()) \
+            else ()
+    lines = [ln for ln in (after_lines or ()) if ln.get("uci")]
+    return tuple(lines[0]["uci"]) if lines else ()
+
+
+def explain_stored_ply(row, *, deep: tuple[bool, int | None] = (False, None),
+                       refutation=None) -> list[Finding]:
     """Explain one ply that is already in `move_analyses`. Use this, not
     `explain_ply`, for anything reading the database.
 
@@ -1438,6 +1557,9 @@ def explain_stored_ply(row, *, deep: tuple[bool, int | None] = (False, None)) ->
     after the move, which the mate rules read in place of the depth-10 after-search
     where it exists (AUDIT-4, -5, -13). A caller with the rest of the run passes it;
     `explain_text._stored_pairs` does.
+
+    `refutation` is `refutation_after(...)` for this ply (L1): what confirms a capture claim
+    whose two-ply hold falls short. Passed by the same callers as `deep`.
     """
     missing = [c for c in STORED_PLY_COLUMNS if c not in set(row.keys())]
     if missing:
@@ -1453,6 +1575,7 @@ def explain_stored_ply(row, *, deep: tuple[bool, int | None] = (False, None)) ->
         score_after_mate=row["score_after_mate"],
         deep_after_stored=deep[0],
         deep_after_mate=deep[1],
+        refutation=refutation,
     )
 
 
@@ -1478,7 +1601,7 @@ def rank_findings(findings: list[Finding]) -> list[Finding]:
     Tiers 1 and 2 were one tier, sorted by material across both. A player who
     dropped a knight and also missed a rook was told about the rook first, which
     inverts the thing they need: the loss is on the board, the gain is
-    hypothetical. See `NAMES_MOVE` for why `subject` cannot express this.
+    hypothetical. See `Finding.about` for why `subject` cannot express this.
 
     Material still breaks ties *within* a tier, so two real losses order by size.
     """
@@ -1487,7 +1610,7 @@ def rank_findings(findings: list[Finding]) -> list[Finding]:
             return (4, f.mate_in or 99, 0.0)
         if f.kind in _MATE_KINDS:
             return (0, f.mate_in if f.mate_in is not None else 99, 0.0)
-        names = NAMES_MOVE.get(f.kind, f.subject)
+        names = f.about.role.value
         if f.subject == "played":
             return (1 if names == "played" else 2, 0, -abs(f.material or 0.0))
         return (3, 0, -abs(f.material or 0.0))

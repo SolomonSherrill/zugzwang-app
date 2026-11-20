@@ -20,6 +20,7 @@
   import { pickEngine } from '../pick'
   import { BETA } from '../build'
   import AboutBuild from '../AboutBuild.svelte'
+  import OpeningBook from '../OpeningBook.svelte'
   import { pendingSummary } from '../pendingLabel'
   import { addSyncWarning, syncWarningLines, type SyncWarning } from '../syncWarnings'
 
@@ -267,6 +268,19 @@
         {#if locateError}<span class="error">{locateError}</span>{/if}
         {#if locatedName}<span class="ok">✓ {locatedName}</span>{/if}
       </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">Opening book</h2>
+        <p class="card-sub">
+          The book marks the known opening moves in your games as book and gives the opening
+          trainer its lines. Three are offered, built from two months of Lichess games: the
+          larger ones also know moves played less often. Switching books backs up your database
+          first, then re-marks the book moves in every analysed game.
+        </p>
+      </div>
+      <OpeningBook />
     </section>
 
     <section class="card">

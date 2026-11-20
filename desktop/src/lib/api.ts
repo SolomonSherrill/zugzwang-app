@@ -225,6 +225,11 @@ export interface ReportMoment {
   /** The stored best beats the stored second-best by the `great` gap: the only
    *  moments a Try is offered on when no engine is available. */
   unique: boolean
+  /** GR2-6: on an opponent's card, the user's reply — "You answered X, the engine's move."
+   *  or, where the reply is labelled an error, "You played X; the engine's move was Y." */
+  reply?: string | null
+  /** GR2-7: under a callout that names only a pawn on a swing of 0.30 or more. */
+  qualifier?: string | null
 }
 
 /** `move_judged` — the live verdict on a Try (core/retry.py: errs toward accepting). */
@@ -257,6 +262,22 @@ export interface ReportOpening {
 
 /** `rpc_game_report` — see core/game_report.py and GAME_REPORT.md. An unanalysed
  *  game still carries the opening line: it needs the book, not the engine. */
+/** "Found it" (GR2-8): W1 brilliant, W2s a hard only move every stored alternative to which
+ *  is 20 points worse, W4c a combination the user carried out after the opponent's error. */
+export interface ReportFound {
+  ply: number
+  kind: 'brilliant' | 'only_move' | 'combination'
+  side: 'white' | 'black'
+  classification: string
+  san: string | null
+  label: string
+  sentence: string
+  /** combination: the opponent's move the engine proved the line after. */
+  afterPly?: number
+  linePlies?: number
+  ownMoves?: number
+}
+
 export type GameReport =
   | { analysed: false; opening: ReportOpening | null; lines: string[] }
   | {
@@ -273,9 +294,23 @@ export type GameReport =
       /** White's win probability per position, 0 = start; null where unscored. */
       series: (number | null)[]
       moments: { total: number; shown: ReportMoment[]; groups: number[][] }
-      decided: { position: number; side: 'white' | 'black'; byPly: number | null } | null
+      /** byPiece (GR2-2): byPly is the loser's move into the decided position that dropped a
+       *  piece by its own callout, not a moment by the swing. */
+      decided: {
+        position: number
+        side: 'white' | 'black'
+        byPly: number | null
+        byPiece?: boolean
+        /** R5: the piece the deciding move dropped, by its callout; null to leave it unsaid. */
+        piece?: string | null
+        moveNumber?: number
+      } | null
       ending: { loser: 'white' | 'black'; loserWp: number; termination: string } | null
-      fortune: { kind: 'lead_lost' | 'saved'; from: number; to: number; byPly: number | null }[]
+      /** `peakMove` (lead_lost) and `fromMove` (saved, E1) are read by the headline. */
+      fortune: {
+        kind: 'lead_lost' | 'saved'; from: number; to: number; byPly: number | null
+        peakMove?: number; fromMove?: number; endedBeforeGame?: boolean
+      }[]
       lowClock: { ply: number; position: number; threshold: number; momentsAfter: number } | null
       opening: ReportOpening | null
       /** A decided game with no moment: where the loser's standing fell furthest. */
@@ -291,13 +326,19 @@ export type GameReport =
       } | null
       /** A window that was computed but held a moment, so no slide was said. */
       slideGated: { from: number; to: number; blockedBy: number[] } | null
-      /** A finding kind repeated on the user's moves, one of them a moment card. */
-      pattern: {
-        kind: string
-        subject: string
-        plies: number[]
-        onCards: number[]
-      } | null
+      /** GR2-3: the slide not shown because the loser climbed back to 40 % or more after it. */
+      slideReversed?: { from: number; to: number } | null
+      /** GR2-8 (R4): the game's one "found it" moment of the user's, or null. */
+      found?: ReportFound | null
+      /** R5 (GR2-12, -13): two sentences at most, every clause read off a field
+       *  (core/game_report.headline). Shown first. */
+      headline?: string[]
+      /** R5: the lines shown after the cards (opening, clock). The per-game pattern line
+       *  left the report when the Insights patterns card shipped (R6-5). */
+      context?: string[]
+      /** R5: the user's moves from the decided position to the end, and the errors among them. */
+      conversion?: { moves: number; errors: number } | null
+      /** The story lines as they were before R5; not rendered (headline and context are). */
       lines: string[]
     }
 
@@ -526,6 +567,37 @@ export interface InsightsPhaseVerdict {
   comparedTotal: number
 }
 
+/** R6 (PATTERNS.md §6a): one ply behind a pattern sentence, which opens Review there. */
+export interface InsightsPatternItem {
+  gameId: number
+  ply: number
+  move: string | null
+  label: string | null
+  date: string
+  opponent: string | null
+}
+
+/** A sentence of the patterns card. Only sentences that pass (a game-clustered interval
+ *  excluding 1.0 in the measured direction, and Benjamini–Hochberg) are sent. */
+export interface InsightsPatternSentence {
+  key: 'punish' | 'decided'
+  text: string
+  link: { label: string; count: number; items: InsightsPatternItem[] }
+}
+
+export interface InsightsPatterns {
+  /** Games under the filters with stored pattern facts — what the card covers. */
+  covered: number
+  /** Analysed games under the filters. */
+  analysed: number
+  sentences: InsightsPatternSentence[]
+  /** Every sentence tested, shown or not, with its figures (for the record, not shown). */
+  tested: {
+    key: string; shown: boolean; rr: number; lo: number; hi: number; p: number
+    nx: number; yx: number; no: number; yo: number; games: number
+  }[]
+}
+
 /** The sidecar's answer when a newer insights request overtook this one before
  *  it ran. No data is built; the caller should keep what it has and wait for the
  *  newer reply. Every field but `superseded` is absent. */
@@ -551,6 +623,8 @@ export interface InsightsResult {
   phase_quality: InsightsPhase[]
   phase_verdict: InsightsPhaseVerdict | null
   castling: InsightsCastlingRow[]
+  /** R6: patterns across games, from stored per-run facts. */
+  patterns: InsightsPatterns
 }
 
 // ── puzzles ──────────────────────────────────────────────────────────────────
@@ -676,6 +750,46 @@ export interface RelabelResult {
   seconds?: number
 }
 
+/** One opening book of the manifest (BOOK-DL, `books_status`). */
+export interface BookInfo {
+  id: string
+  label: string
+  minGames: number
+  bytes: number
+  sha256: string
+  url: string
+  default: boolean
+  /** Downloaded and verified in this data folder. */
+  installed: boolean
+  /** The book in use. */
+  active: boolean
+}
+
+/** A book job in flight: downloading, backing up, or relabelling the book plies. */
+export interface BookJob {
+  id: string
+  phase: 'download' | 'backup' | 'relabel'
+  done: number
+  total: number
+}
+
+export interface BooksStatus {
+  books: BookInfo[]
+  active: string | null
+  defaultId: string
+  job: BookJob | null
+  last: { id: string; ok: boolean; message?: string; labelsChanged?: number } | null
+}
+
+export interface BookDoneEvent {
+  id: string
+  ok: true
+  runs: number
+  labelsChanged: number
+  backup: string
+  seconds: number
+}
+
 export interface RelabelStatus {
   state: 'idle' | 'manual' | 'running' | 'done' | 'error'
   done: number
@@ -711,6 +825,11 @@ export const api = {
   appInfo: () => sidecar.request<AppInfo>('app_info'),
   /** Relabel on update (BETA item 5). */
   relabelStatus: () => sidecar.request<RelabelStatus>('relabel_status'),
+  /** Opening books (BOOK-DL): the manifest, what is installed, the one in use. */
+  booksStatus: () => sidecar.request<BooksStatus>('books_status'),
+  /** Download (if needed), verify and switch to a book; progress arrives as book_progress. */
+  bookUse: (id: string) => sidecar.request<{ started: boolean }>('book_use', { id }),
+  bookCancel: () => sidecar.request<{ cancelled: boolean }>('book_cancel'),
   /** "Flag this" (BETA): appended to a local file, never sent anywhere. */
   flagItem: (p: {
     kind: string
@@ -866,6 +985,8 @@ export const api = {
       /** False when no Polyglot book loaded, which makes every family untrainable. */
       bookAvailable: boolean
       bookPath: string
+      /** The manifest id of the book in use, or null (BOOK-DL). */
+      bookId: string | null
       families: TrainerFamilySummary[]
     }>('trainer_lobby'),
   trainerIndexCoverage: () =>

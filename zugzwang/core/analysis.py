@@ -240,9 +240,10 @@ def analyze_game_plies(
 
         # The label is not decided in this loop. Since classifier version 3 it reads the
         # depth-14 score of the position a move created, which is the *next* ply's
-        # before-search (CLS-V3-1). So ply N is labelled and emitted here, one ply behind,
-        # as soon as ply N+1's before-search exists; the last ply after the final
-        # position's search. Ply N's row is appended now with its before-search and
+        # before-search (CLS-V3-1), and since J1 (version 4) whether the mover's next move
+        # captured the piece the best line takes — ply N+2's position and move. So ply N
+        # is labelled and emitted here, two plies behind, as soon as ply N+2's row exists;
+        # the last two plies after the final position's search. Ply N's row is appended now with its before-search and
         # completed below with the after-move search, which `label_ply` keeps as
         # `after_search_*`.
         plies.append(MoveAnalysis(
@@ -264,8 +265,8 @@ def analyze_game_plies(
             is_book=is_book,
             lines=top_lines,
         ))
-        if ply >= 1:
-            yield ("ply", ply - 1, total, _labelled(ply - 1, None))
+        if ply >= 2:
+            yield ("ply", ply - 2, total, _labelled(ply - 2, None))
 
         # Push the played move to get the resulting score
         board.push(move)
@@ -322,6 +323,8 @@ def analyze_game_plies(
             yield ("error", f"engine error on the final position: {exc}")
             return
 
+    if total >= 2:
+        yield ("ply", total - 2, total, _labelled(total - 2, final_lines))
     yield ("ply", total - 1, total, _labelled(total - 1, final_lines))
     yield ("done", labelled_summary(labelled), final_lines)
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { MoveAnalysisInfo, ReportMoment } from './api'
+import type { MoveAnalysisInfo, ReportFound, ReportMoment } from './api'
 import {
   bandChange,
   bookTick,
@@ -16,6 +16,8 @@ import {
   leadingGap,
   liveSeries,
   momentsHeading,
+  replyHidden,
+  reportItems,
   type AnalysedReport,
 } from './report'
 
@@ -61,7 +63,6 @@ function report(shown: ReportMoment[], groups: number[][], total = shown.length)
     opening: null,
     slide: null,
     slideGated: null,
-    pattern: null,
     lines: [],
   }
 }
@@ -72,7 +73,7 @@ describe('momentsHeading', () => {
   })
   it('does not imply a cap when there was none', () => {
     expect(momentsHeading(2, 2)).toBe('2 moments')
-    expect(momentsHeading(1, 1)).toBe('The moment')
+    expect(momentsHeading(1, 1)).toBe('1 moment')
   })
   it('has no heading when there is nothing to head', () => {
     expect(momentsHeading(0, 0)).toBeNull()
@@ -89,6 +90,34 @@ describe('cards and markers', () => {
       { position: 18, n: 1, tone: 'you' },
       { position: 41, n: 2, tone: 'opponent' },
     ])
+  })
+})
+
+describe('found it (GR2-8)', () => {
+  const found: ReportFound = {
+    ply: 30,
+    kind: 'only_move',
+    side: 'white',
+    classification: 'great',
+    san: 'Kf5',
+    label: '16.Kf5',
+    sentence: 'Kf5 was the only move that kept the advantage; the next best, c5, was level.',
+  }
+  const r = { ...report([moment(17, true), moment(18, false), moment(40, false)], [[17, 18], [40]], 5), found }
+  it('sits among the cards in game order, unnumbered, the cards keeping their numbers', () => {
+    expect(reportItems(r).map((it) => (it.kind === 'card' ? it.n : 'found'))).toEqual([1, 'found', 2])
+  })
+  it('comes last when it is after every card, and alone when there are none', () => {
+    expect(reportItems({ ...r, found: { ...found, ply: 60 } }).map((it) => it.kind)).toEqual([
+      'card',
+      'card',
+      'found',
+    ])
+    expect(reportItems({ ...report([], []), found }).map((it) => it.kind)).toEqual(['found'])
+  })
+  it('gets a check-marked graph marker after its move', () => {
+    expect(graphMarkers(r)).toContainEqual({ position: 31, n: 0, tone: 'found' })
+    expect(graphMarkers(report([moment(17, true)], [[17]])).some((m) => m.tone === 'found')).toBe(false)
   })
 })
 
@@ -197,5 +226,18 @@ describe('Try', () => {
     expect(verdictText({ kind: 'not-it', san: 'a3', bestSan: 'e4', loss: 0.123 })).toBe(
       "a3 gives up about 12 points; the engine's move is e4.",
     )
+  })
+})
+
+describe('replyHidden', () => {
+  const theirs = { ...moment(4, false), reply: "You played 3…Nxe5; the engine's move was 3…Qh4+." }
+  it('hides the reply while the next move is being tried and not yet judged', () => {
+    expect(replyHidden(theirs, 5, null)).toBe(true)
+    expect(replyHidden(theirs, 5, { kind: 'judging' })).toBe(true)
+  })
+  it('shows it otherwise', () => {
+    expect(replyHidden(theirs, null, null)).toBe(false)
+    expect(replyHidden(theirs, 4, null)).toBe(false)
+    expect(replyHidden(theirs, 5, { kind: 'good', san: 'Qh4+', bestSan: 'Qh4+', exact: true })).toBe(false)
   })
 })

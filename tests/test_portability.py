@@ -184,6 +184,7 @@ def test_idle_ceiling_leaves_two_cpus(cores, logical, want):
 
 
 def test_windows_data_folder_is_the_tauri_identifier():
+    # The beta build's identifier (the dev run has its own since fix/dev-launch, 2026-11-13).
     import json
-    conf = json.loads((Path(C.REPO_ROOT) / "desktop/src-tauri/tauri.conf.json").read_text())
+    conf = json.loads((Path(C.REPO_ROOT) / "desktop/src-tauri/tauri.beta.conf.json").read_text())
     assert C.WINDOWS_DATA_DIR_NAME == conf["identifier"]

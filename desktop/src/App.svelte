@@ -34,7 +34,7 @@
   const NAV = BETA ? ALL_NAV.filter((n) => n.route !== 'trainer') : ALL_NAV
 
   let route = $state<Route>('home')
-  let reviewTarget = $state<{ gameId?: number; fen?: string } | null>(null)
+  let reviewTarget = $state<{ gameId?: number; fen?: string; ply?: number } | null>(null)
   // where a Back from the review/analysis screen should return to
   let reviewOrigin = $state<Route>('games')
   let spawnError = $state('')
@@ -54,6 +54,12 @@
   function openReview(gameId: number) {
     reviewOrigin = 'games'
     reviewTarget = { gameId }
+    route = 'review'
+  }
+  // R6: a ply behind an Insights pattern, opened in Review; Back returns to Insights.
+  function openReviewAt(gameId: number, ply: number) {
+    reviewOrigin = 'insights'
+    reviewTarget = { gameId, ply }
     route = 'review'
   }
   function openFenReview(fen: string, origin: Route = 'games') {
@@ -169,6 +175,7 @@
         <ReviewScreen
           gameId={reviewTarget.gameId ?? null}
           fen={reviewTarget.fen ?? null}
+          ply={reviewTarget.ply ?? null}
           onback={() => navTo(reviewOrigin)}
           onplayfen={playFromFen}
         />
@@ -189,6 +196,7 @@
                 navTo('trainer')
               }}
           onconnect={() => navTo('settings')}
+          onopen={openReviewAt}
         />
       {:else if route === 'settings'}
         <SettingsScreen />

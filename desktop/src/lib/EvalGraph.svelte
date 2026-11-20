@@ -200,7 +200,9 @@
       <g class="marker {m.tone}" onclick={(e) => onMarker(e, m.position)}>
         <circle cx={xAt(m.position)} cy={markerY(m.position)} r="12" class="hit" />
         <circle cx={xAt(m.position)} cy={markerY(m.position)} r="8.5" class="dot" />
-        <text x={xAt(m.position)} y={markerY(m.position) + 3.5} text-anchor="middle">{m.n}</text>
+        <text x={xAt(m.position)} y={markerY(m.position) + 3.5} text-anchor="middle"
+          >{m.tone === 'found' ? '✓' : m.n}</text
+        >
       </g>
     {/each}
   </svg>
@@ -318,6 +320,9 @@
   }
   .marker.neutral .dot {
     fill: var(--text-muted);
+  }
+  .marker.found .dot {
+    fill: var(--win);
   }
   .marker text {
     font-size: 10px;

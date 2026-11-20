@@ -419,7 +419,9 @@ def test_an_engine_error_on_the_after_search_ends_the_game(stockfish):
     kinds = [e[0] for e in events]
     assert "done" not in kinds
     assert kinds[-1] == "error" and "after ply 4" in events[-1][1]
-    assert [e[1] for e in events if e[0] == "ply"] == [0, 1, 2, 3]   # ply 4 never emitted
+    # Ply 4 is never emitted; nor is ply 3, since J1 (classifier version 4) labels two plies
+    # behind and ply 3's label waits for ply 5's row.
+    assert [e[1] for e in events if e[0] == "ply"] == [0, 1, 2]
 
 
 # ── VAL-DEATH-2: a deterministic crash stops being queued ─────────────────────

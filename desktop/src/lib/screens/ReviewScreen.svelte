@@ -55,10 +55,12 @@
   interface Props {
     gameId?: number | null
     fen?: string | null
+    /** R6: open the game at this ply (the position after its move). */
+    ply?: number | null
     onback: () => void
     onplayfen: (fen: string) => void
   }
-  let { gameId = null, fen = null, onback, onplayfen }: Props = $props()
+  let { gameId = null, fen = null, ply = null, onback, onplayfen }: Props = $props()
 
   type Role = 'queen' | 'knight' | 'rook' | 'bishop'
   const ROLE_CHAR: Record<Role, string> = { queen: 'q', knight: 'n', rook: 'r', bishop: 'b' }
@@ -263,7 +265,9 @@
     try {
       const d = await api.getGame(gameId!)
       detail = d
-      idx = d.plies.length
+      // R6: opened at a ply (an Insights pattern's link) — the position after that move,
+      // as a report card's click shows it; otherwise the end of the game.
+      idx = ply != null ? Math.max(0, Math.min(d.plies.length, ply + 1)) : d.plies.length
       const map: Record<number, MoveAnalysisInfo> = {}
       for (const ma of d.analysis?.moves ?? []) map[ma.ply] = ma
       analyses = map

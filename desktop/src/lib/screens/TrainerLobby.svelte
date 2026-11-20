@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { api, sidecar, type TrainerFamilySummary } from '../api'
+  import OpeningBook from '../OpeningBook.svelte'
 
   interface Props {
     onselect: (family: TrainerFamilySummary) => void
@@ -165,7 +166,7 @@
           {#if bookAvailable}
             Drill any of {families.length} opening families against weighted book replies.
           {:else}
-            Opening training needs a Polyglot opening book, which is not installed.
+            Opening training needs an opening book, and none is installed.
           {/if}
         </p>
       </header>
@@ -179,7 +180,8 @@
             lines are worth drilling. Without one there is nothing to drill against, so all
             {families.length} opening families are unavailable.
           </p>
-          <p class="no-book-where">Expected at <code>{bookPath}</code></p>
+          <OpeningBook compact onchange={refresh} />
+          <p class="no-book-where">Books are kept in <code>{bookPath}</code></p>
           <p class="no-book-note">
             Everything else that names openings still works — game review labels each
             opening from the ECO data, which is installed.

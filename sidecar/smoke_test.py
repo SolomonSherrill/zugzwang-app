@@ -98,6 +98,10 @@ def main() -> None:
     ap.add_argument("--sidecar", help="a packaged sidecar executable to drive instead")
     ap.add_argument("--skip-trainer", action="store_true",
                     help="skip the opening-trainer section (no book, W20; hidden in beta)")
+    ap.add_argument("--book", type=Path,
+                    help="an opening book file of the manifest (BOOK-DL) to install into the temp "
+                         "data folder and switch to through book_use before the trainer; default "
+                         "$ZUGZWANG_TEST_BOOK, else the dev run's book in use (read only)")
     args = ap.parse_args()
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp()) / "smoke.db"
@@ -405,12 +409,55 @@ def main() -> None:
     print("✓ rush session saved; leaderboard shows new entry at rank 0")
 
     # ── opening trainer ───────────────────────────────────────────────────────
+    # W26: a missing book fails the book checks without hiding the ones after them.
+    failed: list[str] = []
     if args.skip_trainer:
         print("- opening trainer SKIPPED (--skip-trainer: no book, W20; hidden in beta)")
         trainer(c, skip=True)
     else:
-        trainer(c, skip=False)
-    finish(c, tmp, t0)
+        for name, step in (("opening book", lambda: install_book(c, tmp, args.book)),
+                           ("opening trainer", lambda: trainer(c, skip=False))):
+            try:
+                step()
+            except Exception as exc:
+                failed.append(f"{name}: {exc!r}")
+                print(f"✗ {name} FAILED: {exc!r}")
+                break
+    finish(c, tmp, t0, failed)
+
+
+def install_book(c: "Client", tmp: Path, book: Path | None) -> None:
+    """BOOK-DL: put a manifest book in the temp data folder (a symlink, as if downloaded) and
+    switch to it through the app's own path: book_use → verified backup → book relabel →
+    book_done, then the facts refill."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from tests.bookfile import real_book_path
+    from zugzwang.core import books
+    book = book or real_book_path()
+    if book is None:
+        raise AssertionError("no opening book: pass --book, set ZUGZWANG_TEST_BOOK, or install "
+                             "one in the dev run (Settings → Opening book)")
+    size = book.stat().st_size
+    spec = next((b for b in books.MANIFEST if b.bytes == size), None)
+    assert spec is not None, f"{book} is not a manifest book ({size} bytes)"
+    st = c.request("books_status")
+    assert st["active"] is None and not any(b["installed"] for b in st["books"]), st
+    dest = tmp.parent / "books" / spec.file
+    dest.parent.mkdir(exist_ok=True)
+    dest.symlink_to(book.resolve())
+    lobby = c.request("trainer_lobby")
+    assert lobby["bookAvailable"] is False
+    t = time.monotonic()
+    assert c.request("book_use", {"id": spec.id})["started"] is True
+    done = c.wait_event("book_done", timeout=300)
+    assert done["id"] == spec.id and done["integrity"] == "ok", done
+    assert Path(done["backup"]).exists(), done
+    st = c.request("books_status")
+    assert st["active"] == spec.id and st["job"] is None, st
+    if done["labelsChanged"]:
+        c.wait_event("pattern_facts_refilled", timeout=60)
+    print(f"✓ book_use {spec.id}: backup, relabel of {done['runs']} runs "
+          f"({done['labelsChanged']} labels → book) in {time.monotonic() - t:.1f}s")
 
 
 def trainer(c: "Client", skip: bool) -> None:
@@ -473,7 +520,7 @@ def trainer(c: "Client", skip: bool) -> None:
     print("✓ mastery: 3 distinct completions @100% → line mastered, counts roll up")
 
 
-def finish(c: "Client", tmp: Path, t0: float) -> None:
+def finish(c: "Client", tmp: Path, t0: float, failed: list[str] | None = None) -> None:
     c.close()
 
     # ── verify persistence with the real Database schema ─────────────────────
@@ -483,6 +530,10 @@ def finish(c: "Client", tmp: Path, t0: float) -> None:
     ).fetchall()
     n_runs = conn.execute("SELECT count(*) FROM analysis_runs").fetchone()[0]
     n_moves = conn.execute("SELECT count(*) FROM move_analyses").fetchone()[0]
+    # R6: the completed run's pattern facts are written when it completes.
+    n_facts = conn.execute(
+        "SELECT count(*) FROM pattern_facts f JOIN analysis_runs r ON r.id = f.run_id"
+        " WHERE r.completed_at IS NOT NULL").fetchone()[0]
     conn.close()
     # 4 played + 1 imported from text + 1 imported-but-truncated + 1 imported from
     # a file path. The truncated one is the point of counting here at all: a game
@@ -492,9 +543,13 @@ def finish(c: "Client", tmp: Path, t0: float) -> None:
     assert terms == ["resignation", "draw_agreed", "timeout", "checkmate"], terms
     assert rows[0][3] is not None, "opening name not populated on save"
     assert n_runs == 1 and n_moves == 9, (n_runs, n_moves)
+    assert n_facts == 1, f"expected the run's pattern facts, got {n_facts} rows"
     print(f"✓ 7 games + 1 analysis run ({n_moves} move rows) persisted to DB "
           f"(game 1 opening: {rows[0][3]})")
 
+    if failed:
+        print(f"\nFAILED ({len(failed)}): " + "; ".join(failed))
+        sys.exit(1)
     print(f"\nAll checks passed in {time.monotonic() - t0:.1f}s total.")
 
 

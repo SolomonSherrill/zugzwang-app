@@ -5,12 +5,14 @@ import pytest
 
 from zugzwang.core.openings import OpeningsBook
 import zugzwang.config as C
+from tests.bookfile import real_book_path
 
 
 @pytest.fixture(scope="module")
 def book():
-    """Real OpeningsBook loaded from the bundled assets."""
-    return OpeningsBook()
+    """A real OpeningsBook: the dev run's installed book (BOOK-DL). With none, a path that does
+    not exist, so the book tests fail and report the missing asset (W20)."""
+    return OpeningsBook(book_path=real_book_path() or C.USER_DIR / "no-book-installed.bin")
 
 
 # ── Book detection ────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ nothing, so most of these assert *absence*.
 import chess
 import pytest
 
+from zugzwang.core.findings import MoveAbout, MoveRole
 from zugzwang.core.explain import (
     PATTERN_DISCOVERED_CHECK,
     PATTERN_DISCOVERED_LINE,
@@ -494,13 +495,13 @@ def test_ranking_puts_mate_first_then_what_happened_then_what_was_offered():
     It carries `subject="played"` — it is a finding about the played move — so
     ordering on `subject` alone put it in the same tier as the hang and let
     material decide, which told a player who dropped a knight about a rook they
-    never won. `NAMES_MOVE` is the field that separates them.
+    never won. `Finding.about` (STAGE5-MOVE) is the field that separates them.
     """
     findings = [
-        Finding(kind="best_defends_piece", subject="best", basis="see"),
-        Finding(kind="hangs_piece", subject="played", basis="see", material=-3.0),
-        Finding(kind="missed_material", subject="played", basis="see", material=-9.0),
-        Finding(kind="walks_into_mate", subject="played", basis="board", mate_in=2),
+        Finding(kind="best_defends_piece", subject="best", basis="see", about=MoveAbout(MoveRole.BEST, None, None)),
+        Finding(kind="hangs_piece", subject="played", basis="see", material=-3.0, about=MoveAbout(MoveRole.PLAYED, None, None)),
+        Finding(kind="missed_material", subject="played", basis="see", material=-9.0, about=MoveAbout(MoveRole.BEST, None, None)),
+        Finding(kind="walks_into_mate", subject="played", basis="board", mate_in=2, about=MoveAbout(MoveRole.PLAYED, None, None)),
     ]
     assert [f.kind for f in rank_findings(findings)] == [
         "walks_into_mate",
@@ -514,16 +515,16 @@ def test_material_still_orders_findings_inside_one_tier():
     """The tier split must not cost the within-tier ordering: two real losses
     still report the bigger one first."""
     findings = [
-        Finding(kind="hangs_piece", subject="played", basis="see", material=-1.0),
-        Finding(kind="hangs_piece", subject="played", basis="see", material=-5.0),
+        Finding(kind="hangs_piece", subject="played", basis="see", material=-1.0, about=MoveAbout(MoveRole.PLAYED, None, None)),
+        Finding(kind="hangs_piece", subject="played", basis="see", material=-5.0, about=MoveAbout(MoveRole.PLAYED, None, None)),
     ]
     assert [f.material for f in rank_findings(findings)] == [-5.0, -1.0]
 
 
 def test_mate_findings_rank_by_how_forced_they_are():
     findings = [
-        Finding(kind="walks_into_mate", subject="played", basis="engine", mate_in=5),
-        Finding(kind="missed_mate", subject="played", basis="board", mate_in=1),
+        Finding(kind="walks_into_mate", subject="played", basis="engine", mate_in=5, about=MoveAbout(MoveRole.PLAYED, None, None)),
+        Finding(kind="missed_mate", subject="played", basis="board", mate_in=1, about=MoveAbout(MoveRole.BEST, None, None)),
     ]
     assert [f.mate_in for f in rank_findings(findings)] == [1, 5]
 
@@ -1252,3 +1253,102 @@ def test_a_row_missing_any_column_raises_rather_than_defaulting(dropped):
     del row[dropped]
     with pytest.raises(KeyError, match=dropped):
         explain_stored_ply(row)
+
+
+# ── T-HOLD (2026-11-14; EXPLANATIONS.md "T-HOLD"): a capture claim names a piece only where
+# the capture holds that piece's value after the reply. The case (cited there by game id and
+# ply): 20.Nc4 attacks the queen on b6 and leaves White's queen on c8 en prise. SEE(Rxc8) is
+# 9, but 20...Rxc8 21.Nxb6 Bxb6 holds a knight (3.0), so "You left the queen on c8 hanging —
+# Rxc8 wins it." was false.
+T_HOLD_FEN = 'r1Qbk2r/pp1n2pp/1q6/2p5/3P4/P7/1P1NBPPP/R1B1K2R w KQkq - 1 20'
+
+
+def test_t_hold_a_capture_holding_less_than_the_piece_names_nothing():
+    from zugzwang.core.explain import _holds_after_reply, see
+    board = chess.Board(T_HOLD_FEN)
+    board.push_uci("d2c4")
+    rxc8 = chess.Move.from_uci("a8c8")
+    assert see(board, rxc8) == 9.0
+    assert _holds_after_reply(board, rxc8, 1.0) == 3.0
+    found = explain_ply(T_HOLD_FEN, "d2c4", best_uci="c8a8")
+    assert not [f for f in found if any(p.square == "c8" for p in f.pieces)]
+
+
+def test_t_hold_labelling_keeps_the_material_set():
+    # Labelling's T3 reads what is lost, not the name: its set is the pre-T-HOLD one.
+    found = explain_ply(T_HOLD_FEN, "d2c4", best_uci="c8a8", hold_names_piece=False)
+    hit = [f for f in found if f.kind == "ignored_threat"]
+    assert len(hit) == 1 and hit[0].pieces[0].square == "c8" and hit[0].material == -3.0
+
+
+def test_t_hold_a_capture_that_holds_the_piece_still_names_it():
+    # Constructed: a loose knight on e5 that d6xe5 wins outright — the hold equals its value.
+    fen = "4k3/8/3p4/4N3/8/8/8/4K3 w - - 0 1"
+    found = explain_ply(fen, "e1d1", best_uci="e5c4")
+    names = [(f.kind, f.pieces[0].square) for f in found if f.pieces]
+    assert ("ignored_threat", "e5") in names
+
+
+# ── L1 (owner, 2026-11-14; EXPLANATIONS.md "L1"): T-HOLD replaced. A capture claim whose two-ply
+# hold falls short is silenced only where the stored refutation (ply N+1's line) does not
+# confirm the named loss by F1's measure. Both required cases, by chess.com id + ply in
+# EXPLANATIONS.md: T-HOLD's queen stays silent; GameReport's bishop on g5 returns.
+
+# T-HOLD's case, ply 39's stored line: 20...Rxc8 21.Nxb6 Bxb6 — the opponent keeps a knight.
+T_HOLD_REFUTATION = ("a8c8 c4b6 d8b6 d4c5 d7c5 e2b5 e8f7 c1e3 h8d8 a1d1 d8d1 e1d1 c5b3 b5a4 "
+                     "c8d8 d1c2 b3d4 c2c1").split()
+# 11.Nxd4 (Black to answer) leaves the bishop on g5 en prise to the queen; ply 21's stored
+# line, 11...Qxg5, keeps it.
+G5_FEN = "r3k2r/ppp2ppp/2n1b3/2bq2B1/3p4/2P2N2/PP3PPP/RN1QR1K1 w kq - 0 11"
+G5_REFUTATION = "d5g5 d4e6 f7e6 b2b4 c5e7 b4b5 c6d8 e1e3 e8g8 b1d2 g5f5 d1e2 e7g5".split()
+
+
+def test_l1_a_refutation_that_keeps_a_knight_leaves_the_queen_unnamed():
+    found = explain_ply(T_HOLD_FEN, "d2c4", best_uci="c8a8", refutation=T_HOLD_REFUTATION)
+    assert not [f for f in found if any(p.square == "c8" for p in f.pieces)]
+
+
+def test_l1_a_refutation_that_wins_the_piece_restores_the_claim():
+    from zugzwang.core.explain import _holds_after_reply
+    board = chess.Board(G5_FEN)
+    board.push_uci("f3d4")
+    # The two-ply hold falls short of the bishop (T-HOLD silenced it) ...
+    assert _holds_after_reply(board, chess.Move.from_uci("d5g5"), 1.0) < 2.0
+    assert not [f for f in explain_ply(G5_FEN, "f3d4", best_uci="c3d4") if f.pieces
+                and f.pieces[0].square == "g5"]
+    # ... and the engine's own refutation keeps it, so the claim stands.
+    found = explain_ply(G5_FEN, "f3d4", best_uci="c3d4", refutation=G5_REFUTATION)
+    hit = [f for f in found if f.kind == "hangs_piece" and f.pieces[0].square == "g5"]
+    assert len(hit) == 1 and hit[0].moves["refutation"].san == "Qxg5"
+
+
+def test_l1_a_refutation_that_starts_illegally_confirms_nothing():
+    found = explain_ply(G5_FEN, "f3d4", best_uci="c3d4", refutation=["e1e2"])
+    assert not [f for f in found if f.pieces and f.pieces[0].square == "g5"]
+
+
+def test_l1_the_stored_path_reads_ply_n_plus_1s_line():
+    from zugzwang.core.explain_text import RunPlies, explain_and_describe_stored_ply
+    rows = {
+        20: {"fen_before": G5_FEN, "played_uci": "f3d4", "best_uci": "c3d4",
+             "classification": "blunder", "score_before_cp": -100, "score_before_mate": None,
+             "score_after_cp": -377, "score_after_mate": None, "pv_uci": ""},
+        21: {"fen_before": "r3k2r/ppp2ppp/2n1b3/2bq2B1/3N4/2P5/PP3PPP/RN1QR1K1 b kq - 0 11",
+             "played_uci": "c6d4", "best_uci": "d5g5", "classification": "mistake",
+             "score_before_cp": 377, "score_before_mate": None, "score_after_cp": 151,
+             "score_after_mate": None, "pv_uci": " ".join(G5_REFUTATION)},
+    }
+    sentences = explain_and_describe_stored_ply(rows[20], "black", run=RunPlies(rows, 20))[1]
+    assert sentences == ["White drops the bishop on g5 — Qxg5 takes it."]
+    # Alone (no run, so no refutation), the claim stays silent, as T-HOLD left it.
+    assert explain_and_describe_stored_ply(rows[20], "black")[1] == []
+
+
+def test_l1_a_refutation_that_never_takes_the_piece_confirms_nothing():
+    # Constructed: the loose knight on e5 is attacked by d6, but the stored "refutation" runs
+    # the king instead and never takes it — material elsewhere is not the named loss.
+    from zugzwang.core.explain import _confirmed_by_line
+    board = chess.Board("4k3/8/3p4/4N3/8/8/8/4K3 b - - 0 1")
+    e5 = chess.parse_square("e5")
+    assert _confirmed_by_line(board, ["d6e5"], e5, 3.0)
+    assert not _confirmed_by_line(board, ["e8d8", "e5f7", "d8e7"], e5, 3.0)

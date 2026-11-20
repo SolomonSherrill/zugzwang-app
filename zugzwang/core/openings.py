@@ -2,7 +2,7 @@
 Opening book and ECO name lookup. No Qt dependencies.
 
 OpeningsBook:
-  - Reads book_mingame3.bin (Polyglot format) for book-move detection.
+  - Reads the opening book in use (Polyglot format; `core/books.py`) for book-move detection.
   - Reads lichess-org ECO TSVs to build a {epd: (eco, name)} map.
   - Degrades silently when assets are missing.
 """
@@ -42,7 +42,7 @@ class FamilyInfo:
 class OpeningsBook:
     def __init__(
         self,
-        book_path: Path = C.OPENINGS_BOOK_PATH,
+        book_path: Path | None = None,
         eco_dir: Path = C.OPENINGS_ECO_DIR,
     ) -> None:
         self._reader: chess.polyglot.MemoryMappedReader | None = None
@@ -50,7 +50,13 @@ class OpeningsBook:
         self._entries: list[tuple[str, str, str, str]] = []   # (eco, name, starting_fen, starting_pgn)
         self._family_index: list[FamilyInfo] | None = None
 
-        if book_path.exists():
+        if book_path is None:
+            from zugzwang.core import books
+            book_path = books.active_book_path()
+        if book_path is None:
+            logger.warning("No opening book installed — book classification disabled "
+                           "(Settings → Opening book)")
+        elif book_path.exists():
             try:
                 self._reader = chess.polyglot.open_reader(str(book_path))
                 logger.info("Opening book loaded: %s", book_path)

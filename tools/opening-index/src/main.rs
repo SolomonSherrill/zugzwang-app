@@ -9,6 +9,8 @@
 //!   opening-index merge  --out FILE RUN...
 //!   opening-index stats  --index FILE
 //!   opening-index book   --index FILE --out FILE.bin [--min-games N] [--bands 1-3] [--speeds 1,2,3]
+//!                        [--weight polyglot|games] [--max-ply P]
+//!   opening-index splits --index FILE --out FILE [--min-games N] [--max-ply P] [--bands 1-3] [--keys FILE]
 //!   opening-index hashes --games N        (stdin PGN → FEN, key, move per ply, for checking)
 //!   opening-index fens   --targets FILE --out FILE [--max-ply P]  (stdin PGN → key, FEN per target)
 //!
@@ -733,9 +735,23 @@ fn book(args: &[String]) -> io::Result<()> {
     let min_games: u64 = arg(args, "--min-games").map(|s| s.parse().unwrap()).unwrap_or(3);
     let bands = parse_set(arg(args, "--bands"), 16);
     let speeds = parse_set(arg(args, "--speeds"), 6);
+    // --weight polyglot (default): 2 × wins + draws for the side to move, as polyglot's
+    // make-book and the lost book_mingame3.bin; a move that never scored gets weight 0 and is
+    // dropped. --weight games: the band's game count, so the trainer's floors read as games.
+    let by_games = match arg(args, "--weight").unwrap_or("polyglot") {
+        "polyglot" => false,
+        "games" => true,
+        w => panic!("--weight polyglot|games, not {w}"),
+    };
+    // --max-ply P: only positions first seen at ply <= P (default: the index's cap).
+    let max_ply: u8 = arg(args, "--max-ply").map(|s| s.parse().unwrap()).unwrap_or(u8::MAX);
     let mut entries: Vec<(u64, u16, u16)> = Vec::new();
     for_each_position(&index, |g| {
-        let white_to_move = g.iter().map(|r| r.minply).min().unwrap() % 2 == 0;
+        let minply = g.iter().map(|r| r.minply).min().unwrap();
+        if minply > max_ply {
+            return;
+        }
+        let white_to_move = minply % 2 == 0;
         let mut moves: Vec<(u16, u64)> = Vec::new();
         let mut i = 0;
         while i < g.len() {
@@ -752,7 +768,7 @@ fn book(args: &[String]) -> io::Result<()> {
             }
             if n >= min_games {
                 let wins = if white_to_move { w } else { n - w - d };
-                moves.push((mv, 2 * wins + d));
+                moves.push((mv, if by_games { n } else { 2 * wins + d }));
             }
         }
         let mut max = moves.iter().map(|m| m.1).max().unwrap_or(0);
@@ -841,6 +857,60 @@ fn targets(args: &[String]) -> io::Result<()> {
     })?;
     w.flush()?;
     eprintln!("targets {}: {n} positions", out.display());
+    Ok(())
+}
+
+/// Per-move result splits in `--bands`: positions first seen at ply <= `--max-ply` whose
+/// games in the bands reach `--min-games`. One line each: key, shallowest ply, games, then
+/// every move as polyglot:games:white_wins:draws, most-played first. For measuring whether
+/// the index's own results find traps (handoff item 6).
+fn splits(args: &[String]) -> io::Result<()> {
+    let index = PathBuf::from(arg(args, "--index").expect("--index FILE"));
+    let out = PathBuf::from(arg(args, "--out").expect("--out FILE"));
+    let min_games: u64 = arg(args, "--min-games").map(|s| s.parse().unwrap()).unwrap_or(10);
+    let max_ply: u8 = arg(args, "--max-ply").map(|s| s.parse().unwrap()).unwrap_or(24);
+    let bands = parse_set(arg(args, "--bands"), 16);
+    // --keys FILE: only these positions (first column, 16 hex digits), whatever their count.
+    let keys: Option<rustc_hash::FxHashSet<u64>> = arg(args, "--keys").map(|p| {
+        fs::read_to_string(p).unwrap().lines().filter_map(|l| l.split('\t').next())
+            .filter(|k| !k.is_empty()).map(|k| u64::from_str_radix(k, 16).unwrap()).collect()
+    });
+    let mut w = BufWriter::new(File::create(&out)?);
+    let mut n = 0u64;
+    for_each_position(&index, |g| {
+        let minply = g.iter().map(|r| r.minply).min().unwrap();
+        if let Some(k) = &keys {
+            if !k.contains(&g[0].key) {
+                return;
+            }
+        } else if minply > max_ply {
+            return;
+        }
+        let mut moves: Vec<(u16, u64, u64, u64)> = Vec::new();
+        for r in g {
+            if !bands[(r.dims >> 3) as usize] {
+                continue;
+            }
+            match moves.last_mut() {
+                Some(m) if m.0 == r.mv => {
+                    m.1 += r.n as u64;
+                    m.2 += r.w as u64;
+                    m.3 += r.d as u64;
+                }
+                _ => moves.push((r.mv, r.n as u64, r.w as u64, r.d as u64)),
+            }
+        }
+        let total: u64 = moves.iter().map(|m| m.1).sum();
+        if total < min_games && keys.is_none() {
+            return;
+        }
+        moves.sort_by_key(|m| (std::cmp::Reverse(m.1), m.0));
+        let ms: Vec<String> = moves.iter().map(|(mv, c, ww, d)| format!("{mv}:{c}:{ww}:{d}")).collect();
+        writeln!(w, "{:016x}\t{minply}\t{total}\t{}", g[0].key, ms.join(",")).unwrap();
+        n += 1;
+    })?;
+    w.flush()?;
+    eprintln!("splits {}: {n} positions", out.display());
     Ok(())
 }
 
@@ -1139,6 +1209,7 @@ fn main() -> io::Result<()> {
         Some("targets") => targets(&args),
         Some("evals") => evals(&args),
         Some("fens") => fens(&args),
+        Some("splits") => splits(&args),
         _ => {
             eprintln!("usage: opening-index scan|merge|stats|book|hashes …");
             std::process::exit(2);

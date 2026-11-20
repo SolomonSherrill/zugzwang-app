@@ -11,11 +11,19 @@
   import { theme } from '../theme.svelte'
   import { CLASS_COLORS, CLASS_LABELS } from '../classification'
   import ChartCanvas from './insights/ChartCanvas.svelte'
+  import PatternsCard from './insights/PatternsCard.svelte'
+  import { coverageText, emptyText } from '../patterns'
 
   let {
     ontrain,
     onconnect,
-  }: { ontrain?: (opening: { eco: string; name: string }) => void; onconnect: () => void } = $props()
+    onopen,
+  }: {
+    ontrain?: (opening: { eco: string; name: string }) => void
+    onconnect: () => void
+    /** R6: open a game in Review at a ply (the patterns card's links). */
+    onopen?: (gameId: number, ply: number) => void
+  } = $props()
 
   let data = $state<InsightsResult | null>(null)
   let loading = $state(true)
@@ -982,6 +990,21 @@
           {/if}
         </section>
       </div>
+
+      <!-- ── R6: patterns across games (PATTERNS.md §6a), after the phase card ─ -->
+      {#if data.patterns}
+        <section class="card">
+          <div class="card-head">
+            <h2 class="card-title">Patterns across your games</h2>
+            <p class="card-sub">{coverageText(data.patterns)}</p>
+          </div>
+          {#if data.patterns.sentences.length === 0}
+            <p class="verdict">{emptyText(data.patterns)}</p>
+          {:else}
+            <PatternsCard patterns={data.patterns} {onopen} />
+          {/if}
+        </section>
+      {/if}
 
       <!-- ── record + terminations ──────────────────────────────────────── -->
       <div class="grid2">

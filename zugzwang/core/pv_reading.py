@@ -72,6 +72,7 @@ no claim beyond what the stored line shows at its recorded depth.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -480,7 +481,40 @@ def decided(score_before_cp: int | None, score_before_mate: int | None,
 _WHY: dict[str, str] = {}    # the last reason _claim / _description declined (measurement)
 
 
-def _claim(fen_before: str, rd: PlyReading, line: LineReading) -> ProvenClaim | None:
+#: How `_claim` measures what the attacker keeps. `KEPT_FIRST` is F1 (owner, 2026-11-13),
+#: what every sentence uses. `KEPT_MIN` is the computation before F1 — the minimum running
+#: balance from the hold on, the defender's moves included. The classifier read it until
+#: version 4; H3 (owner, 2026-11-13, fourth round) moved labelling to `KEPT_FIRST` as well, so
+#: `KEPT_MIN` is kept only so the measurements comparing the two can be re-run.
+KEPT_FIRST = "first"
+KEPT_MIN = "min"
+
+
+def _kept_first_from(line: LineReading, k: int) -> float:
+    """F1's measure from step `k` (the hold): the least balance, relative to the attacker's
+    start and from its side, after each of the attacker's moves from `k` on and at the
+    settled end."""
+    sign = 1.0 if line.attacker == line.pov else -1.0
+    points = [i for i in range(k, len(line.steps)) if line.steps[i].colour == line.attacker]
+    return min([(line.steps[i].balance - line.reference) * sign for i in points]
+               + [(line.settled_end - line.reference) * sign])
+
+
+def kept_first(line: LineReading) -> float:
+    """What the attacker keeps in `line` by F1's measure (`KEPT_FIRST`, owner 2026-11-13) — the
+    measure every engine-line sentence names — in pawns: `math.inf` where the attacker mates,
+    0.0 where it holds no gain (no hold), else the least balance after each of its moves from
+    the hold on and at the settled end. L1 (owner, 2026-11-14) reads it to confirm a rule
+    layer's capture claim against the stored refutation (`explain._capture_claims`)."""
+    if line.mate_on:
+        return math.inf
+    if line.gain_held_from is None:
+        return 0.0
+    return _kept_first_from(line, _hold_index(line))
+
+
+def _claim(fen_before: str, rd: PlyReading, line: LineReading,
+           kept_rule: str = KEPT_FIRST) -> ProvenClaim | None:
     """The claim for a forcing carrier: its line from the attacker's start up to the
     point where what it has taken equals what it keeps, named in pieces."""
     k = _hold_index(line)
@@ -489,12 +523,29 @@ def _claim(fen_before: str, rd: PlyReading, line: LineReading) -> ProvenClaim | 
     took: tuple[str, ...] = ()
     gave: tuple[str, ...] = ()
     if not line.mate_on:
-        kept = min([(st.balance - line.reference) * sign for st in line.steps[k:]]
-                   + [(line.settled_end - line.reference) * sign])
-        # Extend past the hold to where the running balance is exactly what is kept, so
-        # every piece the sentence names is taken (and not retaken) within the line shown.
-        j = next((i for i in range(k, len(line.steps))
-                  if abs((line.steps[i].balance - line.reference) * sign - kept) < 1e-9), None)
+        # F1 (owner, 2026-11-13): what the attacker keeps is measured after each of ITS
+        # moves from the hold on, and at the settled end — not after the defender's, so a
+        # piece the defender takes mid-exchange that the attacker's next move wins back is
+        # not "given". The line ends at the first point that much is kept: the first move
+        # from the hold on after which the balance is `kept` and is still `kept` after the
+        # attacker's next move (the line's last move needs no next move). A defender's
+        # capture the attacker does not win back therefore ends the line itself, not the
+        # attacker's quiet move after it.
+        def rel(b: float) -> float:
+            return (b - line.reference) * sign
+
+        def at(i: int) -> bool:
+            return abs(rel(line.steps[i].balance) - kept) < 1e-9
+
+        n = len(line.steps)
+        if kept_rule == KEPT_MIN:
+            kept = min([rel(st.balance) for st in line.steps[k:]] + [rel(line.settled_end)])
+            j = next((i for i in range(k, n) if at(i)), None)
+        else:
+            points = [i for i in range(k, n) if line.steps[i].colour == line.attacker]
+            kept = _kept_first_from(line, k)
+            j = next((i for i in range(k, n) if at(i) and (i in points or all(
+                at(w) for w in [p for p in points if p > i][:1]))), None)
         if j is None:
             _WHY["why"] = "claim: what is kept arrives only by the settling capture"
             return None
@@ -599,7 +650,7 @@ class GateCheck:
 
 def gate_check(fen_before: str, rd: PlyReading | None, *, score_before_cp: int | None,
                score_before_mate: int | None, score_after_cp: int | None,
-               score_after_mate: int | None) -> GateCheck:
+               score_after_mate: int | None, kept_rule: str = KEPT_FIRST) -> GateCheck:
     scores = (score_before_cp, score_before_mate, score_after_cp, score_after_mate)
     if rd is None or not rd.fires:
         return GateCheck(False, False, False, False, None, None, None)
@@ -610,7 +661,7 @@ def gate_check(fen_before: str, rd: PlyReading | None, *, score_before_cp: int |
         return GateCheck(True, ok, dec, False, None, None, None)
     forcing = forcing_to_hold(line)
     _WHY.clear()
-    built = _claim(fen_before, rd, line) if forcing else _description(fen_before, rd, line)
+    built = _claim(fen_before, rd, line, kept_rule) if forcing else _description(fen_before, rd, line)
     result = built if ok and not dec else None
     return GateCheck(True, ok, dec, True, forcing, built is not None, result,
                      _WHY.get("why", "") if built is None else "")
@@ -618,7 +669,8 @@ def gate_check(fen_before: str, rd: PlyReading | None, *, score_before_cp: int |
 
 def gate_p(fen_before: str, rd: PlyReading | None, *, score_before_cp: int | None,
            score_before_mate: int | None, score_after_cp: int | None,
-           score_after_mate: int | None) -> ProvenClaim | Description | None:
+           score_after_mate: int | None,
+           kept_rule: str = KEPT_FIRST) -> ProvenClaim | Description | None:
     """What a ply's PV reading may emit: nothing unless it fires, the eval is
     consistent with it, the position was not already decided (with the verdict
     holding), and one line carries a gain or a mate. Forcing up to the hold → a
@@ -626,7 +678,7 @@ def gate_p(fen_before: str, rd: PlyReading | None, *, score_before_cp: int | Non
     → a `Description` of where the two engine lines stand, with no causation."""
     return gate_check(fen_before, rd, score_before_cp=score_before_cp,
                       score_before_mate=score_before_mate, score_after_cp=score_after_cp,
-                      score_after_mate=score_after_mate).result
+                      score_after_mate=score_after_mate, kept_rule=kept_rule).result
 
 
 # ── rendering (for the sample; not wired into the app) ───────────────────────

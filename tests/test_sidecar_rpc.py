@@ -471,9 +471,11 @@ def test_openings_book_reports_its_own_absence(tmp_path):
     assert absent.has_book is False
     assert absent.reader is None
 
-    present = OpeningsBook(book_path=C.OPENINGS_BOOK_PATH, eco_dir=tmp_path)
-    if not C.OPENINGS_BOOK_PATH.exists():
-        pytest.skip("book_mingame3.bin is gitignored; nothing to compare against")
+    from tests.bookfile import real_book_path
+    path = real_book_path()
+    if path is None:
+        pytest.skip("no opening book installed (BOOK-DL); nothing to compare against")
+    present = OpeningsBook(book_path=path, eco_dir=tmp_path)
     assert present.has_book is True
     present.close()
 
@@ -494,7 +496,8 @@ def test_trainer_lobby_reports_whether_a_book_loaded(server, sent, tmp_path, has
     result = sent[0]["result"]
 
     assert result["bookAvailable"] is has_book
-    assert result["bookPath"] == str(C.OPENINGS_BOOK_PATH)
+    from zugzwang.core import books
+    assert result["bookPath"] == str(books.books_dir())      # none installed in the test's dir
     server._db.close()
 
 
@@ -1029,7 +1032,8 @@ def test_game_report_rpc_reports_the_point_of_no_return(server, sent, tmp_path):
     server._handle_request({"id": 1, "method": "game_report", "params": {"game_id": gid}})
     r = sent[0]["result"]
     assert r["analysed"] is True and r["basis"]["complete"] is True
-    assert r["decided"] == {"position": 6, "side": "white", "byPly": 5}
+    assert r["decided"] == {"position": 6, "side": "white", "byPly": 5,
+                           "byPiece": False, "piece": None, "moveNumber": 4}
     assert r["moments"]["shown"][0]["label"] == "3…Nf6"
 
 

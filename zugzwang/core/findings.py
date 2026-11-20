@@ -258,3 +258,37 @@ class ProvenClaim:
     def __post_init__(self) -> None:
         if not isinstance(self.proof, Proof):
             raise TypeError("a ProvenClaim needs a Proof")
+
+
+# ── STAGE5-MOVE: which move a claim is about (owner, 2026-11-10; built 2026-11-19) ──
+
+class MoveRole(Enum):
+    """Whose move a claim is about: the move played, the engine's best move, or the
+    opponent's reply."""
+
+    PLAYED = "played"
+    BEST = "best"
+    REPLY = "reply"
+
+
+@dataclass(frozen=True, slots=True)
+class MoveAbout:
+    """The move a rule claim is about, explicitly (ANALYSIS_ARCHITECTURE.md "For STAGE 5"):
+    its UCI and SAN, and whose move it is. The renderer reads the move a sentence names from
+    here and from nothing else. `uci` and `san` are None only where the move is not known
+    (a forced mate the engine saw with no best move stored); the sentence then names none.
+
+    Not the same question as a finding's `subject`: `missed_material` is a finding about
+    the played move (`subject` "played") whose sentence names the best move (role BEST).
+    Grouping by `subject` misfiled the first ARCH-2-AGREE run (2026-11-09)."""
+
+    role: MoveRole
+    uci: str | None
+    san: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.role, MoveRole):
+            raise TypeError("MoveAbout.role is a MoveRole")
+        if (self.uci is None) != (self.san is None):
+            raise TypeError("MoveAbout carries both the UCI and the SAN, or neither")
+

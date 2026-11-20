@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The dev run's permissions, plus the sidecar spawn: the checkout's Python runs sidecar/main.py. `cmd` takes no validator, so the interpreter is named by a path the shell plugin resolves at run time: $HOME/zugzwang/.venv/bin/python, a checkout at ~/zugzwang with its venv (README). A checkout elsewhere edits this one line. The packaged (beta) build uses capabilities/beta.json instead.",
+  "description": "The dev run's permissions, plus the sidecar spawn: the checkout's Python runs sidecar/main.py. `cmd` takes no validator, so the interpreter is named by a path the shell plugin resolves at run time: $HOME/zugzwang/.venv/bin/python, a checkout at ~/zugzwang with its venv (README). A checkout elsewhere edits this one line. The packaged (beta) build uses capabilities/beta.json instead. tauri.conf.json must list [\"default\"]: with no list Tauri enables every file in capabilities/, beta.json's zugzwang-sidecar entry ($RESOURCE/sidecar/…) is found first, and the dev spawn fails with os error 2 (fix/dev-launch, 2026-11-13; src/dev_spawn_test.rs).",
   "windows": [
     "main"
   ],

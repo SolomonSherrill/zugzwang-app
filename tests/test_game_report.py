@@ -7,15 +7,19 @@ from zugzwang.core import game_report as R
 from zugzwang.core.database import MoveAnalysis
 
 
-def _game(sans, evals, *, best=None, after=None, unscored=(), start=chess.STARTING_FEN):
-    """MoveAnalysis rows for a line of SAN moves, consistent by construction.
+def _game(sans, evals, *, best=None, after=None, after14=None, unscored=(),
+          start=chess.STARTING_FEN):
+    """MoveAnalysis rows for a line of SAN moves, consistent by construction, stored as
+    classifier version 3 stores them.
 
     *evals* is White's eval in cp for every position, len(sans) + 1 of them. Each
-    ply's before-score is its position's eval and its after-score the next
-    position's, both from the mover's side, as the analysis stores them. *after*
-    overrides one ply's after-search (mover's POV) to make the two searches of a
-    position disagree. *best* maps ply -> SAN of the engine's best move; by default
-    it is some other legal move.
+    ply's before-score is its position's eval and its after-score (`score_after_cp`,
+    the depth-14 after-score) the next position's, both from the mover's side. *after*
+    overrides one ply's depth-10 after-search (`after_search_cp`, mover's POV) to make
+    the two searches of a position disagree; *after14* overrides its depth-14
+    after-score. A ply in *unscored* has no scores, and the ply before it no depth-14
+    after-score (version 3 reads it from the unscored ply's before-search). *best* maps
+    ply -> SAN of the engine's best move; by default it is some other legal move.
     """
     board = chess.Board(start)
     rows = []
@@ -27,16 +31,19 @@ def _game(sans, evals, *, best=None, after=None, unscored=(), start=chess.STARTI
         else:
             best_uci = next(m for m in board.legal_moves if m != move).uci()
         before, aft = sign * evals[ply], sign * evals[ply + 1]
-        if after and ply in after:
-            aft = after[ply]
+        search10 = after[ply] if after and ply in after else aft
+        if after14 and ply in after14:
+            aft = after14[ply]
+        if ply + 1 in unscored:
+            aft = None
         if ply in unscored:
-            before = aft = None
+            before = aft = search10 = None
         rows.append(MoveAnalysis(
             ply=ply, fen_before=board.fen(), played_uci=move.uci(), best_uci=best_uci,
             pv_uci="", score_before_cp=before, score_before_mate=None,
             score_after_cp=aft, score_after_mate=None, second_best_uci=None,
             second_best_cp=None, second_best_mate=None, classification="good",
-            is_book=ply in unscored,
+            is_book=ply in unscored, after_search_cp=search10,
         ))
         board.push(move)
     return rows
@@ -63,11 +70,18 @@ def test_thresholds_are_the_measured_ones():
 FLAT = [30] * 11
 
 
-def test_swing_uses_the_kinder_of_the_two_searches():
-    # Bc4's after-search says -400, but the next ply's search of the same
-    # position still has White at +30: one search alone is not a swing.
+def test_a_disagreeing_depth_10_search_is_not_read_for_moments():
+    # D1 (owner, 2026-11-13, B20L): Bc4's depth-10 after-search says -400, but the
+    # depth-14 after-score, the label's own, still has White at +30: no moment.
     r = _report(_game(LINE, FLAT, after={4: -400}), result="*")
     assert r["moments"]["total"] == 0
+
+
+def test_the_depth_14_after_score_alone_makes_a_moment():
+    # D1: the depth-10 after-search still rates Bc4 level, as option A's kinder second
+    # estimate would have; the depth-14 after-score, which the badge reads, makes it a moment.
+    r = _report(_game(LINE, [30] * 5 + [-500] * 6, after={4: 30}), result="0-1")
+    assert [m["ply"] for m in r["moments"]["shown"]] == [4]
 
 
 def test_a_swing_both_searches_agree_on_is_a_moment():
@@ -79,8 +93,9 @@ def test_a_swing_both_searches_agree_on_is_a_moment():
 
 
 def test_the_last_move_needs_a_finished_board_to_be_a_moment():
-    # Only one search of the position after the last move exists.
-    r = _report(_game(LINE, FLAT, after={9: -900}), result="*")
+    # §1.1's first rule, kept by D1: the last move's after-score is the final position's
+    # own search, and on an unfinished board it alone never makes a moment.
+    r = _report(_game(LINE, FLAT, after={9: -900}, after14={9: -900}), result="*")
     assert r["moments"]["total"] == 0
 
 
@@ -108,7 +123,8 @@ DECIDED_AT_6 = [30] * 6 + [600] * 5   # Black's 3…Nf6 throws it
 
 def test_point_of_no_return_names_the_move_only_when_it_is_a_moment():
     r = _report(_game(LINE, DECIDED_AT_6), result="1-0")
-    assert r["decided"] == {"position": 6, "side": "white", "byPly": 5}
+    assert r["decided"] == {"position": 6, "side": "white", "byPly": 5,
+                           "byPiece": False, "piece": None, "moveNumber": 4}
     assert r["lines"][0] == "The game was decided at 3…Nf6: from there you were winning to the end."
 
 
@@ -313,11 +329,13 @@ def test_opening_standing_is_omitted_where_unscored():
 
 
 def test_the_book_is_read_most_played_first():
+    from tests.bookfile import real_book_path
     from zugzwang.core.openings import OpeningsBook
-    b = OpeningsBook()
-    if not b.has_book:
+    path = real_book_path()
+    if path is None:
         import pytest
-        pytest.skip("no Polyglot book installed (W8)")
+        pytest.skip("no opening book installed (BOOK-DL)")
+    b = OpeningsBook(book_path=path)
     moves = b.book_moves_by_weight(chess.Board())
     weights = {e.move: e.weight for e in b._reader.find_all(chess.Board())}
     assert [weights[m] for m in moves] == sorted(weights.values(), reverse=True)
@@ -449,74 +467,31 @@ def _errors(rows, *plies):
     return rows
 
 
-def test_a_repeat_that_includes_a_moment_gets_one_line(monkeypatch):
+def test_r6_5_a_repeat_on_a_moment_no_longer_gets_a_line(monkeypatch):
+    """The per-game pattern line left the report when the Insights patterns card shipped
+    (owner ruling R6-5, 2026-11-13). This repeat — two dropped pieces, one on a moment card —
+    used to read "You dropped material to a capture twice in this game; 3.Bc4, one of them,
+    is a moment below." """
     _with_findings(monkeypatch, {0: ["hangs_piece"], 4: ["hangs_piece"]})
     r = _report(_errors(_game(LINE, ONE_MOMENT_AT_4), 0, 4), result="0-1")
-    assert r["pattern"]["plies"] == [0, 4] and r["pattern"]["onCards"] == [4]
-    assert ("You dropped material to a capture twice in this game; 3.Bc4, one of them, "
-            "is a moment below.") in r["lines"]
-
-
-def test_a_repeat_off_the_moments_says_nothing(monkeypatch):
-    _with_findings(monkeypatch, {0: ["hangs_piece"], 2: ["hangs_piece"]})
-    r = _report(_errors(_game(LINE, ONE_MOMENT_AT_4), 0, 2), result="0-1")
-    assert r["pattern"] is None
-
-
-def test_a_single_occurrence_is_not_a_pattern(monkeypatch):
-    _with_findings(monkeypatch, {4: ["hangs_piece"]})
-    r = _report(_errors(_game(LINE, ONE_MOMENT_AT_4), 4), result="0-1")
-    assert r["pattern"] is None
-
-
-def test_a_kind_without_a_checked_phrase_says_nothing(monkeypatch):
-    _with_findings(monkeypatch, {0: [("trapped_piece", "best")], 4: [("trapped_piece", "best")]})
-    r = _report(_game(LINE, ONE_MOMENT_AT_4), result="0-1")
-    assert r["pattern"] is None
-
-
-def test_no_pattern_line_without_the_users_side(monkeypatch):
-    _with_findings(monkeypatch, {0: ["hangs_piece"], 4: ["hangs_piece"]})
-    r = _report(_errors(_game(LINE, ONE_MOMENT_AT_4), 0, 4), result="0-1", player_color=None)
-    assert r["pattern"] is None
-
-
-# ── AUDIT-6: the mistake lines count only unexcused error-labelled moves ─────
-
-def test_the_dropped_material_line_skips_moves_not_labelled_errors(monkeypatch):
-    """The same two hangs, one on a move the run calls `good`: one countable move is not
-    a pattern (owner ruling AUDIT-6)."""
-    _with_findings(monkeypatch, {0: ["hangs_piece"], 4: ["hangs_piece"]})
-    r = _report(_errors(_game(LINE, ONE_MOMENT_AT_4), 4), result="0-1")
-    assert r["pattern"] is None
-
-
-def test_the_dropped_material_line_skips_a_move_its_own_sentence_excuses(monkeypatch):
-    """"…, but everything else was worse" excuses the move; it is not counted."""
-    def fake(row, player_color, *, run=None):
-        b = chess.Board(row["fen_before"])
-        ply = (b.fullmove_number - 1) * 2 + (0 if b.turn == chess.WHITE else 1)
-        line = ("This drops the knight on f3 — Qxf3 takes it, but everything else was worse."
-                if ply == 0 else "This drops the bishop on c4 — Nxc4 takes it.")
-        return [(_F("hangs_piece"), line)] if ply in (0, 4) else []
-    monkeypatch.setattr(R, "rendered_pairs_stored_ply", fake)
-    r = _report(_errors(_game(LINE, ONE_MOMENT_AT_4), 0, 4), result="0-1")
-    assert r["pattern"] is None
+    assert "pattern" not in r
+    assert not any("in this game;" in line for line in r["lines"] + r["context"])
 
 
 # ── AUDIT-8: no "no single move swung it" beside a badge that says one did ───
 
 def test_no_single_move_line_is_dropped_beside_a_twenty_point_badge():
-    """The swing rule reads the kinder of two searches and finds no moment here; the
-    badge on ply 2 comes from its own stored pair, which loses far more than 20 points.
-    The flat sentence would contradict it, so it goes, with nothing in its place
-    (owner ruling AUDIT-8)."""
-    rows = _game(LINE, FLAT, after={2: -600})
-    plain = _report(rows)
-    assert plain["moments"]["total"] == 0
-    assert "No single move swung this game by 20 points or more." in plain["lines"]
-    rows[2].classification = "blunder"
+    """AUDIT-8: the flat sentence never stands beside a badge whose own stored pair loses
+    20 points or more. Since D1 (B20L) a moment reads that pair, so the badge's move is a
+    moment, except on the last move of an unfinished board, which has no swing: there the
+    badge alone takes the sentence away, with nothing in its place."""
+    rows = _game(LINE, FLAT, after14={2: -600})
     r = _report(rows)
+    assert [m["ply"] for m in r["moments"]["shown"]] == [2]
+    assert not any(line.startswith("No single move swung") for line in r["lines"])
+    rows = _game(LINE, FLAT, after14={9: -600})
+    rows[9].classification = "blunder"
+    r = _report(rows, result="*")
     assert r["moments"]["total"] == 0
     assert not any(line.startswith("No single move swung") for line in r["lines"])
 
@@ -525,13 +500,16 @@ def test_no_single_move_line_is_dropped_beside_a_twenty_point_badge():
 
 def test_the_decided_line_drops_its_no_single_move_clause_beside_a_badge():
     """The same condition as AUDIT-8: a move labelled an error whose own stored loss is 20
-    points or more. The rest of the line stays (owner ruling AUDIT-Q6)."""
-    evals = [min(30 + 30 * j, 600) for j in range(len(LONG) + 1)]
-    plain = _report(_game(LONG, evals), result="1-0")
+    points or more. The rest of the line stays (owner ruling AUDIT-Q6). Since D1 such a
+    badge has no moment only on the last move of an unfinished board."""
+    line_ = LONG[:-1]   # ends on White's move: the winner's last move carries the badge
+    evals = [min(30 + 30 * j, 600) for j in range(len(line_) + 1)]
+    plain = _report(_game(line_, evals), result="1-0")
     told = [line for line in plain["lines"] if "never came back into doubt" in line]
     assert told and told[0].endswith(" — no single move decided it.")
-    rows = _game(LONG, evals, after={3: -700})
-    rows[3].classification = "blunder"
+    last = len(line_) - 1
+    rows = _game(line_, evals, after14={last: -700})
+    rows[last].classification = "blunder"
     r = _report(rows, result="1-0")
     assert r["moments"]["total"] == 0
     line = next(x for x in r["lines"] if "never came back into doubt" in x)

@@ -18,19 +18,20 @@ REPO_ROOT = APP_DIR.parent
 ASSETS_DIR = APP_DIR / "assets"
 PIECES_DIR = ASSETS_DIR / "pieces"
 OPENINGS_DIR = ASSETS_DIR / "openings"
-# Built by the owner from a Lichess database dump (CC0), so redistribution is not
-# blocked. Gitignored (87.7 MB); whether to ship or fetch it is undecided — see the
-# P5–P8 row and owner decision O4 in review/FIXPLAN.md.
-OPENINGS_BOOK_PATH = OPENINGS_DIR / "book_mingame3.bin"
-# The ply at which this book's coverage ends. Measured, not configured: positions in the
-# corpus with any book move fall from 119 at ply 19 to 1 at ply 20
-# (review/scratch/overhaul_stage0_bookcap.out). The game report uses it to say "the book
-# ends here" rather than "the book has no move here". ⚠️ A different book (the larger one
-# under construction, O4) has a different horizon: re-run that probe when it lands.
-BOOK_HORIZON_PLY = 20
+# No opening book ships with the app (BOOK-DL, owner ruling D, 2026-11-19): the user downloads
+# one of three from Settings into `<data dir>/books/`, and `core/books.py` says which is in use
+# (`books.active_book_path()`, None for no book). The lost `book_mingame3.bin` is not read.
+#
+# The ply at which the book's coverage ends; the game report uses it to say "the book ends
+# here" rather than "the book has no move here". 24 is the cap the books are built to (owner
+# ruling B5, 2026-11-19; the old book's measured 20, review/scratch/overhaul_stage0_bookcap.out).
+# A position first seen at ply <= 24 can recur later by transposition, so a few book plies lie
+# past it (OPENING_DATA.md, "Step 2").
+BOOK_HORIZON_PLY = 24
 OPENINGS_ECO_DIR = OPENINGS_DIR / "eco"
 
-#: The Windows data folder's name: the Tauri identifier (desktop/src-tauri/tauri.conf.json).
+#: The Windows data folder's name: the beta build's Tauri identifier
+#: (desktop/src-tauri/tauri.beta.conf.json; fixed forever: testers' data and updates use it).
 WINDOWS_DATA_DIR_NAME = "dev.zugzwang.desktop"
 
 
@@ -456,12 +457,15 @@ INSIGHTS_MIN_OPENING_GAMES = 5
 
 # ── Brilliant move detection ───────────────────────────────────────────────────
 
-# Minimum win-probability gap between best and 2nd-best for position to be "hard"
-BRILLIANT_MIN_GAP_2ND = 0.15
-# Same requirement applied to the 3rd-best line (if one exists)
-BRILLIANT_MIN_GAP_3RD = 0.15
+# BRILLIANT.md "W" (owner, 2026-11-19): B1 "nearly best" — the played move is the stored best or
+# a stored line whose win probability is within this of line 1's. B5 (the 2nd and 3rd lines each
+# 0.15 worse, BRILLIANT_MIN_GAP_2ND / _3RD) is dropped.
+BRILLIANT_NEARLY_BEST_WPL = 0.02
 # Positions already this winning cannot produce a brilliant move
 BRILLIANT_MAX_WP_BEFORE = 0.90
+# BRILLIANT.md "X" (owner, 2026-11-19, X1b): nor can a lost position — desperados and blocks; the
+# same cut as BR-E2's X4.
+BRILLIANT_MIN_WP_BEFORE = 0.30
 # BRILLIANT.md B2 (owner ruling 9, 2026-11-11): not forced — at least this many legal
 # moves. The version-2 detector's SACRIFICE_MATERIAL_THRESHOLD and
 # BRILLIANT_CAPTURE_COST_CP went with its live engine search (`labelling.brilliant`).
@@ -526,13 +530,15 @@ TRAINER_FAMILY_DEPTH_MIN      = 4    # minimum half-moves for name-grouped lines
 # Adaptive coverage thresholds: try the primary weight floor first; if it yields
 # too few lines, drop to the fallback; if still too few, the family is "limited".
 #
-# These are in Polyglot weight units (win 2, draw 1), tuned on `book_mingame3.bin`. For books
-# generated from the opening index the floors become **game counts**, not floors relative
-# to the corpus (owner ruling, 2026-10-22). A relative floor would make the same line pass or
+# Game counts (owner rulings 2026-10-22 and B4, 2026-11-19: 1,500 / 500 kept, read as games):
+# the books are weighted by game count (B3), so a floor is how often a move was played in the
+# two months, not a floor relative to the corpus. They were tuned in Polyglot units
+# (win 2, draw 1) on the lost `book_mingame3.bin`; measured on the games-weighted books they give
+# 66 trainable families (OPENING_DATA.md, "Step 2"). A relative floor would make the same line pass or
 # fail depending on how many months were indexed, which is a worse failure than the current
 # one. A move played 50 times is meaningful evidence whatever the corpus size. Absolute
 # weights have the opposite fault: a bigger corpus passes more families under the same
-# number (OPENING_DATA.md, stage 0). Not changed yet; it lands with book generation.
+# number (OPENING_DATA.md, stage 0).
 TRAINER_FAMILY_PRIMARY_WEIGHT   = 1500
 TRAINER_FAMILY_PRIMARY_MIN_LINES = 8
 TRAINER_FAMILY_FALLBACK_WEIGHT   = 500

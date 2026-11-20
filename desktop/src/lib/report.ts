@@ -1,7 +1,7 @@
 /** Pure helpers for the game report screen (core/game_report.py is the source of
  *  every claim; this file only lays them out). */
 
-import type { GameReport, MoveAnalysisInfo, ReportMoment } from './api'
+import type { GameReport, MoveAnalysisInfo, ReportFound, ReportMoment } from './api'
 import { whiteWp } from './classification'
 
 export type AnalysedReport = Extract<GameReport, { analysed: true }>
@@ -12,7 +12,9 @@ export type AnalysedReport = Extract<GameReport, { analysed: true }>
 export function momentsHeading(total: number, shown: number): string | null {
   if (total === 0 || shown === 0) return null
   if (shown < total) return `${shown} of ${total} moments`
-  return shown === 1 ? 'The moment' : `${shown} moments`
+  // R5: a count in the context lines under the cards, no longer a heading above them, so
+  // "1 moment" rather than "The moment".
+  return shown === 1 ? '1 moment' : `${shown} moments`
 }
 
 /** Cards in game order: an error and the reply that failed to punish it share one. */
@@ -21,15 +23,32 @@ export function cards(report: AnalysedReport): ReportMoment[][] {
   return report.moments.groups.map((g) => g.map((p) => byPly.get(p)!).filter(Boolean))
 }
 
+/** The report's cards and its "found it" moment (GR2-8) in game order: the cards keep
+ *  their numbers, the found moment has none (it is marked ✓). */
+export type ReportItem =
+  | { kind: 'card'; group: ReportMoment[]; n: number }
+  | { kind: 'found'; found: ReportFound }
+
+export function reportItems(report: AnalysedReport): ReportItem[] {
+  const items: ReportItem[] = cards(report).map((group, i) => ({ kind: 'card', group, n: i + 1 }))
+  const f = report.found
+  if (f) {
+    const at = items.findIndex((it) => it.kind === 'card' && it.group[0].ply > f.ply)
+    items.splice(at === -1 ? items.length : at, 0, { kind: 'found', found: f })
+  }
+  return items
+}
+
 export interface GraphMarker {
   /** Position index the marker sits on: the position after the moment's (first) move. */
   position: number
+  /** The card's number; 0 for the "found it" moment, which shows a check mark. */
   n: number
-  tone: 'you' | 'opponent' | 'neutral'
+  tone: 'you' | 'opponent' | 'neutral' | 'found'
 }
 
 export function graphMarkers(report: AnalysedReport): GraphMarker[] {
-  return cards(report).map((group, i) => {
+  const out: GraphMarker[] = cards(report).map((group, i) => {
     const first = group[0]
     return {
       position: first.ply + 1,
@@ -37,6 +56,8 @@ export function graphMarkers(report: AnalysedReport): GraphMarker[] {
       tone: first.yours === null ? 'neutral' : first.yours ? 'you' : 'opponent',
     }
   })
+  if (report.found) out.push({ position: report.found.ply + 1, n: 0, tone: 'found' })
+  return out
 }
 
 /** White's win probability per position while analysis is still streaming, by the
@@ -127,6 +148,16 @@ export function bookTick(
  *  those with a unique stored answer. Never degraded judging (owner ruling). */
 export function canTry(m: ReportMoment, engineOk: boolean): boolean {
   return m.yours === true && (engineOk || (m.unique && m.bestUci !== null))
+}
+
+/** The reply line (GR2-6) names the engine's move for the user's next move, so it is
+ *  hidden while that move's own card is being tried and not yet judged: it is the answer. */
+export function replyHidden(
+  m: ReportMoment,
+  tryingPly: number | null,
+  verdict: TryVerdict | null,
+): boolean {
+  return tryingPly === m.ply + 1 && (verdict === null || verdict.kind === 'judging')
 }
 
 export type TryVerdict =

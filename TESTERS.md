@@ -37,6 +37,8 @@ expected for this build.
    **Done** (or **Cancel**), not *Move to Bin*.
 3. Open **System Settings → Privacy & Security**, scroll to the message about Zugzwang,
    and click **Open Anyway**; confirm with your password. Then open the app again.
+   (If nothing at all happens when you open Zugzwang — no window, no warning — go straight
+   to this step.)
 
 If macOS instead says the app "is damaged and can't be opened", run this once in
 **Terminal**, then open it again:

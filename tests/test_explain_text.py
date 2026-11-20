@@ -14,6 +14,7 @@ move the classifier approved read as though the position had been fine.
 import chess
 import pytest
 
+from zugzwang.core.findings import MoveAbout, MoveRole
 from zugzwang.core.explain import (
     PATTERN_BACK_RANK,
     PATTERN_DISCOVERED_CHECK,
@@ -53,6 +54,13 @@ def piece(symbol, square, color="white"):
     return PieceOn(piece=symbol, square=square, color=color)
 
 
+# The move each kind's sentence names (STAGE5-MOVE): the table `explain.NAMES_MOVE` used to
+# hold, kept here only so these hand-built findings carry `about` as the rules set it.
+_ROLE = {"hangs_piece": "played", "ignored_threat": "played", "walks_into_mate": "played",
+         "missed_material": "best", "missed_mate": "best", "best_defends_piece": "best",
+         "best_saves_piece": "best"}
+
+
 def finding(kind, **over):
     row = dict(
         kind=kind,
@@ -63,6 +71,10 @@ def finding(kind, **over):
         material=5.0,
     )
     row.update(over)
+    if "about" not in row:
+        role = _ROLE.get(kind, row["subject"])
+        m = row["moves"].get(role)
+        row["about"] = MoveAbout(MoveRole(role), m.uci if m else None, m.san if m else None)
     return Finding(**row)
 
 

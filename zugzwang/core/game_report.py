@@ -4,9 +4,9 @@ Qt-free, engine-free, and computed from the analysis already stored for the game
 
 The design and every threshold's evidence are in GAME_REPORT.md. The short form:
 
-- A *swing* is the mover's loss of win probability on one move, measured against
-  the more favourable of the two independent stored searches of the resulting
-  position, so one search that undervalues a position cannot create a swing.
+- A *swing* is the mover's loss of win probability on one move: the depth-14
+  before-search less the depth-14 after-score the move's label reads (GR2-1 / D1,
+  B20L, owner 2026-11-13). The game's last move has a swing only on a finished board.
 - A *moment* is a swing of at least `SWING`. The report shows the largest
   `SHOWN` of them and says how many there were.
 - The *point of no return* is the first position from which every later
@@ -29,15 +29,21 @@ from .. import config as C
 from .classification import WPL_GREAT_GAP, win_prob, wpl
 from dataclasses import replace
 
-from .compose import explain_ply_full, run_plies
+from .compose import _engine_output, explain_ply_full, run_plies
 from .explain import stored_ply_row
-from .explain_text import ERROR_CLASSES, UNKNOWN_SIDE, excuses, rendered_pairs_stored_ply
+from .explain_text import (
+    CAPTURE_CLAIM_KINDS, ERROR_CLASSES, UNKNOWN_SIDE, _numbered_line, _only_move_first,
+    _only_move_second, excuses, material_phrase, rendered_pairs_stored_ply,
+)
+from .findings import ProvenClaim
 
 # ⚠️ Owner ruling 2026-10-21: do not move SWING or DECIDED without re-running the
 # noise-floor and re-analysis probes behind them (GAME_REPORT.md §1.1, §1.3, §1.5:
 # `review/scratch/overhaul_stage1.py` section A and `overhaul_stage1_research.py`).
-# SWING is 3.3x the depth-10 conservative p99.9 of a move's loss when the move was
-# the engine's own best (0.060), and no such move reaches it. DECIDED keeps a
+# SWING was 3.3x the depth-10 conservative p99.9 of a move's loss when the move was
+# the engine's own best (0.060). Since D1 (owner, 2026-11-13, B20L) a swing reads the
+# depth-14 after-score alone, and SWING is 3.02x that estimate's p99.9 with last moves
+# excluded (0.0662, `review/scratch/game_report_2/r/r2_floor.out`). DECIDED keeps a
 # p99.9 wobble of one search (0.088) inside a clear advantage.
 SWING = 0.20
 DECIDED = 0.80
@@ -53,9 +59,117 @@ SHOWN = 3
 # carries two positions' noise (p99 ~0.04 each), not a sum over the window.
 SLIDE_WINDOW = 16
 SLIDE_MIN = SWING
+# GR2-3 (owner, 2026-11-13): a slide may not end before the loser climbs back to this or
+# more — the "balanced" band's floor. 18 of 556 slides did (GAME_REPORT.md, B1 defect 1).
+SLIDE_RECOVERED = 0.40
+
+# The pieces whose loss names the deciding move (GR2-2): a pawn never does.
+_PIECES = frozenset("NBRQ")
+_VALUE = {"P": 1, "N": 3, "B": 3, "R": 5, "Q": 9, "K": 0}
+
+# GR2-7 (owner, 2026-11-13): a card whose callout names only a pawn, on a swing of at least
+# this, says the rating moved far more. A win-probability loss of 0.30 is at least 3.2 pawns
+# on the Lichess curve (its steepest slope is 0.092 per 100 cp), so "far more than a pawn"
+# is a stored fact, not a judgment. 339 cards on the owner's games (GAME_REPORT.md, B1).
+PAWN_QUALIFIER_SWING = 0.30
+# Plurals count: "two rooks for the pawn" is not a pawn claim (found reading R3's sample,
+# GAME_REPORT.md "Cases behind game_report.py", K1; B1's count of 339 used the singular-only
+# pattern).
+_PIECE_WORD = re.compile(r"\b(queens?|rooks?|knights?|bishops?)\b")
+_PAWN_WORD = re.compile(r"\bpawn\b")
+
+
+def pawn_qualifier(sentences: list[str], swing: float, band_before: str, band_after: str,
+                   whose: str) -> str | None:
+    """The qualifier for a card whose callout names a pawn and nothing bigger (no piece, no
+    mate) where the swing is PAWN_QUALIFIER_SWING or more; None otherwise. The wording is
+    the first of the two offered in review/samples/gr2/r3.md, approved (D2, 2026-11-13)."""
+    text = " ".join(sentences)
+    if (not text or swing < PAWN_QUALIFIER_SWING or not _PAWN_WORD.search(text)
+            or _PIECE_WORD.search(text) or "mate" in text):
+        return None
+    # Not beside a sentence that qualifies its own claim ("…, though Black was winning
+    # anyway", or an excuse): the two would read as a contradiction (GAME_REPORT.md "Cases behind
+    # game_report.py", K2).
+    if " anyway" in text or any(excuses(t) for t in sentences):
+        return None
+    return (f"The engine's rating moved far more than a pawn: from {band_before} to "
+            f"{band_after} for {whose}.")
+
+# "Found it" (GR2-8, owner 2026-11-13; GAME_REPORT.md B3, R4): W2s needs every stored
+# alternative to the hard only move this much worse — each would have been a moment.
+FOUND_GAP = SWING
+# W4c: the material the game itself gained along the proven line, in pawns, and the user's
+# own moves in it (a combination is two or more).
+FOUND_MIN_GAIN = 3
+FOUND_MIN_OWN_MOVES = 2
+# The rules in their order: the first that applies is the game's one "found it".
+FOUND_RULES = ("brilliant", "only_move", "combination")
+_PIECE_NAMES = {chess.KNIGHT: "knight", chess.BISHOP: "bishop", chess.ROOK: "rook",
+                chess.QUEEN: "queen", chess.KING: "king", chess.PAWN: "pawn"}
+
+
+def _material(board: chess.Board, color: bool) -> int:
+    return sum(_VALUE[p.symbol().upper()] * (1 if p.color == color else -1)
+               for p in board.piece_map().values())
+
+
+def brilliant_sentence(fen: str, uci: str) -> str | None:
+    """W1: what BRILLIANT.md's rule tested, said: the piece offered and where (B3) and that
+    taking it fails (B4). Read off the move; the label is the test. The clause on the engine's
+    next two choices went with B5 (BRILLIANT.md "W", 2026-11-19): a nearly-best brilliant has
+    a stored alternative within 0.02, so it would be false."""
+    board = chess.Board(fen)
+    move = chess.Move.from_uci(uci)
+    piece = move.promotion or (board.piece_type_at(move.from_square))
+    if piece is None or piece == chess.PAWN:
+        return None
+    return f"A {_PIECE_NAMES[piece]} offered on {chess.square_name(move.to_square)}: taking it fails."
+
+
+def only_move_found_sentence(ma) -> str | None:
+    """W2s: the move played was the stored best, labelled `great`, a stored hard only move,
+    and every stored alternative (the 2nd and 3rd lines) is FOUND_GAP or more worse. Said in
+    the only-move sentence as ruled (D5): "{X} was the only move that {…}; the next best, {Y},
+    {band}." — both clauses read off the stored lines. None where the first clause would not
+    be true of the first line ("held the balance" in a position worse than −1.00 or a mate
+    against), so the rule fires less rather than says it."""
+    if ma.classification != "great" or not ma.hard_only_move or not ma.best_uci \
+            or ma.played_uci != ma.best_uci:
+        return None
+    lines = [ln for ln in (ma.lines or ()) if ln and ln.get("uci")]
+    if len(lines) < 2 or lines[0]["uci"][0] != ma.played_uci:
+        return None
+    w = [_wp(ln.get("cp"), ln.get("mate")) for ln in lines[:3]]
+    if any(x is None for x in w) or any(w[0] - x < FOUND_GAP for x in w[1:]):
+        return None
+    first, second = lines[0], lines[1]
+    clause = _only_move_first(first)
+    own = {"cp": ma.score_after_cp, "mate": ma.score_after_mate}
+
+    def untrue(line: dict) -> bool:
+        return _only_move_first(line) == "held the balance" and (
+            line.get("mate") is not None or line.get("cp") is None or line["cp"] <= -100)
+
+    # The first clause must hold of the stored first line and of the move's own depth-14
+    # after-score alike (as D5's band is checked): 3 of 143 disagreed on the owner's games
+    # (review/scratch/game_report_2/s/r4_measure.out), e.g. "kept the advantage" at +0.64.
+    if untrue(first) or untrue(own) or _only_move_first(own) != clause:
+        return None
+    board = chess.Board(ma.fen_before)
+    try:
+        x = board.san(chess.Move.from_uci(first["uci"][0]))
+        y = board.san(chess.Move.from_uci(second["uci"][0]))
+    except ValueError:
+        return None
+    return f"{x} was the only move that {clause}; the next best, {y}, {_only_move_second(second)}."
+
 
 # Bands for describing a standing, from one side's point of view.
 _BANDS = ((DECIDED, "winning"), (0.60, "better"), (0.40, "balanced"), (1 - DECIDED, "worse"))
+
+
+NO_SWING_LINE = "No single move swung this game by 20 points or more."
 
 
 def band(wp: float) -> str:
@@ -73,43 +187,15 @@ class _Ply:
     best: str | None
     pb: float | None   # mover's win prob before the move, best play
     pa: float | None   # mover's win prob after the played move: the after-move search
-    #                    (depth 10), the conservative second estimate (owner ruling 10)
+    #                    (depth 10), kept for the position estimates (verdicts, graph)
+    pa14: float | None = None   # … by the depth-14 after-score (`score_after_*`, ply N+1's
+    #                    before-search since version 3): what a moment's swing reads (D1)
 
 
 def _wp(cp: int | None, mate: int | None) -> float | None:
     if cp is None and mate is None:
         return None
     return win_prob(cp, mate)
-
-
-# The repeated-pattern line (slice 6). One phrase per (kind, subject) the measurement
-# found it would name (`review/scratch/pattern_line_measure.out`, 3 221 games: these five
-# cover all 722 lines). A kind not listed here produces no line rather than a generic
-# phrase that might misdescribe it.
-PATTERN_PHRASES = {
-    ("hangs_piece", "played"): "You dropped material to a capture",
-    ("missed_material", "played"): "You missed a chance to win material",
-    ("walks_into_mate", "played"): "You allowed a forced mate",
-    ("missed_mate", "played"): "You missed a forced mate",
-    ("fork", "best"): "You missed a fork",
-}
-
-# The two pattern lines that say the user made the same mistake N times (owner ruling
-# AUDIT-6, 2026-11-11): they count only moves the run labels an error, whose sentence the
-# Review callout shows, and whose sentence does not excuse the move (`explain_text.excuses`).
-# Under two such moves, the line does not exist.
-ERROR_PATTERNS = frozenset({("hangs_piece", "played"), ("missed_material", "played")})
-
-_COUNT_WORDS = {2: "twice", 3: "three times", 4: "four times", 5: "five times"}
-_NUMBER_WORDS = {2: "two", 3: "three", 4: "four", 5: "five"}
-
-
-def _times(n: int) -> str:
-    return _COUNT_WORDS.get(n, f"{n} times")
-
-
-def _and_list(items: list[str]) -> str:
-    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def unique_answer(ma) -> bool:
@@ -140,7 +226,8 @@ def _plies(moves: Sequence) -> list[_Ply]:
     return [
         _Ply(m.ply, m.fen_before, m.played_uci, m.best_uci or None,
              _wp(m.score_before_cp, m.score_before_mate),
-             _wp(*_search_after(m)))
+             _wp(*_search_after(m)),
+             _wp(m.score_after_cp, m.score_after_mate))
         for m in moves
     ]
 
@@ -155,11 +242,17 @@ def _terminal(board: chess.Board) -> float | None:
 
 
 def swings(plies: list[_Ply], final: chess.Board | None) -> list[float | None]:
-    """Conservative loss per move, mover's POV; None where it cannot be measured.
+    """Loss per move, mover's POV; None where it cannot be measured.
 
-    A move needs two searches of its result, or a finished board after it. The
-    game's last move has only one search, and 6 of the 7 engine-best moves scoring
-    a raw loss >= 0.20 were last moves (GAME_REPORT.md §1.1).
+    GR2-1 as ruled in D1 (owner, 2026-11-13; GAME_REPORT.md "R2", B20L): the depth-14
+    before-search less the depth-14 after-score — one estimate, the label's own, so the
+    card falls where the move list shows the badge. Until then the swing was the kinder
+    of the depth-10 after-search and the next before-search (§1.1; option A).
+
+    §1.1's first rule is kept: the game's last move has a swing only on a finished board,
+    read exactly. Its stored after-score is the final position's own search, and 8 of the
+    12 engine-best losses of 0.20 or more at depth 14 were last moves (`r2_floor.out`);
+    without them 0.20 is 3.02x the depth-14 p99.9 (0.0662).
     """
     out: list[float | None] = []
     for i, p in enumerate(plies):
@@ -167,16 +260,12 @@ def swings(plies: list[_Ply], final: chess.Board | None) -> list[float | None]:
         if p.pb is None:
             out.append(None)
             continue
-        ests = [] if p.pa is None else [p.pa]
-        nxt = plies[i + 1] if not last else None
-        if nxt is not None and nxt.pb is not None and nxt.ply == p.ply + 1:
-            ests.append(1.0 - nxt.pb)
-        if last and final is not None:
-            t = _terminal(final)
-            if t is not None:
-                ests = [1.0 - t]   # the board after the move; the mover is the other side
-        enough = len(ests) >= 2 or (last and final is not None and _terminal(final) is not None)
-        out.append(p.pb - max(ests) if enough and ests else None)
+        if last:
+            t = _terminal(final) if final is not None else None
+            # the board after the move; the mover is the other side
+            out.append(p.pb - (1.0 - t) if t is not None else None)
+            continue
+        out.append(None if p.pa14 is None else p.pb - p.pa14)
     return out
 
 
@@ -433,6 +522,147 @@ def clock_text(seconds: float) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
+# ── R5: the headline (GR2-12, -13; templates D4, owner 2026-11-13) ────────────
+
+_DRAW_REASONS = {"stalemate": "stalemate", "insufficient material": "insufficient material",
+                 "repetition": "repetition", "agreement": "agreement",
+                 "fifty-move rule": "the fifty-move rule"}
+_LETTER_WORDS = {"N": "knight", "B": "bishop", "R": "rook", "Q": "queen"}
+# The app's own games say "abandoned" (core/game.py) for what imports call "abandonment".
+# E5 (owner, 2026-11-13): the app's own agreed draw (`GameSession.draw_agreed`) is agreement.
+# The import path's bare "draw" names no reason and stays "Drawn at move N." (D4).
+_TERMINATION_ALIASES = {"abandoned": "abandonment", "draw_agreed": "agreement"}
+CONVERSION_MIN_MOVES = 5
+
+
+def headline(report: dict) -> tuple[list[str], dict]:
+    """The report's headline: two sentences at most, every clause read off a field of
+    *report* (GAME_REPORT.md, "R5 headline — templates", as ruled in D4). A clause whose
+    field is absent is left out, never approximated; a sentence with no case that applies is
+    not said. Returns (sentences, the case of each sentence) — the cases for the corpus
+    counts. A pure function of the report dict: nothing else is read."""
+    you = report.get("you")
+    name = {"white": "White", "black": "Black"}
+    basis = report["basis"]
+    cases = {"s1": None, "s2": None, "conversion": False}
+    if not basis["complete"]:
+        cases["s1"] = "analysis incomplete"
+        return ([f"Analysis stops after {basis['analysedPlies']} of {basis['gamePlies']} "
+                 "half-moves, so there is no verdict on how the game was decided or how it "
+                 "ended."], cases)
+    labels = {c["ply"]: c["label"] for c in report["moments"]["shown"]}
+    result, last = report.get("result"), report.get("lastMove")
+    term = _TERMINATION_ALIASES.get(report.get("termination"), report.get("termination"))
+    winner = "white" if result == "1-0" else "black" if result == "0-1" else None
+    loser = None if winner is None else ("black" if winner == "white" else "white")
+    ending, decided = report.get("ending"), report.get("decided")
+
+    def subject(side: str) -> str:
+        return name[side] if you is None else "You" if side == you else "Your opponent"
+
+    def object_(side: str) -> str:
+        return name[side] if you is None else "you" if side == you else "them"
+
+    def rated(side: str) -> str:
+        if not ending or ending.get("loser") != side:
+            return ""
+        return (f", in a position the engine rated at {_pct(ending['loserWp'])} for "
+                f"{object_(side)}")
+
+    out: list[str] = []
+    s1 = None
+    at = f"at move {last['number']}" if last else None
+    if result == "1/2-1/2" and at:
+        reason = _DRAW_REASONS.get(term)
+        s1 = f"Drawn by {reason} {at}." if reason else f"Drawn {at}."
+        cases["s1"] = f"draw by {term}" if reason else "draw, other termination"
+    elif winner and term == "checkmate" and last:
+        s1 = (f"{name[winner]} won by checkmate, {last['label']}." if you is None
+              else f"You won by checkmate, {last['label']}." if winner == you
+              else f"You were checkmated, {last['label']}.")
+        cases["s1"] = "checkmate"
+    elif winner and term in ("timeout", "abandonment") and at:
+        verb = "lost on time" if term == "timeout" else "abandoned the game"
+        s1 = f"{subject(loser)} {verb} {at}{rated(loser)}."
+        cases["s1"] = term + ("" if rated(loser) else ", no final rating")
+    elif winner and term == "resignation" and at:
+        tail = "" if decided else rated(loser)
+        s1 = f"{subject(loser)} resigned {at}{tail}."
+        cases["s1"] = "resigned, decided" if decided else (
+            "resigned, not decided" + ("" if tail else ", no final rating"))
+    else:
+        cases["s1"] = "none (termination " + str(term) + ")"
+    if s1:
+        out.append(s1)
+
+    lead = next((f for f in report.get("fortune", []) if f["kind"] == "lead_lost"), None)
+    saved = next((f for f in report.get("fortune", []) if f["kind"] == "saved"), None)
+    sl = report.get("slide")
+    s2 = None
+    if decided and decided.get("byPly") is not None and decided["byPly"] in labels:
+        piece = decided.get("piece") if decided.get("byPiece") else None
+        s2 = (f"The game was decided at {labels[decided['byPly']]}"
+              + (f", which dropped the {piece}" if piece else ""))
+        cases["s2"] = "deciding move" + (", piece" if piece else "")
+    elif lead and lead.get("peakMove") is not None:
+        s2 = f"You were winning at move {lead['peakMove']} ({_pct(lead['peak'])})"
+        if lead.get("byPly") is not None and lead["byPly"] in labels:
+            s2 += f"; the lead went at {labels[lead['byPly']]}"
+        cases["s2"] = "lead lost"
+    elif sl and sl.get("fromMove") is not None:
+        when = (f"at move {sl['fromMove']}" if sl["fromMove"] == sl["toMove"]
+                else f"between moves {sl['fromMove']} and {sl['toMove']}")
+        whose = name[sl["side"]] if you is None else "you" if sl["side"] == you else "your opponent"
+        s2 = f"It slid {when}, from {_pct(sl['fromWp'])} to {_pct(sl['toWp'])} for {whose}"
+        if sl.get("stepPly") is not None and sl["stepPly"] in labels:
+            s2 += f"; the largest step was {labels[sl['stepPly']]}"
+        cases["s2"] = "slide"
+    elif (decided and decided.get("moveNumber") is not None
+          and not (last and decided["moveNumber"] == last["number"])):
+        side = decided["side"]
+        standing = (f"{name[side]} was winning" if you is None else "you were winning"
+                    if side == you else "your opponent was winning")
+        s2 = f"From move {decided['moveNumber']} {standing}"
+        cases["s2"] = "decided, no move"
+    elif (saved and saved.get("fromMove") is not None and saved.get("endedBeforeGame")
+          and not (last and saved["fromMove"] == last["number"]
+                   and not (saved.get("byPly") is not None and saved["byPly"] in labels))):
+        # H4 (owner, 2026-11-13, fourth round): after "decided, no move", so a game that
+        # was won from a decided position keeps "From move N you were winning" and its clean
+        # conversion; E6's "not said" stays after it, so E1 is not newly silenced there.
+        # E1 (owner, 2026-11-13): a game won or drawn after being lost — the old "You were
+        # losing … and won / drew" line's own fields; the move only where it is a card. Not
+        # said where the losing stretch runs to the end of the game (fired less, read in
+        # review/samples/gr2/r5b.md: "You were losing at move 22." in a game that ended at
+        # move 21). Nor, as E6, where N is the game's last move and no move is named: it
+        # repeats sentence 1. The cases: GAME_REPORT.md, "R5b".
+        s2 = f"You were losing at move {saved['fromMove']}"
+        if saved.get("byPly") is not None and saved["byPly"] in labels:
+            s2 += f"; your opponent let it go at {labels[saved['byPly']]}"
+        cases["s2"] = "comeback"
+    elif (decided and decided.get("moveNumber") is not None and last
+          and decided["moveNumber"] == last["number"]):
+        # E6 (owner, 2026-11-13): "From move N … winning." says nothing when N is the
+        # game's last move (the two cases ruled on: GAME_REPORT.md, third round, E6).
+        cases["s2"] = "decided at the last move, not said"
+    elif report.get("noSwing"):
+        s2 = "No move by either side cost 20 points"
+        cases["s2"] = "nothing decided"
+    conv = report.get("conversion")
+    # "after that" must point at the decided position, from which the moves are counted: only
+    # after a sentence that names it. After a slide it read as the slide's end ("It slid
+    # between moves 5 and 13 …, and none of your 11 moves after that" counted from move 21;
+    # GAME_REPORT.md "Cases behind game_report.py", K3), so there it is not said.
+    if (s2 and cases["s2"] in ("deciding move", "deciding move, piece", "decided, no move")
+            and conv and decided and you and decided["side"] == you and winner == you
+            and conv["moves"] >= CONVERSION_MIN_MOVES and conv["errors"] == 0):
+        s2 += f", and none of your {conv['moves']} moves after that was an error"
+        cases["conversion"] = True
+    if s2:
+        out.append(s2 + ".")
+    return out, cases
+
+
 def build_report(
     moves: Sequence,
     *,
@@ -479,15 +709,17 @@ def build_report(
     white_first = n == 0 or " w " in plies[0].fen
     spent = time_spent(clocks, tc[0], tc[1], white_first) if has_clocks else []
     ranked = moments(plies, sw)
-    # A loss of SWING or more seen by only one search: not a moment (the two-search
-    # rule cannot confirm it), but not evidence that nothing happened either. Game
+    # A loss of SWING or more seen by a stored search where no swing can be measured (the
+    # last move on an unfinished board, or no after-score): not a moment, but not evidence
+    # that nothing happened either. Game
     # 1308: 5.Nxe5?? (+0.03 -> -5.91), unmeasurable because the reply was a book move
     # left unscored by a pre-F4a run. Where one exists, the report does not claim "no
     # single move" anything, and does not call the game a slow decline.
     unconfirmed = [
         i for i, p in enumerate(plies)
-        if sw[i] is None and p.pb is not None and p.pa is not None
-        and p.pb - p.pa >= SWING and not (p.best and p.played == p.best)
+        if sw[i] is None and p.pb is not None
+        and any(x is not None and p.pb - x >= SWING for x in (p.pa, p.pa14))
+        and not (p.best and p.played == p.best)
     ]
     shown = sorted(ranked[:SHOWN])
     named: set[int] = set()   # moments a story line names; each gets a card
@@ -507,7 +739,7 @@ def build_report(
         series.append(round(e[0], 4) if e else None)
 
     # The rule sentences the Review callout shows per ply index, with their findings,
-    # filled by the cards and reused by the pattern line: the explain rules are most of
+    # filled by the cards (and by the pattern line until R6-5): the explain rules are most of
     # the report's cost (GAME_REPORT.md §14).
     rendered: dict[int, list] = {}
     # With the engine lines: the adjacent-ply check reads the next ply's MultiPV, and
@@ -539,8 +771,62 @@ def build_report(
             rendered[i] = pairs_at(i)
         return rendered[i]
 
+    def claims_a_piece(i: int) -> bool:
+        """Any claim in the callout for move *i* that the opponent wins a knight, bishop,
+        rook or queen because of it, traded or not ("a rook and a pawn for the knight",
+        "The bishop on f4 is still hanging")."""
+        ply = moves[i].ply
+        if run0.engine_claim is not None and run0.engine_claim(ply):
+            out = _engine_output(rows_by_ply, ply, finals)
+            return (isinstance(out, ProvenClaim) and out.subject == "played"
+                    and out.kind == "line_wins_material"
+                    and any(t.upper() in _PIECES for t in out.took))
+        return any(f.kind in CAPTURE_CLAIM_KINDS and f.subject == "played"
+                   and any(pc.piece in _PIECES for pc in f.pieces)
+                   for f, _line in rendered_at(i))
+
+    def lost_value(i: int) -> int:
+        """The most the callout for move *i* says the opponent wins, in pawns: the
+        engine-line claim's pieces taken less given, or the largest piece a capture-claim
+        rule sentence names."""
+        ply = moves[i].ply
+        if run0.engine_claim is not None and run0.engine_claim(ply):
+            out = _engine_output(rows_by_ply, ply, finals)
+            if isinstance(out, ProvenClaim):
+                return (sum(_VALUE[t.upper()] for t in out.took)
+                        - sum(_VALUE[t.upper()] for t in out.gave))
+            return 0
+        return max((_VALUE.get(pc.piece, 0) for f, _line in rendered_at(i)
+                    if f.kind in CAPTURE_CLAIM_KINDS and f.subject == "played"
+                    for pc in f.pieces), default=0)
+
+    def piece_captures(i: int) -> set[str]:
+        """GR2-2 (owner, 2026-11-13): the opponent's captures by which the Review callout
+        for this move says they win a piece because of it — the first move of the
+        engine-line claim about the played move, where that line takes a knight, bishop,
+        rook or queen and gives none back; or the capture a capture-claim rule sentence
+        (`CAPTURE_CLAIM_KINDS`, already past the adjacent-ply check) names, where it names
+        such a piece. Read off what the callout shows, so the report never names a move
+        for a loss the callout does not state. Empty: no such claim."""
+        ply = moves[i].ply
+        if run0.engine_claim is not None and run0.engine_claim(ply):
+            out = _engine_output(rows_by_ply, ply, finals)
+            if (isinstance(out, ProvenClaim) and out.subject == "played"
+                    and out.kind == "line_wins_material" and out.proof.line
+                    and any(t.upper() in _PIECES for t in out.took)
+                    and not any(t.upper() in _PIECES for t in out.gave)):
+                return {out.proof.line[0]}
+            return set()
+        return {f.moves["refutation"].uci for f, _line in rendered_at(i)
+                if f.kind in CAPTURE_CLAIM_KINDS and f.subject == "played"
+                and f.moves.get("refutation") is not None
+                and any(pc.piece in _PIECES for pc in f.pieces)}
+
+    name_of = {"white": "White", "black": "Black"}
+
     def build_cards(shown: list[int]) -> tuple[list[dict], list[list[int]]]:
         cards = []
+        carded = set(shown)
         for i in shown:
             p = plies[i]
             mover = "white" if " w " in p.fen else "black"
@@ -555,6 +841,21 @@ def build_report(
                                     final_lines=finals)
             sentences = [text for _src, text in full.shown_claims]
             descriptions = [str(text) for _k, text in full.descriptions]
+            reply = None
+            if you is not None and mover != you and i + 1 < n and plies[i + 1].ply == p.ply + 1:
+                # GR2-6, as amended (owner, 2026-11-13): the user's reply, on every opponent
+                # card — "the engine's move" when it was; the engine's move beside it only
+                # when the reply is labelled an error; otherwise nothing.
+                q = plies[i + 1]
+                said = _move_label(q.fen, _san(q.fen, q.played) or q.played)
+                if q.best and q.played == q.best:
+                    reply = f"You answered {said}, the engine's move."
+                elif (q.best and moves[i + 1].classification in ERROR_CLASSES
+                      and _san(q.fen, q.best) and (i + 1) not in carded):
+                    # D3 (owner, 2026-11-13): not where the reply is the next card of the
+                    # same group, which already shows "Best was …".
+                    reply = (f"You played {said}; the engine's move was "
+                             f"{_move_label(q.fen, _san(q.fen, q.best))}.")
             cards.append({
                 "ply": p.ply,
                 "side": mover,
@@ -570,6 +871,10 @@ def build_report(
                 "bandAfter": band(for_pov(after_w)),
                 "sentences": sentences,
                 "descriptions": descriptions,
+                "reply": reply,
+                "qualifier": pawn_qualifier(
+                    sentences, sw[i], band(for_pov(before_w)), band(for_pov(after_w)),
+                    "you" if you is not None else name_of[pov]),
                 # The clock at this move, shown and left to the reader. No claim about
                 # pace: moments take a median 1.56x the player's own median move time
                 # (stage 1), so "rushed" would be wrong as often as right.
@@ -593,6 +898,98 @@ def build_report(
                 groups.append([c["ply"]])
         return cards, groups
 
+    def found_it() -> dict | None:
+        """GR2-8 (owner, 2026-11-13): at most one "found it" moment per game, the first rule
+        that applies — W1 brilliant, else W2s a hard only move every stored alternative to
+        which is FOUND_GAP worse, else W4c a combination of two or more of the user's moves
+        that the engine proved after the opponent's error and the game followed, move for
+        move, to the gain. The first such move in the game within a rule. None where the
+        user's side is unknown: the element praises the user."""
+        if you is None:
+            return None
+        mine = [i for i in range(n) if (" w " in plies[i].fen) == (you == "white")]
+
+        def found(i: int, kind: str, sentence: str, **extra) -> dict:
+            p = plies[i]
+            return {"ply": p.ply, "kind": kind, "side": you,
+                    "classification": moves[i].classification,
+                    "san": _san(p.fen, p.played),
+                    "label": _move_label(p.fen, _san(p.fen, p.played) or p.played),
+                    "sentence": sentence, **extra}
+
+        for rule in FOUND_RULES:
+            got = {"brilliant": w1, "only_move": w2s, "combination": w4c}[rule](mine, found)
+            if got is not None:
+                return got
+        return None
+
+    def w1(mine, found):
+        for i in mine:
+            if moves[i].classification == "brilliant":
+                text = brilliant_sentence(plies[i].fen, plies[i].played)
+                if text:
+                    return found(i, "brilliant", text)
+        return None
+
+    def w2s(mine, found):
+        for i in mine:
+            text = only_move_found_sentence(moves[i])
+            if text:
+                return found(i, "only_move", text)
+        return None
+
+    def w4c(mine, found):
+        game_uci = [p.played for p in plies]
+        for i in range(n - 1):
+            if i in mine or moves[i].classification not in ERROR_CLASSES:
+                continue
+            ply = plies[i].ply
+            if run0.engine_claim is None or not run0.engine_claim(ply):
+                continue
+            claim = _engine_output(rows_by_ply, ply, finals)
+            if not isinstance(claim, ProvenClaim) or claim.subject != "played" \
+                    or not claim.proof.line:
+                continue
+            line = list(claim.proof.line)
+            start = i if line[0] == plies[i].played else i + 1
+            # The game followed the line move for move, to its end.
+            if game_uci[start:start + len(line)] != line:
+                continue
+            board = chess.Board(plies[start].fen)
+            user = board.turn if start == i + 1 else not board.turn
+            before = _material(board, user)
+            own = 0
+            for u in line:
+                own += board.turn == user
+                board.push(chess.Move.from_uci(u))
+            if claim.kind == "line_mates":
+                if not board.is_checkmate():
+                    continue
+            elif _material(board, user) - before < FOUND_MIN_GAIN:
+                continue
+            if own < FOUND_MIN_OWN_MOVES:
+                continue
+            j = i + 1
+            shown_line = line[1:] if start == i else line
+            after = _move_label(plies[i].fen, _san(plies[i].fen, plies[i].played) or plies[i].played)
+            if len(shown_line) <= C.PV_PRINT_MAX_PLIES:
+                moves_text = f": {_numbered_line(plies[j].fen, shown_line)}"
+                tail = "" if claim.kind == "line_mates" else \
+                    f", winning {material_phrase(claim.took, claim.gave)}"
+            else:
+                last = chess.Board(plies[j].fen)
+                for u in shown_line[:-1]:
+                    last.push_uci(u)
+                by = f" by move {last.fullmove_number}"
+                moves_text = ""
+                tail = (f", mating{by}" if claim.kind == "line_mates"
+                        else f", winning {material_phrase(claim.took, claim.gave)}{by}")
+            what = "the forced mate" if claim.kind == "line_mates" else "the line"
+            return found(j, "combination",
+                         f"You played {what} the engine proved after {after}{moves_text}{tail}.",
+                         afterPly=plies[i].ply, linePlies=len(line), ownMoves=own)
+        return None
+
     def finish() -> dict:
         """Cards for the largest moments plus any moment a story line names: the
         move that threw a win away matters more than a later swing in a position
@@ -601,10 +998,24 @@ def build_report(
         cards, groups = build_cards(sorted(set(shown) | named))
         report["moments"]["shown"] = cards
         report["moments"]["groups"] = groups
-        pattern = repeated_pattern()
-        if pattern is not None:
-            report["pattern"] = pattern
-            lines.append(pattern.pop("line"))
+        report["found"] = found_it()
+        # E2 (owner, 2026-11-13): no reply line on an opponent card whose next item is the
+        # found-it card beginning with that reply — the card about the user's very next
+        # move, with no card of its own between (report.ts `reportItems` puts it there).
+        f = report["found"]
+        if f is not None:
+            carded_plies = {c["ply"] for c in cards}
+            for c in cards:
+                if (c["reply"] and c["yours"] is False and c["ply"] + 1 == f["ply"]
+                        and f["ply"] not in carded_plies):
+                    c["reply"] = None
+        # R5: context comes after the cards, so its lines point up at them.
+        context: list[str] = report["context"]
+        if report["opening"] is not None and lines and lines[0] == opening_sentence(
+                report["opening"], you, report["opening"].get("band")):
+            context.append(lines[0])
+        # The per-game repeated-pattern line (slice 6) was removed when the patterns card
+        # shipped on Insights (owner ruling R6-5, 2026-11-13; PATTERNS.md §6a).
         low = low_clock()
         if low is not None:
             report["lowClock"] = low
@@ -615,55 +1026,9 @@ def build_report(
                 line += (f" {after} of your moments below came after that."
                          if after > 1 else " One of your moments below came after that.")
             report["lines"].append(line)
+            context.append(line.replace(" moments below came", " moments above came"))
+        report["headline"], report["headlineCases"] = headline(report)
         return report
-
-    def repeated_pattern() -> dict | None:
-        """One line when a finding kind repeats on the user's moves and one of the
-        repeats is on a moment card of theirs — the only case where the repetition
-        explains the result (GAME_REPORT.md §3, "Themes"). Counted on what the Review
-        callout shows (AUDIT-2); the two mistake lines (`ERROR_PATTERNS`) count only
-        error-labelled, unexcused moves (AUDIT-6). The kind with the most repeats wins; ties go to the
-        order of PATTERN_PHRASES."""
-        if you is None:
-            return None
-        cards = {c["ply"]: c["label"] for c in report["moments"]["shown"] if c["yours"]}
-        if not cards:
-            return None
-        # A pattern needs a repeat on one of the user's cards, so a game whose cards
-        # carry no pattern kind is settled without running the rules on every move.
-        on_card_kinds = {(f.kind, f.subject) for i in range(len(moves))
-                         if plies[i].ply in cards for f, _line in rendered_at(i)}
-        if not on_card_kinds & PATTERN_PHRASES.keys():
-            return None
-        plies_of: dict[tuple[str, str], list[int]] = {}
-        for i in range(len(moves)):
-            if (" w " in plies[i].fen) != (you == "white"):
-                continue
-            for f, line in rendered_at(i):
-                if (f.kind, f.subject) in ERROR_PATTERNS and (
-                        moves[i].classification not in ERROR_CLASSES or excuses(line)):
-                    continue
-                bucket = plies_of.setdefault((f.kind, f.subject), [])
-                if plies[i].ply not in bucket:
-                    bucket.append(plies[i].ply)
-        order = list(PATTERN_PHRASES)
-        best = None
-        for key in order:
-            hits = plies_of.get(key, [])
-            on_cards = [p for p in hits if p in cards]
-            if len(hits) >= 2 and on_cards and (best is None or len(hits) > len(best[1])):
-                best = (key, hits, on_cards)
-        if best is None:
-            return None
-        (kind, subject), hits, on_cards = best
-        labels = [cards[p] for p in on_cards]
-        tail = (f"{labels[0]}, one of them, is a moment below." if len(labels) == 1
-                else f"{_and_list(labels)}, {_NUMBER_WORDS.get(len(labels), len(labels))} "
-                     f"of them, are moments below.")
-        return {
-            "kind": kind, "subject": subject, "plies": hits, "onCards": on_cards,
-            "line": f"{PATTERN_PHRASES[(kind, subject)]} {_times(len(hits))} in this game; {tail}",
-        }
 
     def low_clock() -> dict | None:
         """The first move of the user's that left their clock under LOW_CLOCK of the
@@ -703,9 +1068,27 @@ def build_report(
         "opening": None,
         "slide": None,
         "slideGated": None,
-        "pattern": None,
+        "slideReversed": None,
+        "found": None,
+        # R5 (GR2-12, -13): the fields the headline reads, the headline, the context lines.
+        "you": player_color if player_color in ("white", "black") else None,
+        "result": result,
+        "termination": termination,
+        "lastMove": None,
+        "noSwing": False,
+        "conversion": None,
+        "headline": [],
+        "headlineCases": None,
+        "context": [],
+        # The story lines as they were before R5: no longer rendered (the headline and
+        # the context replace them); kept for the corpus tools and the tests of the
+        # verdicts they state.
         "lines": [],
     }
+    if n:
+        report["lastMove"] = {
+            "label": _move_label(plies[-1].fen, _san(plies[-1].fen, plies[-1].played) or plies[-1].played),
+            "number": _move_number(plies[-1].fen)}
     lines: list[str] = report["lines"]
 
     # ── the opening: first, because it comes first ────────────────────────────
@@ -733,7 +1116,8 @@ def build_report(
                 m.score_after_cp, m.score_after_mate) >= SWING
         for m in moves)
     if not ranked and not unconfirmed and not badged:
-        lines.append("No single move swung this game by 20 points or more.")
+        report["noSwing"] = True
+        lines.append(NO_SWING_LINE)
     if not complete:
         lines.append(
             f"Analysis stops after {n} of {game_plies} half-moves, so there is no "
@@ -757,26 +1141,155 @@ def build_report(
             return "you" if not subject else "You"
         return "your opponent" if not subject else "Your opponent"
 
+    def largest_step(a: int, b: int, loser: str) -> int | None:
+        """GR2-9 (owner, 2026-11-13): the loser's move inside the slide's window (positions
+        a..b) with the largest win-probability loss by its stored scores — the depth-14
+        before- and after-scores its label reads — named only when its Review callout shows
+        a claim (the card then carries it) and its swing can be measured for the card."""
+        best, worst = None, 0.0
+        for i in range(a, min(b, n)):
+            m = moves[i]
+            if (" w " in plies[i].fen) != (loser == "white"):
+                continue
+            if (m.score_before_cp is None and m.score_before_mate is None) or (
+                    m.score_after_cp is None and m.score_after_mate is None):
+                continue
+            loss = wpl(m.score_before_cp, m.score_before_mate, m.score_after_cp, m.score_after_mate)
+            if best is None or loss > worst:
+                best, worst = i, loss
+        if best is None or sw[best] is None:
+            return None
+        full = explain_ply_full(rows_by_ply, plies[best].ply, you or UNKNOWN_SIDE,
+                                final_lines=finals)
+        return best if full.shown_claims else None
+
+    def ended_line(loser: str, termination: str) -> None:
+        """How the game ended, with the final position's standing for the loser — the
+        estimate kindest to the actual result: the claim is that the loser still stood
+        this well, so take the least they could have had."""
+        final_est = est[-1]
+        lw = min(final_est) if loser == "white" else min(1.0 - x for x in final_est)
+        report["ending"] = {"loser": loser, "loserWp": round(lw, 4), "termination": termination}
+        verb = {
+            "timeout": "lost on time",
+            "resignation": "resigned",
+            "abandonment": "abandoned the game",
+        }.get(termination)
+        own = "you" if you == loser else "them"
+        if verb:
+            lines.append(
+                f"{who(loser)} {verb} in a position the engine rated at "
+                f"{_pct(lw)} for {own if you else name[loser]}."
+            )
+        else:
+            lines.append(
+                f"The game ended ({termination}) with the engine rating the final "
+                f"position at {_pct(lw)} for {who(loser, subject=False) if you else name[loser]}."
+            )
+
+    def drops_the_piece(i: int) -> bool:
+        """GR2-2: move *i* is what lost a piece, by its own callout. Narrowed by reading
+        every case on the owner's games (GAME_REPORT.md, R1), each narrowing firing less:
+
+        - labelled an error: a move labelled good or better that "leaves the knight
+          hanging" cost under 5 points because the piece was already lost (K4: 12…h5);
+        - the same player's previous move did not already lose a piece by its callout
+          (K5: 9…g6 had already allowed the rook, so 10…Qf6 did not lose it; K6: "The
+          bishop on f4 is still hanging"), and was
+          not a capture on the square the piece is now taken on (a recapture, below);
+        - where the move itself captures a knight, bishop, rook or queen, the callout's
+          loss exceeds it by a piece: 22.gxf3 took a queen while "leaving the bishop on g7
+          hanging" (K7), and 10.Qxd2 took a bishop for the rook it lost (K8) — exchanges,
+          not a piece dropped; 13…Bxg2 took a bishop and dropped the queen (K9), which
+          stands;
+        - the opponent's next move is the capture the callout names (below).
+
+        The cases K4–K9 are keyed in GAME_REPORT.md, "Cases behind game_report.py".
+        """
+        if moves[i].classification not in ERROR_CLASSES or sw[i] is None:
+            return False
+        board = chess.Board(plies[i].fen)
+        took = board.piece_at(chess.Move.from_uci(plies[i].played).to_square)
+        if (took is not None and took.symbol().upper() in _PIECES
+                and lost_value(i) - _VALUE[took.symbol().upper()] < _VALUE["N"]):
+            return False
+        prev = i - 2 if i >= 2 and plies[i - 2].ply == plies[i].ply - 2 else None
+        if prev is not None and claims_a_piece(prev):
+            return False
+        # The opponent took it: their next move in the game is the capture the callout
+        # names. Where they did not, nothing was lost in the game (13.Qc2 "allows Black to
+        # win a queen", and Black played 13…Bc5; GAME_REPORT.md "Cases behind
+        # game_report.py", K10).
+        nxt = i + 1
+        if not (nxt < n and plies[nxt].ply == plies[i].ply + 1
+                and plies[nxt].played in piece_captures(i)):
+            return False
+        # Not a recapture: where the same player's previous move captured on the square
+        # the opponent now takes on, the exchange is being completed, not a piece dropped
+        # (K11: 13.Nxf6+ took a knight, then 14.Qf4 "left the knight on f6 hanging"; K12:
+        # 21…Bxd4, then 22…Qc5; GAME_REPORT.md "Cases behind game_report.py").
+        if prev is not None:
+            pb = chess.Board(plies[prev].fen)
+            pm = chess.Move.from_uci(plies[prev].played)
+            if (pb.is_capture(pm) and pm.to_square
+                    == chess.Move.from_uci(plies[nxt].played).to_square):
+                return False
+        return True
+
+    def dropped_piece(i: int) -> str | None:
+        """R5's `decided.piece`: the piece the callout's claim says the opponent's next move
+        takes — the engine-line claim's one knight, bishop, rook or queen taken, or the one
+        such piece a capture-claim rule sentence names for that capture. None where the
+        claim names none or more than one: the clause is then left out."""
+        ply, nxt = moves[i].ply, plies[i + 1].played
+        if run0.engine_claim is not None and run0.engine_claim(ply):
+            out = _engine_output(rows_by_ply, ply, finals)
+            took = [t.upper() for t in getattr(out, "took", ()) if t.upper() in _PIECES]
+            return _LETTER_WORDS[took[0]] if len(took) == 1 else None
+        named_pieces = {pc.piece for f, _line in rendered_at(i)
+                        if f.kind in CAPTURE_CLAIM_KINDS and f.subject == "played"
+                        and f.moves.get("refutation") is not None
+                        and f.moves["refutation"].uci == nxt
+                        for pc in f.pieces if pc.piece in _PIECES}
+        return _LETTER_WORDS[named_pieces.pop()] if len(named_pieces) == 1 else None
+
     # ── point of no return ────────────────────────────────────────────────────
     winner = "white" if result == "1-0" else "black" if result == "0-1" else None
     pnr = point_of_no_return(v)
     if winner is not None and pnr is not None and pnr[1] == winner:
         k, side = pnr
         by = k - 1 if k >= 1 and (k - 1) in ranked else None
+        # "No single move decided it" is reserved for a game with genuinely no moment —
+        # none confirmed, none seen by one search only (owner ruling, 2026-10-21). With
+        # moments elsewhere, the claim would read as a verdict on the whole game.
+        no_moment = not ranked and not any(i < k for i in unconfirmed)
+        by_piece = False
+        if (by is None and no_moment and not badged and k >= 1
+                and (" w " in plies[k - 1].fen) != (side == "white")
+                and drops_the_piece(k - 1)):
+            # GR2-2 (owner, 2026-11-13): where that clause would stand, but the loser's
+            # move into the decided position drops a piece by its own callout, that move
+            # decided it (13…Bxg2 dropped the queen; GAME_REPORT.md "Cases behind
+            # game_report.py", K9).
+            by, by_piece = k - 1, True
         if by is not None:
             named.add(by)
-        report["decided"] = {"position": k, "side": side, "byPly": by}
+        report["decided"] = {"position": k, "side": side, "byPly": by, "byPiece": by_piece,
+                             "piece": dropped_piece(by) if by_piece else None,
+                             "moveNumber": move_no(k)}
+        if you is not None and side == you:
+            # GR2-13: the user's moves from the decided position to the end, and how many
+            # of them are labelled an error (inaccuracy, mistake, miss or blunder).
+            mine_after = [i for i in range(k, n) if (" w " in plies[i].fen) == (you == "white")]
+            report["conversion"] = {
+                "moves": len(mine_after),
+                "errors": sum(moves[i].classification in ERROR_CLASSES for i in mine_after)}
         standing = (f"{name[side]} was winning" if you is None
                     else "you were winning" if side == you else "your opponent was winning")
         if by is not None:
             label = _move_label(plies[by].fen, _san(plies[by].fen, plies[by].played) or plies[by].played)
             lines.append(f"The game was decided at {label}: from there {standing} to the end.")
         else:
-            # "No single move decided it" is reserved for a game with genuinely no
-            # moment — none confirmed, none seen by one search only (owner ruling,
-            # 2026-10-21). With moments elsewhere, the claim would read as a verdict on
-            # the whole game.
-            no_moment = not ranked and not any(i < k for i in unconfirmed)
             lines.append(
                 f"From move {move_no(k)} {standing}, and it never came back into doubt"
                 # Not beside a badge that says a move lost 20 points or more by its own
@@ -789,7 +1302,6 @@ def build_report(
             # Moments elsewhere (gated slides): computed the same way, then emitted only
             # if no moment and no one-search loss falls inside the window — otherwise
             # that move already explains the stretch, and "slipped" would be wrong.
-            no_moment = not ranked and not any(i < k for i in unconfirmed)
             loser = "black" if side == "white" else "white"
             mine = [[x if loser == "white" else 1.0 - x for x in e] for e in est]
             low = [min(e) if e else None for e in mine]
@@ -797,6 +1309,16 @@ def build_report(
             scored = [j for j in range(k + 1) if low[j] is not None]
             peak = max(scored, key=lambda j: (low[j], j)) if scored else 0
             found = slide(low, high, k, start=peak)
+            if found is not None and any(
+                    high[j] is not None and high[j] >= SLIDE_RECOVERED
+                    for j in range(found[1] + 1, k)):
+                # GR2-3 (owner, 2026-11-13): a slide may not end before the loser climbs
+                # back to SLIDE_RECOVERED or more on any estimate — the stretch is not
+                # what lost the game (GAME_REPORT.md "Cases behind game_report.py", K13).
+                # Not shown, and no other
+                # window is looked for in its place: firing less, never re-aiming.
+                report["slideReversed"] = {"from": found[0], "to": found[1]}
+                found = None
             if found is not None and not no_moment:
                 a, b, _fall = found
                 inside = [i for i in set(ranked) | set(unconfirmed) if a <= i < b]
@@ -805,9 +1327,17 @@ def build_report(
                     found = None
             if found is not None:
                 a, b, _fall = found
+                step = largest_step(a, b, loser)
+                if step is not None:
+                    named.add(step)
                 report["slide"] = {"from": a, "to": b, "side": loser,
                                    "fromWp": round(low[a], 4), "toWp": round(high[b], 4),
-                                   "scope": "game" if no_moment else "stretch"}
+                                   "fromMove": move_no(a), "toMove": move_no(b),
+                                   "scope": "game" if no_moment else "stretch",
+                                   "stepPly": None if step is None else plies[step].ply}
+                step_text = "" if step is None else (
+                    " The largest step was "
+                    f"{_move_label(plies[step].fen, _san(plies[step].fen, plies[step].played) or plies[step].played)}.")
                 ma, mb = move_no(a), move_no(b)
                 if no_moment:
                     whose = (name[loser] if you is None else "you" if loser == you
@@ -815,6 +1345,7 @@ def build_report(
                     when = f"at move {ma}" if ma == mb else f"between moves {ma} and {mb}"
                     lines.append(
                         f"It slid {when}, from {_pct(low[a])} to {_pct(high[b])} for {whose}."
+                        + step_text
                     )
                 else:
                     # Scoped to the stretch: moments exist elsewhere in this game.
@@ -824,37 +1355,22 @@ def build_report(
                     when = f"At move {ma}" if ma == mb else f"Between moves {ma} and {mb}"
                     lines.append(
                         f"{when} {position} slipped from {_pct(low[a])} to "
-                        f"{_pct(high[b])}."
+                        f"{_pct(high[b])}." + step_text
                     )
+        # GR2-5 (owner, 2026-11-13): how a decided game ended, when it ended on the clock
+        # or by abandonment — said in the sentence the report uses for a game that ended
+        # off the board (lost on time at 0:00 with only "From move 42 your opponent was
+        # winning"; GAME_REPORT.md "Cases behind game_report.py", K14).
+        if termination in ("timeout", "abandonment") and est[-1]:
+            ended_line("black" if side == "white" else "white", termination)
     elif winner is not None and not est[-1]:
         # 34 games: resigned or abandoned inside an unscored book stretch.
         lines.append("The game ended before the engine had scored a position near the "
                      "end, so there is no verdict on how it ended.")
     elif winner is not None:
         # Ended off the board: the final position was not decided for the winner.
-        loser = "black" if winner == "white" else "white"
-        final_est = est[-1]
-        if final_est:
-            # The estimate kindest to the actual result: the claim is that the
-            # loser still stood this well, so take the least they could have had.
-            lw = min(final_est) if loser == "white" else min(1.0 - x for x in final_est)
-            report["ending"] = {"loser": loser, "loserWp": round(lw, 4), "termination": termination}
-            verb = {
-                "timeout": "lost on time",
-                "resignation": "resigned",
-                "abandonment": "abandoned the game",
-            }.get(termination)
-            own = "you" if you == loser else "them"
-            if verb:
-                lines.append(
-                    f"{who(loser)} {verb} in a position the engine rated at "
-                    f"{_pct(lw)} for {own if you else name[loser]}."
-                )
-            else:
-                lines.append(
-                    f"The game ended ({termination}) with the engine rating the final "
-                    f"position at {_pct(lw)} for {who(loser, subject=False) if you else name[loser]}."
-                )
+        if est[-1]:
+            ended_line("black" if winner == "white" else "white", termination)
 
     # ── what it cost: a decided lead lost, or a decided loss saved ───────────
     if you is not None:
@@ -880,7 +1396,8 @@ def build_report(
                 if went is not None:
                     named.add(went)
                 report["fortune"].append({"kind": "lead_lost", "from": a, "to": b,
-                                          "peak": round(peak, 4), "peakAt": peak_j, "byPly": went})
+                                          "peak": round(peak, 4), "peakAt": peak_j,
+                                          "peakMove": move_no(peak_j), "byPly": went})
                 tail = (f" The lead went at "
                         f"{_move_label(plies[went].fen, _san(plies[went].fen, plies[went].played) or '')}."
                         if went is not None else "")
@@ -896,11 +1413,23 @@ def build_report(
                 let_go = moment_at(them, b)
                 if let_go is not None:
                     named.add(let_go)
-                report["fortune"].append({"kind": "saved", "from": a, "to": b, "byPly": let_go})
+                # E1's reading (2026-11-13): the stretch ended before the game did — a scored
+                # position follows it. Where it runs to the end (won on time, or drawn, still
+                # lost) there was no comeback for the headline to tell.
+                report["fortune"].append({"kind": "saved", "from": a, "to": b, "byPly": let_go,
+                                          "fromMove": move_no(a),
+                                          "endedBeforeGame": any(est[j] for j in range(b + 1, n + 1))})
                 tail = (f" Your opponent let it go at "
                         f"{_move_label(plies[let_go].fen, _san(plies[let_go].fen, plies[let_go].played) or '')}."
                         if let_go is not None else "")
                 lines.append(
                     f"You were losing {span(a, b)} and {'won' if outcome == 'won' else 'drew'}." + tail
                 )
+    # GR2-4, as amended (owner, 2026-11-13): "No single move swung…" goes where another
+    # story line says how the game went — a slide, a point of no return, a lead lost.
+    # Where it would be the report's only story line it stays, until the headline (R5).
+    if NO_SWING_LINE in lines and (
+            report["decided"] is not None or report["slide"] is not None
+            or any(f["kind"] == "lead_lost" for f in report["fortune"])):
+        lines.remove(NO_SWING_LINE)
     return finish()

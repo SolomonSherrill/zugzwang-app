@@ -129,9 +129,11 @@ def test_openings_book_missing_assets_degrades(tmp_path):
 
 @pytest.fixture(scope="module")
 def real_book():
-    if not C.OPENINGS_BOOK_PATH.exists() or not C.OPENINGS_ECO_DIR.exists():
-        pytest.skip("bundled opening assets not present")
-    book = OpeningsBook()
+    from tests.bookfile import real_book_path
+    path = real_book_path()
+    if path is None or not C.OPENINGS_ECO_DIR.exists():
+        pytest.skip("no opening book installed (BOOK-DL) or no ECO data")
+    book = OpeningsBook(book_path=path)
     yield book
     book.close()
 

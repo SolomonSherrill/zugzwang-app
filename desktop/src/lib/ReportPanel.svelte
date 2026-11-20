@@ -6,11 +6,12 @@
     bandChange,
     basisText,
     canTry,
-    cards,
     momentClock,
     verdictText,
     type TryVerdict,
     momentsHeading,
+    replyHidden,
+    reportItems,
     type AnalysedReport,
   } from './report'
 
@@ -44,7 +45,7 @@
     onstop = () => {},
   }: Props = $props()
 
-  const groups = $derived(cards(report))
+  const items = $derived(reportItems(report))
   const heading = $derived(momentsHeading(report.moments.total, report.moments.shown.length))
   const standingOf = $derived(
     report.moments.shown[0]?.yours === null ? (report.basis.pov === 'white' ? "White's" : "Black's") : 'your',
@@ -57,12 +58,13 @@
 </script>
 
 <div class="report">
-  {#if report.lines.length}
-    <ul class="story">
-      {#each report.lines as line (line)}
-        <li>{line}<FlagThis kind="report line" {gameId} shown={line} /></li>
+  <!-- R5 (GR2-12): the headline first — two sentences at most, each clause from a field. -->
+  {#if report.headline?.length}
+    <p class="headline">
+      {#each report.headline as line (line)}
+        <span>{line}<FlagThis kind="report headline" {gameId} shown={line} /></span>{' '}
       {/each}
-    </ul>
+    </p>
   {/if}
   {#if report.slide}
     {@const sl = report.slide}
@@ -70,16 +72,51 @@
     <button class="step" onclick={() => onseek(sl.from)}>Step through the slide</button>
   {/if}
 
-  {#if heading}
-    <!-- The band on each card is one side's standing before → after the move: the
-         user's whoever moved, so an opponent's error reads as an improvement. -->
-    <div class="heading">
-      <span>{heading}</span>
-      <span class="pov">{standingOf} standing</span>
-    </div>
-  {/if}
 
-  {#each groups as group, i (group[0].ply)}
+  {#each items as item (item.kind === 'card' ? item.group[0].ply : 'found')}
+    {#if item.kind === 'found'}
+    {@const f = item.found}
+    <!-- GR2-8: the game's one "found it" moment, in game order among the cards, marked ✓
+         and not numbered. -->
+    <div
+      class="card"
+      class:current={f.ply + 1 === current}
+      role="button"
+      tabindex="0"
+      onclick={() => onseek(f.ply + 1)}
+      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onseek(f.ply + 1)}
+    >
+      <span class="num found">✓</span>
+      <div class="body">
+        <div class="move">
+          <button
+            class="label"
+            onclick={(e) => {
+              e.stopPropagation()
+              onseek(f.ply + 1)
+            }}
+          >
+            <span class="dot" style="background: {CLASS_COLORS[f.classification]}"></span>
+            {f.label}
+          </button>
+          <span class="who">You · found it</span>
+        </div>
+        <ul class="explain">
+          <li>{f.sentence}<FlagThis kind="report found" {gameId} ply={f.ply}
+                                    label={f.classification} shown={f.sentence} /></li>
+        </ul>
+        <button
+          class="to-moves"
+          onclick={(e) => {
+            e.stopPropagation()
+            onshowmoves(f.ply + 1)
+          }}>Show in moves</button
+        >
+      </div>
+    </div>
+    {:else}
+    {@const group = item.group}
+    {@const i = item.n - 1}
     {@const at = group[0].ply + 1}
     <!-- The card seeks to the position after its first move, which is where the
          move list puts you too: the played move highlighted, the best move drawn. -->
@@ -118,12 +155,16 @@
               {#if momentClock(m)}<span class="clock">{momentClock(m)}</span>{/if}
             </div>
           {/if}
-          {#if m.sentences.length && !hiding}
+          {#if (m.sentences.length || m.qualifier) && !hiding}
             <ul class="explain">
               {#each m.sentences as s (s)}
                 <li>{s}<FlagThis kind="report claim" {gameId} ply={m.ply}
                                  label={m.classification} shown={s} /></li>
               {/each}
+              {#if m.qualifier}
+                <li>{m.qualifier}<FlagThis kind="report qualifier" {gameId} ply={m.ply}
+                                           label={m.classification} shown={m.qualifier} /></li>
+              {/if}
             </ul>
           {/if}
           <!-- One move, one account (AUDIT-2): the card shows what the Review callout
@@ -139,6 +180,11 @@
                 {/each}
               </ul>
             </div>
+          {/if}
+          {#if m.reply && !replyHidden(m, tryingPly, verdict)}
+            <!-- GR2-6: the user's reply to an opponent's moment, in the muted line style. -->
+            <div class="best"><span>{m.reply}</span><FlagThis kind="report reply" {gameId}
+                 ply={m.ply + 1} shown={m.reply} /></div>
           {/if}
           {#if tryingPly === m.ply}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -172,7 +218,25 @@
         >
       </div>
     </div>
+    {/if}
   {/each}
+
+  <!-- R5: context last — the clock line (the pattern line left with R6-5), then the count. -->
+  {#if report.context?.length}
+    <ul class="story context">
+      {#each report.context as line (line)}
+        <li>{line}<FlagThis kind="report line" {gameId} shown={line} /></li>
+      {/each}
+    </ul>
+  {/if}
+  {#if heading}
+    <!-- The band on each card is one side's standing before → after the move: the
+         user's whoever moved, so an opponent's error reads as an improvement. -->
+    <div class="heading">
+      <span>{heading}</span>
+      <span class="pov">{standingOf} standing</span>
+    </div>
+  {/if}
 </div>
 <div class="basis">{basisText(report)}<FlagThis kind="report basis" {gameId} shown={basisText(report)} /></div>
 
@@ -185,6 +249,11 @@
     flex-direction: column;
     gap: 8px;
   }
+  .headline {
+    margin: 0;
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
   .story {
     margin: 0;
     padding: 0 0 0 16px;
@@ -194,6 +263,11 @@
   }
   .story li + li {
     margin-top: 4px;
+  }
+  .story.context {
+    margin-top: 4px;
+    font-size: 12.5px;
+    color: var(--text-muted);
   }
   .step {
     align-self: flex-start;
@@ -253,6 +327,9 @@
   }
   .num.yours {
     background: var(--danger);
+  }
+  .num.found {
+    background: var(--win);
   }
   .body {
     flex: 1;

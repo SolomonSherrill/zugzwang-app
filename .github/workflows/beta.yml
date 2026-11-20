@@ -131,6 +131,18 @@ jobs:
         with:
           workspaces: desktop/src-tauri
 
+      - name: Dev configuration — build it and spawn its sidecar headlessly
+        # fix/dev-launch (2026-11-13): the beta merge broke the dev run's sidecar spawn and
+        # nothing noticed. This builds the dev configuration on Tauri's mock runtime (no
+        # window) and makes the webview's spawn call through the real ACL and shell scope,
+        # waiting for the sidecar's `ready` (src/dev_spawn_test.rs). The dev capability names
+        # $HOME/zugzwang/.venv/bin/python, so the checkout and this job's Python are put there.
+        if: runner.os == 'macOS'
+        run: |
+          [ -e "$HOME/zugzwang" ] || ln -s "$GITHUB_WORKSPACE" "$HOME/zugzwang"
+          mkdir -p .venv/bin && ln -sf "$(command -v python)" .venv/bin/python
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib -- --nocapture
+
       - name: Bundle
         working-directory: desktop
         env:

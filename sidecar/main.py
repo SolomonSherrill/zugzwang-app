@@ -75,6 +75,7 @@ from zugzwang.core.retry import judge as judge_try
 from zugzwang.core.game import GameEnd, GameSession
 from zugzwang.core.import_pgn import parse_pgn_report
 from zugzwang.core.insights import build_insights
+from zugzwang.core.patterns import FACTS_VERSION, facts_row, write_facts_for_run
 from zugzwang.core.platform_sync import (
     SyncError,
     fetch_chesscom_games,
@@ -427,19 +428,34 @@ class AnalysisRunner:
         self._engine = SupervisedEngine(_analysis_engine_starter("Analysis engine"),
                                         label="analysis engine")
         self._cancel = False
+        self._stopping = False
         self._post = post_call
         self._budget = budget
+        self.games_pending = 0      # queued or running game analyses (BOOK-DL refuses a switch)
         threading.Thread(target=self._run, name="analysis", daemon=True).start()
 
     def analyze_game(self, game_id: int, run_id: int, pgn: str, depth: int,
                      openings: OpeningsBook | None, on_event) -> None:
+        self.games_pending += 1
         self._jobs.put(("game", (game_id, run_id, pgn, depth, openings, on_event)))
+
+    #: Runs per refill job. Each job re-queues the rest behind it, so a game the user asks
+    #: to analyse waits for one batch at most (about 2 s on the owner's games), not the lot.
+    FACTS_BATCH = 25
+
+    def refill_facts(self, db_path: Path, run_ids: list[int], on_rows, on_done) -> None:
+        """R6-REFILL (PATTERNS.md §6c): compute missing or stale pattern facts in the
+        background, on this thread, with its own read-only connection. *on_rows(rows)* and
+        *on_done(stats)* are posted to the app thread, which owns the writing connection."""
+        stats = {"runs": len(run_ids), "computed": 0, "t0": time.monotonic()}
+        self._jobs.put(("facts", (db_path, list(run_ids), on_rows, on_done, stats, None)))
 
     def cancel(self) -> None:
         self._cancel = True
 
     def shutdown(self) -> None:
         self._cancel = True
+        self._stopping = True
         self._jobs.put(("quit", None))
 
     # ── worker thread ─────────────────────────────────────────────────────────
@@ -452,10 +468,46 @@ class AnalysisRunner:
                 return
             try:
                 if kind == "game":
-                    self._do_game(*payload)
+                    try:
+                        self._do_game(*payload)
+                    finally:
+                        self.games_pending -= 1
+                elif kind == "facts":
+                    self._do_facts(*payload)
             except Exception as exc:
+                if kind == "facts":
+                    logger.exception("pattern facts refill failed")
+                    continue
                 logger.exception("analysis job failed")
                 _emit("analysis_error", {"message": str(exc)})
+
+    def _do_facts(self, db_path, todo, on_rows, on_done, stats, ro) -> None:
+        if self._stopping:
+            if ro is not None:
+                ro.close()
+            return
+        if ro is None:
+            ro = Database(db_path, read_only=True)
+        batch, rest = todo[:self.FACTS_BATCH], todo[self.FACTS_BATCH:]
+        rows = []
+        for run_id in batch:
+            try:
+                row = facts_row(ro, run_id)
+            except Exception:
+                logger.exception("pattern facts for run %s not computed", run_id)
+                continue
+            if row is not None:
+                rows.append(row)
+        stats["computed"] += len(rows)
+        if rows:
+            self._post(lambda r=rows: on_rows(r))
+        if rest and not self._stopping:
+            # Behind anything queued meanwhile: a game analysis waits one batch at most.
+            self._jobs.put(("facts", (db_path, rest, on_rows, on_done, stats, ro)))
+            return
+        ro.close()
+        stats["seconds"] = round(time.monotonic() - stats.pop("t0"), 1)
+        self._post(lambda st=dict(stats): on_done(st))
 
     def _do_game(self, game_id, run_id, pgn, depth, openings, on_event) -> None:
         # The supervisor restarts a dead engine itself; touching `.engine` here only
@@ -1133,6 +1185,7 @@ class SyncRunner:
         except IncompleteRun:
             db.discard_analysis_run(run_id)
             raise
+        _write_pattern_facts(db, run_id)
 
     def _ensure_engine(self, index: int = 0) -> SupervisedEngine:
         with self._engines_lock:
@@ -1155,6 +1208,16 @@ class SyncRunner:
                 engine.quit()
             except Exception:
                 pass
+
+
+def _write_pattern_facts(db: Database, run_id: int) -> None:
+    """R6 (PATTERNS.md §6a): store a just-completed run's pattern facts. An addition to the
+    run, never a condition of it: a failure is logged and the run stands (the backfill tool
+    fills what is missing)."""
+    try:
+        write_facts_for_run(db, run_id)
+    except Exception:
+        logger.exception("pattern facts for run %s not written", run_id)
 
 
 class InsightsRunner:
@@ -1332,7 +1395,8 @@ class RelabelRunner:
     relabelled by hand with the stage-6 tool and its approval checks, so a dev run only
     reports stale runs (state `manual`) and changes nothing."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_done=None) -> None:
+        self._on_done = on_done  # called (on this thread) once a relabel has finished
         self.state = "idle"     # idle | manual | running | done | error
         self.done = 0
         self.total = 0
@@ -1393,6 +1457,8 @@ class RelabelRunner:
         logger.info("relabel on update: %s", out)
         _emit("relabel_done" if self.state == "done" else "relabel_error",
               {**out, "message": self.error})
+        if self._on_done is not None:
+            self._on_done()     # R6-REFILL: the relabel made the runs' facts stale
 
     def status(self) -> dict:
         return {"state": self.state, "done": self.done, "total": self.total,
@@ -1402,6 +1468,102 @@ class RelabelRunner:
         self._cancel = True
         if self._thread is not None:
             self._thread.join(timeout=10)
+
+
+class BookRunner:
+    """BOOK-DL (owner ruling D, 2026-11-19): one opening-book job at a time on its own thread —
+    download and verify (`books.download`), a verified backup, the book recorded as in use, the
+    book relabel from stored rows (`books.relabel_for_book`, W20's rule, no engine) — with
+    `book_progress` events ({id, phase: download | backup | relabel, done, total}), then
+    `book_done` or `book_error`. A failed or cancelled download leaves the book in use; a
+    failed backup writes nothing. The book is recorded with `relabelled: false` before the
+    relabel and true after, so an interrupted switch resumes on the next open (`resume`)."""
+
+    def __init__(self, post_call) -> None:
+        self._post = post_call
+        self._cancel = False
+        self._thread: threading.Thread | None = None
+        self.job: dict | None = None        # {"id", "phase", "done", "total"}
+        self.last: dict | None = None       # the last job's outcome
+
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def relabelling(self) -> bool:
+        return self.running() and bool(self.job) and self.job["phase"] in ("backup", "relabel")
+
+    def start(self, book_id: str, db_path: Path, on_switched) -> None:
+        from zugzwang.core import books
+        books.spec(book_id)                 # unknown id: raise before any thread
+        if self.running():
+            raise RuntimeError("An opening book is already being installed.")
+        self._cancel = False
+        self.job = {"id": book_id, "phase": "download", "done": 0, "total": 0}
+        self._thread = threading.Thread(target=self._run, args=(book_id, db_path, on_switched),
+                                        name="book", daemon=True)
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def _phase(self, phase: str, done: int, total: int) -> None:
+        assert self.job is not None
+        self.job.update(phase=phase, done=done, total=total)
+        _emit("book_progress", dict(self.job))
+
+    def _run(self, book_id: str, db_path: Path, on_switched) -> None:
+        from zugzwang.core import books, relabel
+        t0 = time.monotonic()
+        b = books.spec(book_id)
+        last_pct = {"v": -1}
+
+        def dl_progress(got: int, total: int) -> None:
+            pct = got * 100 // total
+            if pct != last_pct["v"]:
+                last_pct["v"] = pct
+                self._phase("download", got, total)
+
+        try:
+            path = books.download(b, progress=dl_progress, cancelled=lambda: self._cancel)
+            self._phase("backup", 0, 1)
+            backup = relabel.backup_database(db_path, db_path.parent / "backups",
+                                             f"pre-book-{b.id}")
+            logger.info("opening book %s: backup %s", b.id, backup)
+            books.set_active(b.id, relabelled=False)
+            out = books.relabel_for_book(
+                db_path, path, write=True,
+                progress=lambda i, n: (i == n or i % 25 == 0) and self._phase("relabel", i, n))
+            books.set_active(b.id, relabelled=True)
+        except Exception as exc:
+            logger.exception("opening book %s failed", book_id)
+            self.last = {"id": book_id, "ok": False, "message": str(exc)}
+            self.job = None
+            _emit("book_error", {"id": book_id, "message": str(exc)})
+            return
+        out.update(id=b.id, ok=True, backup=str(backup),
+                   seconds=round(time.monotonic() - t0, 1))
+        logger.info("opening book %s in use: %s", b.id,
+                    {k: v for k, v in out.items() if k != "relabelledRuns"})
+        self.last = {k: v for k, v in out.items() if k != "relabelledRuns"}
+        self.job = None
+        self._post(lambda: on_switched(out))
+
+    def status(self) -> dict:
+        from zugzwang.core import books
+        st = books.active_state()
+        return {
+            "books": [{"id": b.id, "label": b.label, "minGames": b.min_games, "bytes": b.bytes,
+                       "sha256": b.sha256, "url": b.url, "default": b.default,
+                       "installed": books.installed(b),
+                       "active": bool(st and st["id"] == b.id)} for b in books.MANIFEST],
+            "active": st["id"] if st else None,
+            "defaultId": books.DEFAULT_ID,
+            "job": dict(self.job) if self.job else None,
+            "last": self.last,
+        }
+
+    def shutdown(self) -> None:
+        self._cancel = True
 
 
 class Server:
@@ -1418,7 +1580,13 @@ class Server:
         self._coverage = CoverageRunner(self.post_call)
         self._sync = SyncRunner(self.post_call, self._budget)
         self._insights: InsightsRunner | None = None  # created in _boot, needs db_path
-        self._relabel = RelabelRunner()
+        self._relabel = RelabelRunner(
+            on_done=lambda: self.post_call(self._start_facts_refill))
+        self._books = BookRunner(self.post_call)
+        self._facts_refill_running = False
+        # Runs a book switch relabelled while a refill was in flight: their facts are deleted
+        # again and recomputed when that refill ends (it may have read the old labels).
+        self._facts_dirty: set[int] = set()
         self._openings: OpeningsBook | None = None
         self._db: Database | None = None
         self._db_path: Path | None = None
@@ -1446,6 +1614,7 @@ class Server:
         self._live.shutdown()
         self._sync.shutdown()
         self._relabel.shutdown()
+        self._books.shutdown()
         if self._insights:
             self._insights.shutdown()
         if self._openings:
@@ -1453,6 +1622,74 @@ class Server:
         if self._db:
             self._db.close()
         logger.info("sidecar stopped")
+
+    def _start_facts_refill(self) -> None:
+        """R6-REFILL (PATTERNS.md §6c; the orchestrator's process decision, 2026-11-14):
+        refill every complete run with no counting `pattern_facts` row — none at this
+        `FACTS_VERSION`, or one computed at another classifier version (a relabel, here or
+        by hand) or another `RULE_VERSION` (a rule change, PATTERNS.md §6e) — on the analysis thread, in the dev run and the packaged app alike. App
+        thread."""
+        if self._db is None or self._db_path is None or self._facts_refill_running:
+            return
+        try:
+            todo = self._db.runs_without_pattern_facts(FACTS_VERSION, rule_version=RULE_VERSION)
+        except Exception:
+            logger.exception("pattern facts refill: listing runs failed")
+            return
+        if not todo:
+            return
+        self._facts_refill_running = True
+        logger.info("pattern facts refill: %d runs (facts version %d)", len(todo),
+                    FACTS_VERSION)
+        written = {"n": 0}
+
+        def on_rows(rows: list) -> None:
+            try:
+                written["n"] += self._db.save_current_pattern_facts(rows)
+            except Exception:
+                logger.exception("pattern facts refill: write failed")
+
+        def on_done(stats: dict) -> None:
+            self._facts_refill_running = False
+            stats["written"] = written["n"]
+            logger.info("pattern facts refill done: %s", stats)
+            _emit("pattern_facts_refilled", stats)
+            if self._facts_dirty:
+                self._refill_dirty_facts()
+
+        self._analysis.refill_facts(self._db_path, todo, on_rows, on_done)
+
+    def _refill_dirty_facts(self) -> None:
+        """Delete the facts of runs a book switch relabelled and refill them. App thread."""
+        ids = sorted(self._facts_dirty)
+        if self._facts_refill_running or not ids or self._db is None:
+            return
+        self._facts_dirty.clear()
+        self._db._conn.executemany("DELETE FROM pattern_facts WHERE run_id=?",
+                                   [(i,) for i in ids])
+        self._db._conn.commit()
+        self._start_facts_refill()
+
+    def _book_switched(self, out: dict) -> None:
+        """A book switch finished (BookRunner, posted to the app thread): load the new book,
+        drop the trainer's coverage index (it is per book; the lobby rebuilds it), and refill
+        the pattern facts of every run whose labels changed."""
+        old = self._openings
+        self._openings = OpeningsBook()
+        if old is not None:
+            old.close()
+        if self._db is not None:
+            self._db._conn.execute("DELETE FROM opening_book_coverage")
+            self._db._conn.commit()
+        self._facts_dirty.update(out.get("relabelledRuns", []))
+        self._refill_dirty_facts()
+        _emit("book_done", {k: v for k, v in out.items() if k != "relabelledRuns"})
+
+    def _refuse_during_book_relabel(self) -> None:
+        books_runner = getattr(self, "_books", None)    # absent on a bare Server (tests)
+        if books_runner is not None and books_runner.relabelling():
+            raise RuntimeError("The opening book is being switched; analysis can start when "
+                               "it has finished.")
 
     def post_request(self, req: dict) -> None:
         self._inbox.put(("request", req))
@@ -1474,6 +1711,23 @@ class Server:
             self._relabel.check(db_path)
         except Exception:
             logger.exception("relabel check failed")
+        # R6-REFILL: missing or stale pattern facts, in the background. A relabel in progress
+        # would make them stale again; it starts the refill when it finishes.
+        try:
+            if self._relabel.state != "running":
+                self._start_facts_refill()
+        except Exception:
+            logger.exception("pattern facts refill not started")   # never a reason to fail boot
+        # BOOK-DL: a book switch the app closed during resumes (its download is done; it
+        # backs up again and relabels what is left).
+        try:
+            from zugzwang.core import books
+            st = books.active_state()
+            if st and not st.get("relabelled", True):
+                logger.info("opening book %s: resuming its relabel", st["id"])
+                self._books.start(st["id"], db_path, self._book_switched)
+        except Exception:
+            logger.exception("opening book resume failed")
         # Before the engine, and unconditionally: nothing the book feeds —
         # opening labels, the whole trainer — needs Stockfish, so gating it on
         # the engine would take the trainer down with a missing binary.
@@ -1551,6 +1805,33 @@ class Server:
             "source": C.source_url(b["version"]),
             "licence": "GPL-3.0-or-later",
         }
+
+    # ── opening books (BOOK-DL) ──────────────────────────────────────────────
+
+    def rpc_books_status(self) -> dict:
+        """The three books, which are downloaded, which is in use, and any job in flight."""
+        return self._books.status()
+
+    def rpc_book_use(self, id: str) -> dict:
+        """Download (if needed), verify and switch to book *id*: a verified backup, then the
+        book relabel. Only on the user's click; refused while games are being analysed."""
+        from zugzwang.core import books
+        st = books.active_state()
+        if st and st["id"] == id and st.get("relabelled", True):
+            return {"started": False, "active": id}
+        if self._sync.running() or self._analysis.games_pending:
+            raise RuntimeError("Games are being analysed; switch the book when that has finished.")
+        if self._relabel.state == "running":
+            raise RuntimeError("Labels are being updated; switch the book when that has finished.")
+        self._books.start(id, self._db_path, self._book_switched)
+        return {"started": True, "id": id}
+
+    def rpc_book_cancel(self) -> dict:
+        """Cancels a download (the book in use stays). A relabel, once started, runs to the end."""
+        if self._books.job and self._books.job["phase"] == "download":
+            self._books.cancel()
+            return {"cancelled": True}
+        return {"cancelled": False}
 
     def rpc_relabel_status(self) -> dict:
         """Relabel on update (BETA item 5): idle | manual | running | done | error."""
@@ -1886,6 +2167,7 @@ class Server:
         )
 
     def rpc_analyze_game(self, game_id: int, depth: int | None = None) -> dict:
+        self._refuse_during_book_relabel()
         rec = self._db.get_game(game_id)
         if rec is None:
             raise RuntimeError(f"no game with id {game_id}")
@@ -1931,6 +2213,7 @@ class Server:
             except IncompleteRun as exc:
                 _emit("analysis_error", {"gameId": game_id, "message": str(exc)})
                 return
+            _write_pattern_facts(self._db, run_id)
             _emit("analysis_done", {
                 "gameId": game_id, "summary": summary,
                 "whiteAccuracy": white_acc, "blackAccuracy": black_acc,
@@ -2149,6 +2432,7 @@ class Server:
         chesscom = (chesscom or "").strip()
         if not lichess and not chesscom:
             raise RuntimeError("No platform username configured.")
+        self._refuse_during_book_relabel()
         if self._sync.running():
             raise RuntimeError("A sync is already running.")
         usernames = [u for u in (lichess, chesscom) if u]
@@ -2176,6 +2460,7 @@ class Server:
         games; omitted, all of them (BETA-PUB Q4). Newest first either way."""
         if self._sync.running():
             raise RuntimeError("A sync is already running.")
+        self._refuse_during_book_relabel()
         if count is not None:
             count = int(count)
             if count < 1:
@@ -2378,6 +2663,7 @@ class Server:
         return drilled, mastered
 
     def rpc_trainer_lobby(self) -> dict:
+        from zugzwang.core import books
         index = self._openings.family_index() if self._openings else []
         progress = self._db.get_all_trainer_progress()
         families = []
@@ -2405,15 +2691,20 @@ class Server:
             # Read off the loaded reader, not inferred from the line counts —
             # a book that is present but thin is a different fact from no book.
             "bookAvailable": self._openings.has_book if self._openings else False,
-            "bookPath": str(C.OPENINGS_BOOK_PATH),
+            "bookPath": str(books.active_book_path() or books.books_dir()),
+            "bookId": (books.active_spec().id if books.active_spec() else None),
             "families": families,
         }
 
     def rpc_trainer_index_coverage(self) -> dict:
         if self._openings is None or not self._openings.entries():
             raise RuntimeError("ECO data not loaded — cannot index coverage")
+        from zugzwang.core import books
+        path = books.active_book_path()
+        if path is None:
+            raise RuntimeError("No opening book installed (Settings → Opening book)")
         self._coverage.start(
-            self._openings.entries(), self._db_path, C.OPENINGS_BOOK_PATH,
+            self._openings.entries(), self._db_path, path,
             lambda: _emit("trainer_index_done", {}),
         )
         return {"started": True}
