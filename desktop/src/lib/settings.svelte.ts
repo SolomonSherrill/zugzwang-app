@@ -1,5 +1,5 @@
 /** Connected-account usernames, persisted to localStorage (the same pattern as
- *  theme.svelte.ts / PlayScreen prefs). Core never reads this store — the synced
+ *  theme.svelte.ts / Play prefs). Core never reads this store — the synced
  *  usernames are passed to the sidecar as explicit RPC params. */
 
 const STORAGE_KEY = 'zugzwang-accounts'
@@ -44,44 +44,15 @@ export function saveAccounts(lichess: string, chesscom: string): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...accounts }))
 }
 
-// ── sync-analysis depth ──────────────────────────────────────────────────────
-// Stockfish search depth used when a synced game has no usable Lichess evals.
-// Lower = much faster bulk analysis (feasible to analyse a full back-catalog);
-// higher = more reliable per-move classification. Persisted locally and passed
-// to the sidecar as an explicit RPC param (the same pattern as accounts).
+// ── no sync depth (ruling 17, 2026-11-20) ─────────────────────────────────────
+// Settings once offered Fast / Balanced / Deep presets (depth 10 / 14 / 18), stored under this
+// key and sent with every sync. Every game is now analysed at depth 14 so all games compare;
+// one game goes deeper only through Analyse again. The old choice is cleared on load.
 
-const DEPTH_KEY = 'zugzwang-analysis-depth'
+export const LEGACY_DEPTH_KEY = 'zugzwang-analysis-depth'
 
-export interface DepthPreset {
-  label: string
-  depth: number
-  blurb: string
-}
-
-/** Presets shown in Settings. Depths must stay within the sidecar's clamp
- *  range (ANALYSIS_DEPTH_MIN..MAX = 8..18). `depth` is what gets sent. */
-export const DEPTH_PRESETS: DepthPreset[] = [
-  { label: 'Fast', depth: 10, blurb: '~5s/game · best for analyzing your whole history' },
-  { label: 'Balanced', depth: 14, blurb: '~30s/game · the default' },
-  { label: 'Deep', depth: 18, blurb: '~3min/game · most accurate' },
-]
-
-const DEFAULT_DEPTH = 14
-
-function initialDepth(): number {
-  // `Number(null)` is 0, not NaN, so an isFinite guard alone lets a missing key
-  // through and clamps to the floor. Fresh installs silently analysed at 8.
-  const stored = localStorage.getItem(DEPTH_KEY)
-  if (stored === null) return DEFAULT_DEPTH
-  const raw = Number(stored)
-  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_DEPTH
-  return Math.max(8, Math.min(18, Math.round(raw)))
-}
-
-export const analysisDepth = $state<{ value: number }>({ value: initialDepth() })
-
-/** Persist the chosen sync-analysis depth (clamped to the supported range). */
-export function saveAnalysisDepth(depth: number): void {
-  analysisDepth.value = Math.max(8, Math.min(18, Math.round(depth)))
-  localStorage.setItem(DEPTH_KEY, String(analysisDepth.value))
+try {
+  globalThis.localStorage?.removeItem(LEGACY_DEPTH_KEY)
+} catch {
+  /* private mode or no storage: nothing stored to clear */
 }

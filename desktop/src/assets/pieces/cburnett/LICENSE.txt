@@ -1,0 +1,33 @@
+Cburnett chess pieces (the "cburnett" set)
+
+Author:  Colin M.L. Burnett (https://en.wikipedia.org/wiki/User:Cburnett)
+Licence: GNU General Public License, version 2 or (at your option) any later version (GPL-2.0-or-later)
+         https://www.gnu.org/licenses/gpl-2.0.txt
+Source:  https://github.com/lichess-org/lila/tree/master/public/piece/cburnett
+         (the twelve files wP..bK.svg, fetched 2026-11-20 from
+         https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/cburnett/<file>.svg)
+Credit:  as listed in lila's COPYING.md
+         (https://github.com/lichess-org/lila/blob/master/COPYING.md):
+         "public/piece/cburnett | Colin M.L. Burnett | GPLv2+"
+
+The files are copied unmodified. Zugzwang draws them on its boards when this set is chosen
+in Settings > Appearance > Pieces (owner ruling 20, 2026-11-20).
+
+sha256 of each file as shipped:
+48ff9dba84dae861b1a81ac58f4647e05cee8a827acad1618bf11beaedcce60d  bB.svg
+2dc3caba39a67a707ebc27f4e41b727dd5252f4f49da695fc15cc2589dd92a47  bK.svg
+72e1565fbc9024015dcb6ee28d918c876523119f6f552c0a40d3118c13a67e13  bN.svg
+93e11e46deceff0768211a28df3e39c6d3427aa172bdb5e3928b025bd2858587  bP.svg
+2d0162d1fe776ac5a4d307d4f6e5960804273edc0d3743f1c97a158f5a64c4b1  bQ.svg
+5928b86919ae815f5d35dea8a25f5a84c3f8839468a137e429d42f618185cbcd  bR.svg
+8bf4f38cc170686775f81158934301942b07e3f1162e76c6305e76d66aaa0910  wB.svg
+09837f1f99dae2d05c2a0bfb5ce0fb9f37a95b124de44f428a08ae18d7b7c557  wK.svg
+43d8bed9cd40836335072a20f52d30237e6e2cbe304ffb13e258fa1d576c156a  wN.svg
+a8bd79f344ea69a577cdd7b11cbab7bbebfc157cce01c6d29b8f2edf1c44068e  wP.svg
+9c0a960b360e08cea48eedab54e852107145de289b81a82fe27942045e2ab665  wQ.svg
+05746153e11de3ff4a43d6725f704e226e5d5b49c6ff170ed598d3e9883f2cd5  wR.svg
+
+Zugzwang is distributed under the GNU General Public License, version 3 or later; under the
+"or any later version" clause these pieces are distributed with it under the same terms. The
+licence text ships with the app (public/licenses/zugzwang-LICENSE.txt); version 2 is at
+https://www.gnu.org/licenses/gpl-2.0.txt.

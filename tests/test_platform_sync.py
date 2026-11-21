@@ -175,3 +175,103 @@ def test_chesscom_missing_setup_treated_as_standard(monkeypatch):
     _mock_archives(monkeypatch, [_game("NoSetup", setup=None)])
     out = fetch_chesscom_pgn("bob")
     assert "NoSetup" in out
+
+
+# ── Username check (UI-BUILD-3 G, ruling 5): never the real sites ─────────────
+
+class StatusResp(FakeResp):
+    def __init__(self, status=200):
+        super().__init__("{}")
+        self.status = status
+
+
+def _urlopen_recording(result, seen):
+    def fake(req, timeout=None, **k):
+        seen.append({"url": req.full_url, "ua": req.get_header("User-agent"), "timeout": timeout})
+        if isinstance(result, BaseException):
+            raise result
+        return result
+    return fake
+
+
+@pytest.mark.parametrize("result, status, message", [
+    (StatusResp(200), "found", None),
+    (_http_error(404), "not_found", None),
+    (_http_error(410), "not_found", None),
+    (_http_error(429, retry_after=30), "unreachable", "Too many requests (HTTP 429)"),
+    (_http_error(500), "unreachable", "HTTP 500"),
+    (_http_error(503), "unreachable", "HTTP 503"),
+    (TimeoutError("timed out"), "unreachable", "timed out"),
+    (urllib.error.URLError("nodename nor servname provided"), "unreachable",
+     "nodename nor servname provided"),
+    (ConnectionResetError("reset"), "unreachable", "reset"),
+])
+@pytest.mark.parametrize("platform", ["chesscom", "lichess"])
+def test_check_username_reads_the_answer(monkeypatch, platform, result, status, message):
+    seen = []
+    monkeypatch.setattr(ps.urllib.request, "urlopen", _urlopen_recording(result, seen))
+    slept = []
+    monkeypatch.setattr(ps.time, "sleep", lambda s: slept.append(s))
+    assert ps.check_username(platform, "alice") == {"status": status, "message": message}
+    assert len(seen) == 1 and slept == []      # one try: no retry, no Retry-After wait
+
+
+def test_check_username_asks_each_sites_player_endpoint(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ps.urllib.request, "urlopen", _urlopen_recording(StatusResp(), seen))
+    ps.check_username("chesscom", " Alice_B ")
+    ps.check_username("lichess", "Alice_B")
+    ps.check_username("lichess", "a/b?c")
+    assert [s["url"] for s in seen] == [
+        "https://api.chess.com/pub/player/alice_b",
+        "https://lichess.org/api/user/Alice_B",
+        "https://lichess.org/api/user/a%2Fb%3Fc",
+    ]
+    assert {s["ua"] for s in seen} == {ps.C.SYNC_USER_AGENT}
+    assert {s["timeout"] for s in seen} == {ps.C.USERNAME_CHECK_TIMEOUT_S}
+
+
+def test_check_username_refuses_an_unknown_platform():
+    with pytest.raises(ValueError):
+        ps.check_username("fics", "alice")
+
+
+def test_check_usernames_skips_an_empty_name(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ps.urllib.request, "urlopen", _urlopen_recording(StatusResp(), seen))
+    assert ps.check_usernames({"chesscom": "alice", "lichess": "  "}) == {
+        "chesscom": {"status": "found", "message": None}, "lichess": None}
+    assert len(seen) == 1
+    assert ps.check_usernames({}) == {"chesscom": None, "lichess": None}
+
+
+def test_check_usernames_reports_each_site_on_its_own(monkeypatch):
+    def fake(req, timeout=None, **k):
+        if "chess.com" in req.full_url:
+            raise _http_error(404)
+        raise urllib.error.URLError("offline")
+    monkeypatch.setattr(ps.urllib.request, "urlopen", fake)
+    assert ps.check_usernames({"chesscom": "bob", "lichess": "bob"}) == {
+        "chesscom": {"status": "not_found", "message": None},
+        "lichess": {"status": "unreachable", "message": "offline"}}
+
+
+def test_check_usernames_never_waits_past_its_deadline(monkeypatch):
+    """A site that never answers (a DNS lookup the socket timeout does not cover)."""
+    import threading
+    import time as real_time
+    release = threading.Event()
+
+    def hang(req, timeout=None, **k):
+        if "lichess" in req.full_url:
+            release.wait(10)
+            raise urllib.error.URLError("late")
+        return StatusResp()
+    monkeypatch.setattr(ps.urllib.request, "urlopen", hang)
+    t0 = real_time.monotonic()
+    got = ps.check_usernames({"chesscom": "alice", "lichess": "alice"}, timeout=0.1)
+    took = real_time.monotonic() - t0
+    release.set()
+    assert got == {"chesscom": {"status": "found", "message": None},
+                   "lichess": {"status": "unreachable", "message": "No answer in 0.1 s"}}
+    assert took < 3

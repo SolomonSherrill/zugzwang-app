@@ -1,0 +1,84 @@
+/* Generated from design/tokens.json by desktop/scripts/gen-tokens.ts (npm run tokens).
+ * Do not edit by hand: src/lib/styles/tokens.test.ts fails when this file is stale. */
+:root {
+  /* colour */
+  --bg: #101113; /* Page background. Everything sits on it; panels are bordered, not filled. */
+  --sidebar: #0c0d0f; /* Sidebar background, one step darker than bg. */
+  --surface: #16171a; /* Quiet fills: inputs, the expanded engine line, hovered rows, idle clocks. */
+  --raised: #1c1d21; /* Active nav item, tooltips, the pressed state of a ghost button. */
+  --selected: #2a2b30; /* The selected move, a selected segment. Put text or text-2 on it, never text-3 (fails 4.5:1). */
+  --border: #222327; /* Panel borders and section dividers: the main structural line. */
+  --border-control: #2a2b30; /* Borders of ghost buttons, chips and inputs. */
+  --border-strong: #34353b; /* Borders of a pressed control or a selected row's inset ring. */
+  --divider: #1c1d21; /* Row dividers inside a panel or table, quieter than border. */
+  --text: #ededef; /* Primary text and numbers. 16:1 on bg. */
+  --text-2: #a1a1aa; /* Secondary text: descriptions, opponent figures, idle buttons. 7.6:1 on bg. */
+  --text-3: #85858f; /* Muted labels, captions, move numbers. 5.2:1 on bg, 4.9:1 on surface; not on selected. */
+  --disabled: #4a4b52; /* Zero counts, disabled controls, separators like '/'. Not for text anyone must read (2.2:1). */
+  --focus: #8b8ff8; /* Keyboard focus ring only, 2px with 1px offset. The one non-semantic hue. */
+  --primary: #ededef; /* Fill of the one primary button per screen (New game, Start game, Try it). */
+  --primary-ink: #101113; /* Text on primary. */
+  --win: #4ade80; /* A won game, a rise, a new peak. Always beside a word (Won, +18). */
+  --loss: #f87171; /* A lost game, a fall. Always beside a word (Lost, -6). */
+  --draw: #6b6c73; /* A drawn game. */
+  --q-brilliant: #34d3d3; /* Brilliant move icon (!!). */
+  --q-great: #60a5fa; /* Great move icon (!). */
+  --q-book: #c4a57a; /* Book move icon (book). */
+  --q-best: #4ade80; /* Best move icon (star). */
+  --q-excellent: #4ade80; /* Excellent move icon (thumbs-up). Same green as best; the icon tells them apart. */
+  --q-good: #86b89a; /* Good move icon (check). A duller green than best. */
+  --q-inaccuracy: #facc15; /* Inaccuracy icon (?!). */
+  --q-mistake: #fb923c; /* Mistake icon (?). */
+  --q-miss: #f472b6; /* Miss icon (cross): a missed win, kept apart from blunder. */
+  --q-blunder: #f87171; /* Blunder icon (??). */
+  --q-ink: #0c0d0f; /* The mark or symbol inside every move-quality circle. 7:1 or more on each. */
+  --chart-you: #ededef; /* Your series in comparisons and bars. */
+  --chart-opponent: #6b6c73; /* The opponents' series. */
+  --chart-line: #c9c9cf; /* The evaluation line; the area under it is text at 6% opacity. */
+  --board-stone-light: #d9d5cc; /* Stone board, light squares (default board). */
+  --board-stone-dark: #8f897d; /* Stone board, dark squares. */
+  --last-move-light: #e2d7a6; /* Last-move tint on a light Stone square. */
+  --last-move-dark: #ada073; /* Last-move tint on a dark Stone square. */
+  --board-slate-light: #c8cfd8; /* Slate board, light squares. */
+  --board-slate-dark: #6f7c8c; /* Slate board, dark squares. */
+  --board-olive-light: #dadcc9; /* Olive board, light squares. */
+  --board-olive-dark: #7f8c6c; /* Olive board, dark squares. */
+  --board-green-light: #dde3cf; /* Green board, light squares. */
+  --board-green-dark: #6e8f5e; /* Green board, dark squares. */
+  --board-blue-light: #dce3ea; /* Blue board, light squares. */
+  --board-blue-dark: #6b87a8; /* Blue board, dark squares. */
+  --board-walnut-light: #e0cfb4; /* Walnut board, light squares. */
+  --board-walnut-dark: #9c7a57; /* Walnut board, dark squares. */
+  /* type */
+  --sans: Geist, system-ui, sans-serif;
+  --heading: 600 15px/21px var(--sans); /* A screen's one headline (the report's result). Never larger. */
+  --body: 400 13px/19px var(--sans); /* Everything by default. Figures use tabular numbers. */
+  --body-strong: 500 13px/19px var(--sans); /* Names, section titles, the selected item. */
+  --secondary: 400 12px/17px var(--sans); /* Labels, captions, column headers, hints. */
+  --metric: 500 24px/28px var(--sans); /* The numbers in a stats strip. */
+  --metric-letter-spacing: -0.01em;
+  --clock: 500 20px/24px var(--sans); /* Clocks in the player strips. */
+  --kbd: 400 11px/14px var(--sans); /* Keyboard hints in a 1px bordered box. */
+  /* spacing */
+  --space-1: 4px; /* Gap between a pill's dots; icon to its count. */
+  --space-2: 6px; /* Gap between buttons in a group. */
+  --space-3: 8px; /* Inside a control; icon to label. */
+  --space-4: 12px; /* Row padding; gaps inside a panel. */
+  --space-5: 16px; /* Panel padding. */
+  --space-6: 20px; /* Side panel padding. */
+  --space-7: 24px; /* Gap between panels; page padding top. */
+  --space-8: 28px; /* Page padding left and right. */
+  /* radius */
+  --radius-board: 4px; /* The board, mini boards, swatches, kbd boxes. */
+  --radius-control: 6px; /* Buttons, chips, inputs, rows, segmented controls. */
+  --radius-panel: 8px; /* Panels, tables, the command menu, popovers. */
+  --radius-round: 9999px; /* Move-quality icons, status dots, avatars. */
+  /* shadow */
+  --shadow-popover: 0 16px 40px rgba(0,0,0,0.5); /* Popovers and the command menu only. Nothing else casts a shadow. */
+  /* layout */
+  --sidebar-width: 232px; /* The left sidebar. */
+  --rail-width: 52px; /* The left sidebar as an icon rail, below 1440 px wide (DESIGN.md fifth rulings, 2; UI-BUILD-4 C). */
+  --header-height: 48px; /* Every screen's top bar. */
+  --panel-width: 420px; /* The side panel beside a board (resizable). */
+  --tab-height: 44px; /* Tab bars in a panel. */
+}

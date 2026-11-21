@@ -52,6 +52,14 @@ GAMES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _standard_depth_8(monkeypatch):
+    """RUNS-DEPTH: only a run at the standard depth satisfies a sync. These tests search at
+    depth 8 for speed, so the standard depth is 8 here (production: 14)."""
+    import zugzwang.config as _cfg
+    monkeypatch.setattr(_cfg, "ANALYSIS_STANDARD_DEPTH", 8)
+
+
 def _fen_at(movetext: str, ply: int) -> str:
     """The position before ply *ply* (0-based) of a game."""
     board = chess.Board()
@@ -328,6 +336,7 @@ def test_fen_path_reports_a_death_and_the_next_request_works(
         assert ok is not None and ok["bestUci"]          # the next request works
         assert [e for e, _ in events].count("analysis_error") == 1
         assert "restarted" in err["message"]
+        assert err["fen"] == FEN_A    # a live position's failure names it (UI-BUILD-3 C)
     finally:
         runner.shutdown()
 

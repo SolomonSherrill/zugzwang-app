@@ -1,6 +1,6 @@
 <script lang="ts">
-  import TrainerLobby from './TrainerLobby.svelte'
-  import TrainerWorkspace from './TrainerWorkspace.svelte'
+  import TrainerFamilies from '../trainer/TrainerFamilies.svelte'
+  import TrainerLine from '../trainer/TrainerLine.svelte'
   import { api, type TrainerFamilySummary } from '../api'
 
   interface Props {
@@ -9,8 +9,10 @@
     openingRequest?: { eco: string; name: string } | null
     /** fired once the request has been consumed, so the parent can clear it */
     onrequesthandled?: () => void
+    /** the no-book state's action: the books are downloaded in Settings */
+    onsettings?: () => void
   }
-  let { onplayfen, openingRequest = null, onrequesthandled }: Props = $props()
+  let { onplayfen, openingRequest = null, onrequesthandled, onsettings = () => {} }: Props = $props()
 
   let family = $state<TrainerFamilySummary | null>(null)
 
@@ -61,7 +63,9 @@
 </script>
 
 {#if family}
-  <TrainerWorkspace {family} onback={() => (family = null)} {onplayfen} />
+  {#key family.name}
+    <TrainerLine {family} onback={() => (family = null)} {onplayfen} />
+  {/key}
 {:else}
-  <TrainerLobby onselect={(f) => (family = f)} />
+  <TrainerFamilies onselect={(f) => (family = f)} {onsettings} />
 {/if}

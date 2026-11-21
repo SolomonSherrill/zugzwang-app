@@ -11,7 +11,8 @@ as in use, the relabel). Set the data directory and the database explicitly:
 `dry-run` prints plies whose label changes by previous label, the player's against the
 opponents', and the runs whose counts are recomputed; OUT gets every changed ply keyed by
 platform and platform game id + ply (the measurement house rule). Any change outside W20's
-rule exits 3. `write` refuses unless the labels it would change equal --expect.
+rule (with the book prefix, BOOK-PREFIX) exits 3. `write` refuses unless the labels it would
+change equal --expect.
 """
 from __future__ import annotations
 
@@ -64,10 +65,11 @@ def _measure(db: Path, path: Path, out: Path | None) -> tuple[dict, list]:
 
     def detail(rid, ch):
         src, ext, colour, gid = games[rid]
-        for ply, old, new, ob, nb in ch:
+        for ply, old, new, ob, nb, op in ch:
             mover = movers[(rid, ply)]
             changed.append((src, ext, ply, old, new, int(ob), int(nb),
-                            "player" if mover == colour else "opponent", gid))
+                            "player" if mover == colour else "opponent", gid,
+                            "" if op is None else int(op)))
 
     res = books.relabel_for_book(db, path, write=False, detail=detail)
     if out is not None:
@@ -75,7 +77,7 @@ def _measure(db: Path, path: Path, out: Path | None) -> tuple[dict, list]:
             # game_id is this database's games.id: it tells apart local games, which have no
             # platform id; a re-pull renumbers it, so the platform id is the key elsewhere.
             f.write("source\tgame\tply\tlabel_before\tlabel_after\tis_book_before\t"
-                    "is_book_after\tside\tgame_id\n")
+                    "is_book_after\tside\tgame_id\tbook_prefix_open\n")
             for c in sorted(changed, key=lambda c: (c[0], str(c[1]), c[2], c[8])):
                 f.write("\t".join(str(x) for x in c) + "\n")
     return res, changed
@@ -113,7 +115,8 @@ def main() -> int:
             sys.exit(f"{b.id} is not installed in {books.books_dir()}: run install first")
         path = books.book_path(b)
     res, changed = _measure(a.db, path, a.out)
-    outside = [c for c in changed if books.outside_w20(c[2:7])]
+    outside = [c for c in changed
+               if books.outside_w20((*c[2:7], None if c[9] == "" else bool(c[9])))]
     lab = [c for c in changed if c[3] != c[4]]
     print(f"database {a.db}: {res['runs']} complete runs; book {a.book}")
     print(f"  plies flagged in book {res['pliesFlagged']}, unflagged {res['pliesUnflagged']}; "

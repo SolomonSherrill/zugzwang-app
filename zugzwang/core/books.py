@@ -18,8 +18,9 @@ repo's `books-v1` release, which is never marked latest, so the update feed is u
   every ply's `is_book` is set from the book (`OpeningsBook.is_book_move`'s rule: the move has
   an entry in the position), and a run whose flags change is relabelled by `labelling.label_game`
   (which applies the `book` rule: a book move is `book` when unscored or its loss is at most
-  `WPL_INACCURACY`; brilliant, the only legal move and a mate keep their own labels), its summary
-  recomputed. A run at an older classifier version gets its flags only (its labels are the hand
+  `WPL_INACCURACY`; brilliant, the only legal move and a mate keep their own labels; and book is
+  a prefix, BOOK-PREFIX, version 8: no ply after the first that fails the rule is `book`), its
+  summary recomputed. A run at an older classifier version gets its flags only (its labels are the hand
   procedure's or the relabel on update's business). The pattern facts of every run whose labels
   changed are deleted, so the refill recomputes them (R6-REFILL).
 
@@ -258,8 +259,10 @@ def relabel_for_book(db_path: Path, new_book: Path | None, *, write: bool,
     Returns {"runs", "runsChanged", "runsFlagsOnly", "pliesFlagged", "pliesUnflagged",
     "labelsChanged", "transitions": {"old>new": n}, "factsDeleted", "relabelledRuns": [run ids
     whose labels changed]} (and "integrity" when written). *detail*, if given, gets
-    (run_id, [(ply, old_label, new_label, old_is_book, new_is_book), ...]) for every run with a
-    change, the dry run's exact set. One transaction per run."""
+    (run_id, [(ply, old_label, new_label, old_is_book, new_is_book, open), ...]) for every run
+    with a change, the dry run's exact set; *open* is whether the game's book prefix was still
+    open at that ply under the new flags (None for a run at an older classifier, whose labels
+    are not recomputed). One transaction per run."""
     from zugzwang.core import labelling
     from zugzwang.core.classification import CLASSIFIER_VERSION
     from zugzwang.core.relabel import _COLS, _to_ma
@@ -291,12 +294,18 @@ def relabel_for_book(db_path: Path, new_book: Path | None, *, write: bool,
                     plies = [replace(_to_ma(r), is_book=f) for r, f in zip(rows, flags)]
                     new = labelling.label_game(plies, json.loads(fl) if fl else [])
                     labels = [m.classification for m in new]
+                    opens: list[bool | None] = []
+                    still = True
+                    for m in new:
+                        opens.append(still)
+                        still = still and labelling.in_book(m)
                 else:
                     stats["runsFlagsOnly"] += 1
                     labels = [r[13] for r in rows]
                     new = None
-                changes = [(r[1], r[13], lab, a, f) for r, lab, a, f
-                           in zip(rows, labels, old, flags) if r[13] != lab or a != f]
+                    opens = [None] * len(rows)
+                changes = [(r[1], r[13], lab, a, f, o) for r, lab, a, f, o
+                           in zip(rows, labels, old, flags, opens) if r[13] != lab or a != f]
                 n_lab = sum(1 for c in changes if c[1] != c[2])
                 stats["labelsChanged"] += n_lab
                 if n_lab:
@@ -339,14 +348,17 @@ def relabel_for_book(db_path: Path, new_book: Path | None, *, write: bool,
 
 
 def outside_w20(change: tuple, row_scores: tuple | None = None) -> bool:
-    """Whether one change (ply, old, new, old_is_book, new_is_book) is outside W20's rule: a
-    label may only become `book` on a ply the book now holds, and only leave `book` on a ply
-    it no longer holds."""
-    _ply, old, new, _ob, nb = change
+    """Whether one change (ply, old, new, old_is_book, new_is_book[, open]) is outside W20's
+    rule with the book prefix (BOOK-PREFIX): a label may only become `book` on a ply the book
+    now holds inside the game's book prefix, and only leave `book` on a ply the book no longer
+    holds or one past the prefix. *open* (`relabel_for_book`'s detail) is whether the prefix
+    was still open at the ply; absent or None reads as open."""
+    _ply, old, new, _ob, nb = change[:5]
+    open_ = change[5] if len(change) > 5 and change[5] is not None else True
     if old == new:
         return False
     if new == "book":
-        return not nb
+        return not (nb and open_)
     if old == "book":
-        return nb
+        return nb and open_
     return True

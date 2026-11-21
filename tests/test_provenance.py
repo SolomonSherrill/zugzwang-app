@@ -95,7 +95,7 @@ def test_every_new_run_records_the_classifier_version(tmp_path):
     run = db.save_analysis_run(game_id=_game(db), engine_name="Stockfish", depth=14)
     got = db._conn.execute("SELECT classifier_version FROM analysis_runs WHERE id=?",
                            (run,)).fetchone()[0]
-    assert got == CLASSIFIER_VERSION == 7
+    assert got == CLASSIFIER_VERSION == 8
 
 
 def test_both_stamps_carry_the_classifier_version(tmp_path):

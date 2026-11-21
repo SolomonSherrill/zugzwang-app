@@ -1,0 +1,33 @@
+Merida chess pieces (the "merida" set)
+
+Author:  Armando Hernandez Marroquin
+Licence: GNU General Public License, version 2 or (at your option) any later version (GPL-2.0-or-later)
+         https://www.gnu.org/licenses/gpl-2.0.txt
+Source:  https://github.com/lichess-org/lila/tree/master/public/piece/merida
+         (the twelve files wP..bK.svg, fetched 2026-11-20 from
+         https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/merida/<file>.svg)
+Credit:  as listed in lila's COPYING.md
+         (https://github.com/lichess-org/lila/blob/master/COPYING.md):
+         "public/piece/merida | Armando Hernandez Marroquin | GPLv2+"
+
+The files are copied unmodified. Zugzwang draws them on its boards when this set is chosen
+in Settings > Appearance > Pieces (owner ruling 20, 2026-11-20).
+
+sha256 of each file as shipped:
+5fd6779102126554c70f5ed99232008386a4dbb4913e10f88e6e2f4185750c4e  bB.svg
+6838fd128b1f2fc4f483e5a16cccf59848b0923c95ac75e3894f41eb1b3b2797  bK.svg
+16068e0d7f8bf3de6aa92d4577867f60b19a3e3507006cfdf619c515b8e8cc1e  bN.svg
+09fe0648e683e4f2b24e39164644ae54db7ef5f61122dcb0c7ee927975b7a7c2  bP.svg
+5c5bf0da5453c6fef7bb3df00d94f28b86a22a38bd63988949d391f58d7f2516  bQ.svg
+e76c948d92145b5e43f6e84c35481465cbb2271047ef568ac5dbb1ce1527cebe  bR.svg
+6de6976b55afe25791ddb0cc70cace85dc410253f43a4b7b87db1bd8ad0e01d4  wB.svg
+3d029fd614be242e2281c3e308ffb10167880496b31d7b3eb4bd94b4423e8ac6  wK.svg
+081d2ca7d7a168fc84b292326923a9086a3178db028b564c70f8eab8a96eaa01  wN.svg
+2d49d36334cd2836836ce7c25d63353222d10352b80d541bce77645e93707645  wP.svg
+af2097f7174a0a02ed33c62cede5ed85b96c2a01e4802ce1dd38215330858a3a  wQ.svg
+e278fefe31910848aed6fa378ccc2d366db843aeb3fdeba5ec0635fea0e0616b  wR.svg
+
+Zugzwang is distributed under the GNU General Public License, version 3 or later; under the
+"or any later version" clause these pieces are distributed with it under the same terms. The
+licence text ships with the app (public/licenses/zugzwang-LICENSE.txt); version 2 is at
+https://www.gnu.org/licenses/gpl-2.0.txt.

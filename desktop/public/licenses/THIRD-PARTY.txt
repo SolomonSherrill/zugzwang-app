@@ -11,6 +11,14 @@ Stockfish 18 — GNU General Public License v3 (full text: stockfish-COPYING.txt
 python-chess 1.11.2 — GPL-3.0-or-later — https://github.com/niklasf/python-chess
 chessground — GPL-3.0-or-later — https://github.com/lichess-org/chessground
 Cburnett chess pieces — GPL-2.0-or-later — by Colin M.L. Burnett, via chessground and python-chess
+Piece sets from lichess-org/lila public/piece (Settings > Appearance > Pieces), unmodified, each with
+  its LICENSE.txt beside it in the app's source (desktop/src/assets/pieces/<set>/):
+  Cburnett — GPL-2.0-or-later — Colin M.L. Burnett
+  Merida — GPL-2.0-or-later — Armando Hernandez Marroquin
+  Chessnut — Apache-2.0 — Alexis Luengas (https://github.com/LexLuengas/chessnut-pieces)
+  Mpchess — GPL-3.0-or-later — Maxime Chupin (https://github.com/chupinmaxime)
+  Fantasy — MIT — Maurizio Monge (https://github.com/maurimo/chess-art)
+  Source: https://github.com/lichess-org/lila/tree/master/public/piece
 chess.js — BSD-2-Clause — https://github.com/jhlywa/chess.js
 Chart.js — MIT — https://github.com/chartjs/Chart.js
 Svelte — MIT — https://github.com/sveltejs/svelte

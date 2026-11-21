@@ -61,6 +61,25 @@ def find_stockfish() -> Path | None:
     return None
 
 
+def stockfish_source(path: Path | None) -> str | None:
+    """Where `find_stockfish` found *path*, in its own order: "env" (ZUGZWANG_STOCKFISH),
+    "bundled" (shipped with the app, or `stockfish/` in a checkout), "path" (on PATH) or
+    "chosen" (the binary the user picked). None for no path. Settings says it (Engine)."""
+    if path is None:
+        return None
+    path = Path(path)
+    env = os.environ.get("ZUGZWANG_STOCKFISH")
+    if env and Path(env) == path:
+        return "env"
+    from zugzwang import config as C
+    if path in {p for p in (C.BUNDLED_STOCKFISH, C.BUNDLED_FAST_STOCKFISH) if p is not None}:
+        return "bundled"
+    which = shutil.which("stockfish")
+    if which and Path(which) == path:
+        return "path"
+    return "chosen"
+
+
 def popen_args() -> dict:
     """Extra `subprocess` arguments for starting an engine (BETA, M11).
 

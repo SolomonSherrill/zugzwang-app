@@ -4,7 +4,7 @@
    *  Shown on Home while no account is connected; it stays up to report progress once a
    *  sync it started is running. The same accounts and sync as Settings — no new state. */
   import { onMount, onDestroy } from 'svelte'
-  import { accounts, saveAccounts, validateUsername, analysisDepth } from './settings.svelte'
+  import { accounts, saveAccounts, validateUsername } from './settings.svelte'
   import { api, sidecar, type SyncProgressEvent, type SyncErrorEvent } from './api'
 
   interface Props {
@@ -34,7 +34,7 @@
     finished = false
     progress = { phase: 'fetching', done: 0, total: 0 }
     try {
-      await api.startSync(accounts.lichess, accounts.chesscom, analysisDepth.value)
+      await api.startSync(accounts.lichess, accounts.chesscom)
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
       started = false

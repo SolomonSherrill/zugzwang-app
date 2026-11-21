@@ -8,8 +8,8 @@ Run:  .venv/bin/python sidecar/smoke_test.py
 
 `--sidecar` drives a packaged (PyInstaller) sidecar instead of the checkout's script —
 CI runs it on every target (BETA item 7). `--skip-trainer` skips the opening-trainer
-section, which needs the book (W20) and is hidden in beta builds; without it the run
-stops there, as before. The data folder (`ZUGZWANG_DATA_DIR`) is a temp directory too, so
+section, which needs a book (W20); `--book PATH` gives it one (the public CI fetches the
+Standard book with tools/fetch_book.py and runs the trainer checks on every target, BETA-4 D). The data folder (`ZUGZWANG_DATA_DIR`) is a temp directory too, so
 the user's settings are never touched.
 """
 
@@ -412,7 +412,7 @@ def main() -> None:
     # W26: a missing book fails the book checks without hiding the ones after them.
     failed: list[str] = []
     if args.skip_trainer:
-        print("- opening trainer SKIPPED (--skip-trainer: no book, W20; hidden in beta)")
+        print("- opening trainer SKIPPED (--skip-trainer: no book, W20)")
         trainer(c, skip=True)
     else:
         for name, step in (("opening book", lambda: install_book(c, tmp, args.book)),
@@ -444,7 +444,14 @@ def install_book(c: "Client", tmp: Path, book: Path | None) -> None:
     assert st["active"] is None and not any(b["installed"] for b in st["books"]), st
     dest = tmp.parent / "books" / spec.file
     dest.parent.mkdir(exist_ok=True)
-    dest.symlink_to(book.resolve())
+    try:
+        dest.symlink_to(book.resolve())
+    except OSError:                   # Windows without the symlink privilege (CI): a hard link, else a copy
+        try:
+            os.link(book.resolve(), dest)
+        except OSError:
+            import shutil
+            shutil.copyfile(book.resolve(), dest)
     lobby = c.request("trainer_lobby")
     assert lobby["bookAvailable"] is False
     t = time.monotonic()

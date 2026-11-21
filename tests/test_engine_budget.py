@@ -36,6 +36,14 @@ GAMES = [
 
 # ── the budget ────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _standard_depth_8(monkeypatch):
+    """RUNS-DEPTH: only a run at the standard depth satisfies a sync. These tests search at
+    depth 8 for speed, so the standard depth is 8 here (production: 14)."""
+    import zugzwang.config as _cfg
+    monkeypatch.setattr(_cfg, "ANALYSIS_STANDARD_DEPTH", 8)
+
+
 @pytest.mark.parametrize("screen, slots", [
     (None, 8), ("home", 8), ("games", 8), ("settings", 8),
     ("play", 3), ("review", 3), ("puzzles", 3),

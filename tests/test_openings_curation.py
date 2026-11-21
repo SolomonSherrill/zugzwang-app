@@ -151,3 +151,46 @@ def test_real_book_name_after_is_stable_across_transposition(real_book):
         b.push_uci(uci)
     # Same position via different move orders -> identical name lookup.
     assert real_book.name_after(a) == real_book.name_after(b)
+
+
+# ── UI-BUILD-3 B2: a family's shown moves are the moves every curated line shares ──
+
+def test_shared_prefix_of_lines():
+    from zugzwang.core.openings import _shared_prefix
+    assert _shared_prefix([]) == []
+    assert _shared_prefix([["e2e4", "c7c5", "g1f3"], ["e2e4", "c7c5", "b1c3"]]) == ["e2e4", "c7c5"]
+    assert _shared_prefix([["e2e4", "e7e5"]]) == ["e2e4", "e7e5"]
+    assert _shared_prefix([["e2e4"], ["d2d4"]]) == []
+    # one line of ten by another move order: cut at 1.0, not at 0.9
+    lines = [["e2e4", "e7e5", "f1c4"]] * 9 + [["e2e4", "e7e5", "d2d4"]]
+    assert _shared_prefix(lines, 1.0) == ["e2e4", "e7e5"]
+    assert _shared_prefix(lines, 0.9) == ["e2e4", "e7e5", "f1c4"]
+    assert _shared_prefix(lines[:8] + [["e2e4", "e7e5", "d2d4"]] * 2, 0.9) == ["e2e4", "e7e5"]
+
+
+def test_shared_moves_from_synthetic_family(tmp_path):
+    from zugzwang.core.openings import build_family_index
+    _write_tsv(tmp_path / "c.tsv", [
+        ("C50", "Italian Game", "1. e4 e5 2. Nf3 Nc6 3. Bc4"),
+        ("C50", "Italian Game: Anti-Fried Liver Defense", "1. e4 e5 2. Nf3 Nc6 3. Bc4 h6"),
+        ("C53", "Italian Game: Classical Variation", "1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3"),
+    ])
+    fams = build_family_index(None, tmp_path, aliases={}, depth_min=1, depth_max=20)
+    italian = next(f for f in fams if f.name == "Italian Game")
+    # the prefix-dedup keeps the longer lines; both start 1. e4 e5 2. Nf3 Nc6 3. Bc4
+    assert italian.shared_moves == "1. e4 e5 2. Nf3 Nc6 3. Bc4"
+
+
+def _family(book, name):
+    return next(f for f in book.family_index() if f.name == name)
+
+
+def test_real_book_italian_shows_its_shared_moves(real_book):
+    # 76 of its 81 curated lines play 3. Bc4; the rest reach it by 3. d4 exd4 4. Bc4
+    fam = _family(real_book, "Italian Game")
+    assert fam.shared_moves == "1. e4 e5 2. Nf3 Nc6 3. Bc4"
+    assert fam.sample_moves.startswith(fam.shared_moves)     # kept for search
+
+
+def test_real_book_sicilian_shows_its_shared_moves(real_book):
+    assert _family(real_book, "Sicilian Defense").shared_moves == "1. e4 c5"

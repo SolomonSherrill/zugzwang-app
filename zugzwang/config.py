@@ -177,31 +177,21 @@ BUNDLED_STOCKFISH = _bundled_stockfish()
 BUNDLED_FAST_STOCKFISH = _bundled_fast_stockfish()
 
 # ── Palette ───────────────────────────────────────────────────────────────────
+# The redesign's tokens (DESIGN.md; design/tokens.json → desktop/src/lib/styles/tokens.css),
+# dark only: the light theme went with the redesign (UI-BUILD A6). app.css's legacy names
+# resolve to these tokens; tests/test_palette_mirror.py keeps the three in step.
 
-BG_DEEP     = "#14110d"
-BG_SURFACE  = "#1d1916"
-BG_RAISED   = "#25201b"
-ACCENT      = "#d4a84b"
-TEXT        = "#ece4d2"
-TEXT_MUTED  = "#8a8073"
-DIVIDER     = "#2c2620"
-DANGER      = "#d64f40"
+BG_DEEP     = "#101113"   # --bg
+BG_SURFACE  = "#16171a"   # --surface
+BG_RAISED   = "#1c1d21"   # --raised
+ACCENT      = "#ededef"   # --primary (the one filled action per screen)
+TEXT        = "#ededef"   # --text
+TEXT_MUTED  = "#85858f"   # --text-3
+DIVIDER     = "#222327"   # --border
+DANGER      = "#f87171"   # --loss
 
-LIGHT_BG_DEEP    = "#f4efe5"
-LIGHT_BG_SURFACE = "#e9e3d6"
-LIGHT_BG_RAISED  = "#ddd6c6"
-LIGHT_TEXT       = "#28211a"
-LIGHT_TEXT_MUTED = "#7a6e60"
-LIGHT_ACCENT     = "#c49628"
-LIGHT_DIVIDER    = "#cec5b4"
-# Danger was the one palette entry with no light variant, so PyQt used the dark
-# value on both themes: 4.31:1 on dark but 3.17:1 on light, under AA for body
-# text. The pair below is the one `desktop/app.css` and `DESIGN.md` already
-# agreed on — 4.20:1 dark, 4.45:1 light.
-LIGHT_DANGER     = "#b3402f"
-
-BOARD_LIGHT = "#d8b483"
-BOARD_DARK  = "#8b6340"
+BOARD_LIGHT = "#d9d5cc"   # --board-stone-light (Stone, the default board, ruling 20)
+BOARD_DARK  = "#8f897d"   # --board-stone-dark
 
 # ── Time controls ─────────────────────────────────────────────────────────────
 
@@ -281,6 +271,15 @@ ANALYSIS_BULK_DEPTH = 14
 # classification meaningful; the upper bound matches single-game review depth.
 ANALYSIS_DEPTH_MIN = 8
 ANALYSIS_DEPTH_MAX = ANALYSIS_DEPTH  # 18
+# Analyse again (DESIGN.md ruling 7) offers 14, 18 and 24 for one game; the sync clamp above
+# (8..18) is unchanged. `rpc_analyze_game` refuses a depth outside 8..24 (UI-BUILD B4).
+ANALYSIS_AGAIN_DEPTHS = (14, 18, 24)
+ANALYSIS_AGAIN_DEPTH_MAX = 24
+# RUNS-DEPTH (owner, 2026-11-20; DESIGN.md "RUNS-DEPTH", rulings 7 and 17): every game's
+# **standard run** is at this depth, and every aggregate (Insights, Home, the patterns card,
+# the games list's figures) reads only standard runs. A deeper Analyse again run is kept
+# beside it. Sync and "Analyse more" always analyse at this depth, whatever a client sends.
+ANALYSIS_STANDARD_DEPTH = 14
 # Engine resources for every analysis engine (ENG-ALLOC, owner ruling 2026-10-22).
 #
 # **One thread.** Every analysis path searches to a fixed *depth*, and Stockfish's
@@ -435,6 +434,10 @@ EXPLAIN_MIN_MOTIF_MATERIAL = 2.0
 
 SYNC_MAX_GAMES: int | None = None  # cap on games fetched per platform; None = entire history
 SYNC_USER_AGENT = "Zugzwang/1.0 (local chess analysis app)"
+# Settings' username check on Save (UI-BUILD-3 G, ruling 5): seconds each site gets to answer, and
+# the check as a whole never runs past this plus a second (a DNS lookup is not covered by the
+# socket timeout). Saving does not wait on it: the usernames are saved first.
+USERNAME_CHECK_TIMEOUT_S = 5.0
 # Below this fraction of plies carrying an [%eval], a game is treated as
 # un-analysed and re-run locally with Stockfish instead of trusting evals.
 SYNC_MIN_EVAL_COVERAGE = 0.8
@@ -473,17 +476,17 @@ BRILLIANT_MIN_LEGAL = 5
 
 # ── Move classification colours ───────────────────────────────────────────────
 
-CLASS_COLORS = {
-    "book":       "#a08c6a",   # tan/brown
-    "brilliant":  "#5ecfcf",   # reserved hot cyan
-    "great":      "#4d9de0",   # blue
-    "best":       "#5aaf5a",   # green
-    "excellent":  "#5aaf5a",   # green
-    "good":       "#5aaf5a",   # green
-    "inaccuracy": "#d4a017",   # yellow/gold
-    "mistake":    "#d47b2a",   # orange
-    "miss":       "#d45a7a",   # red/pink
-    "blunder":    "#d43b3b",   # red
+CLASS_COLORS = {   # DESIGN.md, owner ruling 1 (UI-2, at the UI build's start, 2026-11-20)
+    "book":       "#c4a57a",
+    "brilliant":  "#34d3d3",
+    "great":      "#60a5fa",
+    "best":       "#4ade80",
+    "excellent":  "#4ade80",
+    "good":       "#86b89a",
+    "inaccuracy": "#facc15",
+    "mistake":    "#fb923c",
+    "miss":       "#f472b6",
+    "blunder":    "#f87171",
 }
 
 # ── Puzzle system ─────────────────────────────────────────────────────────────
@@ -543,6 +546,11 @@ TRAINER_FAMILY_PRIMARY_WEIGHT   = 1500
 TRAINER_FAMILY_PRIMARY_MIN_LINES = 8
 TRAINER_FAMILY_FALLBACK_WEIGHT   = 500
 TRAINER_FAMILY_FALLBACK_MIN_LINES = 5
+# The moves a family's list row shows (UI-BUILD-3 B2): the longest run of moves at least this
+# share of its curated lines play in that order. 0.9 so that a few lines reaching the family by
+# another move order do not cut it short (the Italian's four Scotch Gambit lines via 3. d4 of
+# 81; measured on the dev run's default book, 2026-11-20).
+TRAINER_FAMILY_SHARED_SHARE = 0.9
 
 # Alias map for popular openings whose lines the ECO data files under a different
 # top-level name (so name-prefix grouping would otherwise scatter or hide them).
@@ -564,7 +572,7 @@ CLASS_GLYPHS = {
     "brilliant":  "!!",
     "great":      "!",    # exclamation
     "best":       "★",    # star
-    "excellent":  "+",    # thumbs up
+    "excellent":  "Excellent",   # no emoji (ruling 7 of 2026-11-20, third): text says the word; the app draws the SVG thumbs-up
     "good":       "✓",    # checkmark
     "inaccuracy": "?!",
     "mistake":    "?",

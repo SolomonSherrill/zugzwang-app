@@ -103,3 +103,75 @@ def test_no_moves_after_game_over():
     result_again = s.push(chess.Move.from_uci("e2e4"))
     assert result_again is None   # push returns None when game is over
     assert s.board.ply() == 0     # board was not modified
+
+
+# ── Play's time control in the saved PGN (UI-BUILD-2, Play) ──────────────────
+
+def test_time_control_is_written_into_the_pgn():
+    s = GameSession(chess.WHITE, 10, time_control="180+2")
+    s.push(chess.Move.from_uci("e2e4"))
+    s.resign()
+    game = chess.pgn.read_game(io.StringIO(s.to_pgn()))
+    assert game.headers["TimeControl"] == "180+2"
+
+
+def test_no_time_control_header_without_one():
+    s = GameSession(chess.WHITE, 10)
+    assert "TimeControl" not in chess.pgn.read_game(io.StringIO(s.to_pgn())).headers
+
+
+def test_a_malformed_time_control_is_left_out():
+    s = GameSession(chess.WHITE, 10, time_control='600"]\n[Evil "1')
+    assert "TimeControl" not in chess.pgn.read_game(io.StringIO(s.to_pgn())).headers
+
+
+# ── Clocks (UI-BUILD-3 F, ruling 9): [%clk] per move in a timed game ──────────
+
+def _clocked(tc="180+2"):
+    return GameSession(chess.WHITE, 3, time_control=tc)
+
+
+def test_a_timed_game_writes_each_moves_clock():
+    s = _clocked()
+    for uci, clk in [("e2e4", 181.0), ("e7e5", 180.4), ("g1f3", 175.25), ("b8c6", 9.04)]:
+        s.push(chess.Move.from_uci(uci), clk)
+    s.resign()
+    game = chess.pgn.read_game(io.StringIO(s.to_pgn()))
+    assert [n.clock() for n in game.mainline()] == [181.0, 180.4, 175.2, 9.0]
+    assert "[%clk 0:03:01]" in s.to_pgn() and "[%clk 0:03:00.4]" in s.to_pgn()
+
+
+def test_an_untimed_game_writes_no_clock_even_when_given_one():
+    s = GameSession(chess.WHITE, 3)
+    s.push(chess.Move.from_uci("e2e4"), 170.0)
+    assert not s.timed and s.clocks == [None]
+    assert "%clk" not in s.to_pgn()
+
+
+def test_a_game_with_a_move_missing_its_clock_writes_none():
+    """An older frontend sends no clock with the user's moves: no half-clocked game."""
+    s = _clocked()
+    s.push(chess.Move.from_uci("e2e4"))
+    s.push(chess.Move.from_uci("e7e5"), 179.0)
+    assert not s.has_clocks()
+    assert "%clk" not in s.to_pgn()
+
+
+def test_a_clock_that_is_not_a_real_number_is_dropped():
+    s = _clocked()
+    for bad in (float("nan"), float("inf"), -1.0, True, "60"):
+        s2 = _clocked()
+        s2.push(chess.Move.from_uci("e2e4"), bad)
+        assert s2.clocks == [None], bad
+    s.push(chess.Move.from_uci("e2e4"), 0)
+    assert s.clocks == [0.0]
+
+
+def test_clock_after_takes_the_time_from_the_last_clock_and_adds_the_increment():
+    s = _clocked("60+1")
+    assert s.clock_after(chess.BLACK, 2.5) == 58.5        # 60 - 2.5 + 1
+    s.push(chess.Move.from_uci("e2e4"), 61.0)
+    s.push(chess.Move.from_uci("e7e5"), s.clock_after(chess.BLACK, 2.5))
+    assert s.clocks == [61.0, 58.5]
+    assert s.clock_after(chess.BLACK, 1000) == 1.0        # never below zero, then the increment
+    assert GameSession(chess.WHITE, 3).clock_after(chess.BLACK, 1.0) is None

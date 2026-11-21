@@ -2,16 +2,16 @@
  *  in zugzwang/config.py. */
 
 export const CLASS_COLORS: Record<string, string> = {
-  book: '#a08c6a',
-  brilliant: '#5ecfcf',
-  great: '#4d9de0',
-  best: '#5aaf5a',
-  excellent: '#5aaf5a',
-  good: '#5aaf5a',
-  inaccuracy: '#d4a017',
-  mistake: '#d47b2a',
-  miss: '#d45a7a',
-  blunder: '#d43b3b',
+  book: '#c4a57a',
+  brilliant: '#34d3d3',
+  great: '#60a5fa',
+  best: '#4ade80',
+  excellent: '#4ade80',
+  good: '#86b89a',
+  inaccuracy: '#facc15',
+  mistake: '#fb923c',
+  miss: '#f472b6',
+  blunder: '#f87171',
 }
 
 export const CLASS_GLYPHS: Record<string, string> = {
@@ -19,7 +19,7 @@ export const CLASS_GLYPHS: Record<string, string> = {
   brilliant: '!!',
   great: '!',
   best: '★',
-  excellent: '+',
+  excellent: 'Excellent', // no emoji (ruling 7, 2026-11-20 third): text contexts say the word; the redesign draws the SVG thumbs-up
   good: '✓',
   inaccuracy: '?!',
   mistake: '?',

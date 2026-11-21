@@ -1,0 +1,52 @@
+Fantasy chess pieces (the "fantasy" set)
+
+Author:  Maurizio Monge (https://github.com/maurimo/chess-art)
+Licence: MIT License (MIT)
+         https://github.com/maurimo/chess-art/blob/main/LICENSE
+Source:  https://github.com/lichess-org/lila/tree/master/public/piece/fantasy
+         (the twelve files wP..bK.svg, fetched 2026-11-20 from
+         https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/fantasy/<file>.svg)
+Credit:  as listed in lila's COPYING.md
+         (https://github.com/lichess-org/lila/blob/master/COPYING.md):
+         "public/piece/fantasy | Maurizio Monge | MIT"
+
+The files are copied unmodified. Zugzwang draws them on its boards when this set is chosen
+in Settings > Appearance > Pieces (owner ruling 20, 2026-11-20).
+
+sha256 of each file as shipped:
+6e7e079b8c73b066537a6ce2623a14b65d1d625a408af8f42f5cffe3ea798e63  bB.svg
+023b003765e5c812007d02fb92b7d72eaafd535075d2ffeb209dc4a841f9524a  bK.svg
+aa8eb58d10722fca992dff04985d16165a7b8cf8a3a231c426dc7685a6981040  bN.svg
+09b98781c32a4933533a3dfd3fa7ce20618f36827b3d649f69ac32dd7b82469c  bP.svg
+6c667a1b37d6dec21b2b72238991fbb87b936c5048cdd481e6dc43b2bbd422e5  bQ.svg
+236d1fa4d39bd5563ecbde3453ac80d0b0266a570a7f7644b8ba7902380c14f1  bR.svg
+3042d9f3359402759d13c5c23bd66129e7cbc63233a9d108312047de63cec904  wB.svg
+d806f0d0a94bc1f8d71089a1a12370cea46806dd0dd6d758b04817b831c6ecd2  wK.svg
+bb532c0c19727613fe3385d556c99815f5ef5ba4cb75cc07e3e4554ae50e9d0e  wN.svg
+07105c9aa3fdf172cc51480521ae3401fbfc33cfaab780ffc332d43859d963e6  wP.svg
+ac53d7b2106532f7c3090531575cf39d5a3315530061be4390f245f6f19f05e4  wQ.svg
+e4934c4d25d24c7dd2b9e6df4e546c5efbbba09a7d63cb4c72cbc2ae36f32384  wR.svg
+
+The licence, as published at https://github.com/maurimo/chess-art/blob/main/LICENSE:
+
+MIT License
+
+Copyright (c) Maurizio Monge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

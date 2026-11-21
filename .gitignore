@@ -24,6 +24,8 @@ stockfish/
 # ── Local editor / OS / tool state ───────────────────────────────────────────
 .DS_Store
 .claude/settings.local.json
+# The main checkout's own project settings: installed from tools/claude-root-settings.json (TOKENS-1)
+.claude/settings.json
 
 # ── Beta packaging output (BETA) ─────────────────────────────────────────────
 build/

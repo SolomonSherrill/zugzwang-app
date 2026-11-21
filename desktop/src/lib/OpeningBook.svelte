@@ -137,7 +137,7 @@
     justify-content: space-between;
     gap: 12px;
     padding: 10px 12px;
-    border: 1px solid var(--divider);
+    border: 1px solid var(--border);
     border-radius: var(--radius-sm);
   }
   .book.active {
@@ -153,7 +153,7 @@
   .tag {
     font-size: 11px;
     color: var(--text-muted);
-    border: 1px solid var(--divider);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 1px 6px;
   }

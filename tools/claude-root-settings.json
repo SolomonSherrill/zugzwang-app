@@ -1,0 +1,9 @@
+{
+  "$comment": "Install as .claude/settings.json in the MAIN checkout only (it is gitignored). TOKENS-1 item 3: a session started in the main checkout must not load a .work worktree's copy of CLAUDE.md or its rules a second time when it reads a file there. Project settings are read per checkout, so a session started inside a worktree never reads this file and keeps its own instructions. settings.local.json would not do: Claude Code shares it with worktree sessions, which would then load no instructions at all (measured, review/TOKENS.md).",
+  "claudeMdExcludes": [
+    "**/.work/*/CLAUDE.md",
+    "**/.work/*/CLAUDE.local.md",
+    "**/.work/*/.claude/CLAUDE.md",
+    "**/.work/*/.claude/rules/**"
+  ]
+}

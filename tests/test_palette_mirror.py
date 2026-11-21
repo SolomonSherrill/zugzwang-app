@@ -1,7 +1,8 @@
-"""The Tauri palette is documented as mirroring `config.py`. Nothing enforced it,
-and `DANGER` had drifted to a different colour in each file (X1). These tests are
-the enforcement, so the next edit to one side fails loudly instead of silently
-splitting the two front-ends' idea of a colour.
+"""The palette is kept in three places that must agree: the redesign's tokens
+(`desktop/src/lib/styles/tokens.css`, generated from `design/tokens.json`), the legacy names
+the not-yet-rebuilt screens read in `desktop/src/app.css` (each now resolving to a token),
+and `config.py`. Nothing enforced the first mirror and `DANGER` drifted (X1); these tests are
+the enforcement. Dark only since the redesign (DESIGN.md): no light-theme block may return.
 """
 
 import re
@@ -11,42 +12,28 @@ import pytest
 
 import zugzwang.config as C
 
-APP_CSS = Path(__file__).resolve().parent.parent / "desktop" / "src" / "app.css"
+DESKTOP = Path(__file__).resolve().parent.parent / "desktop" / "src"
+APP_CSS = DESKTOP / "app.css"
+TOKENS_CSS = DESKTOP / "lib" / "styles" / "tokens.css"
 
-# CSS custom property → the `config.py` name holding the same colour, per theme.
-DARK = {
-    "--bg-deep": "BG_DEEP",
-    "--bg-surface": "BG_SURFACE",
-    "--bg-raised": "BG_RAISED",
-    "--accent": "ACCENT",
-    "--text": "TEXT",
-    "--text-muted": "TEXT_MUTED",
-    "--divider": "DIVIDER",
-    "--danger": "DANGER",
-    "--board-light": "BOARD_LIGHT",
-    "--board-dark": "BOARD_DARK",
-}
-LIGHT = {
-    "--bg-deep": "LIGHT_BG_DEEP",
-    "--bg-surface": "LIGHT_BG_SURFACE",
-    "--bg-raised": "LIGHT_BG_RAISED",
-    "--accent": "LIGHT_ACCENT",
-    "--text": "LIGHT_TEXT",
-    "--text-muted": "LIGHT_TEXT_MUTED",
-    "--divider": "LIGHT_DIVIDER",
-    "--danger": "LIGHT_DANGER",
+# legacy CSS name → (the token it resolves to, the config.py name holding the colour)
+LEGACY = {
+    "--bg-deep": ("--bg", "BG_DEEP"),
+    "--bg-surface": ("--surface", "BG_SURFACE"),
+    "--bg-raised": ("--raised", "BG_RAISED"),
+    "--accent": ("--primary", "ACCENT"),
+    "--text-muted": ("--text-3", "TEXT_MUTED"),
+    "--danger": ("--loss", "DANGER"),
+    "--board-light": ("--board-stone-light", "BOARD_LIGHT"),
+    "--board-dark": ("--board-stone-dark", "BOARD_DARK"),
 }
 
 
 def _block(css: str, selector: str) -> dict[str, str]:
-    """The custom properties declared directly in one selector's block.
-
-    The selector has to be anchored to the start of a line: `[data-theme='light']`
-    also appears in the file's header comment, and matching that silently returns
-    `:root`'s declarations instead — which looks like a passing mirror.
-    """
+    """The custom properties declared directly in one selector's block (the selector
+    anchored to the start of a line, so a mention in a comment cannot match)."""
     m = re.search(rf"^{re.escape(selector)}\s*\{{", css, re.MULTILINE)
-    assert m, f"no rule for {selector} in {APP_CSS.name}"
+    assert m, f"no rule for {selector}"
     body = css[m.end() : css.index("\n}", m.end())]
     return {
         m.group(1): m.group(2).strip().lower()
@@ -54,28 +41,38 @@ def _block(css: str, selector: str) -> dict[str, str]:
     }
 
 
+def test_divider_is_the_token_not_a_legacy_alias(app_css, tokens):
+    """UI-BUILD-4 E: app.css once mapped the legacy --divider onto --border, overriding the token
+    --divider (#1c1d21, the row divider). It must stay the token; config.DIVIDER mirrors --border,
+    the colour the legacy controls' borders read."""
+    assert "--divider" not in _block(app_css, ":root")
+    assert "--divider" in tokens
+    assert tokens["--border"].split("/*")[0].strip() == C.DIVIDER.lower()
+
+
 @pytest.fixture(scope="module")
-def css() -> str:
+def app_css() -> str:
     return APP_CSS.read_text()
 
 
-@pytest.mark.parametrize("prop,const", sorted(DARK.items()))
-def test_dark_tokens_match_config(css, prop, const):
-    assert _block(css, ":root")[prop] == getattr(C, const).lower(), (
-        f"{prop} in app.css :root disagrees with config.{const}"
-    )
+@pytest.fixture(scope="module")
+def tokens() -> dict[str, str]:
+    return _block(TOKENS_CSS.read_text(), ":root")
 
 
-@pytest.mark.parametrize("prop,const", sorted(LIGHT.items()))
-def test_light_tokens_match_config(css, prop, const):
-    assert _block(css, "[data-theme='light']")[prop] == getattr(C, const).lower(), (
-        f"{prop} in app.css [data-theme='light'] disagrees with config.{const}"
-    )
+@pytest.mark.parametrize("legacy,token,const", sorted((k, *v) for k, v in LEGACY.items()))
+def test_legacy_names_resolve_to_the_token_config_mirrors(app_css, tokens, legacy, token, const):
+    assert _block(app_css, ":root")[legacy] == f"var({token})", f"{legacy} should read var({token})"
+    value = tokens[token].split("/*")[0].strip()
+    assert value == getattr(C, const).lower(), f"config.{const} disagrees with {token}"
 
 
-def test_board_is_constant_across_themes(css):
-    # The wood board is the identity anchor and is deliberately *not* themed, so
-    # a light-theme override would be a regression rather than a drift.
-    light = _block(css, "[data-theme='light']")
-    assert "--board-light" not in light
-    assert "--board-dark" not in light
+def test_text_is_the_token_itself(app_css, tokens):
+    # --text is a token name, so app.css must not redefine it (it once did, after the tokens).
+    assert "--text" not in _block(app_css, ":root")
+    assert tokens["--text"].split("/*")[0].strip() == C.TEXT.lower()
+
+
+def test_dark_only(app_css):
+    assert not re.search(r"^\[data-theme='light'\]", app_css, re.MULTILINE)
+    assert not any(name.startswith("LIGHT_") for name in vars(C))

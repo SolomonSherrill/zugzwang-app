@@ -14,6 +14,7 @@ import sqlite3
 import threading
 
 import chess
+import chess.pgn
 import time
 import types
 from pathlib import Path
@@ -503,14 +504,28 @@ def test_trainer_lobby_reports_whether_a_book_loaded(server, sent, tmp_path, has
 
 def test_engine_status_reports_what_would_be_used(server, sent, monkeypatch):
     monkeypatch.setattr(sidecar, "find_stockfish", lambda: Path("/opt/sf"))
+    monkeypatch.setattr(sidecar, "stockfish_source", lambda p: "chosen")
     server._handle_request({"id": 1, "method": "engine_status"})
-    assert sent[0]["result"] == {"ok": True, "path": str(Path("/opt/sf"))}
+    # The running engine is not /opt/sf, so no name is claimed for it.
+    assert sent[0]["result"] == {"ok": True, "path": str(Path("/opt/sf")),
+                                 "source": "chosen", "name": None}
 
 
 def test_engine_status_reports_absence(server, sent, monkeypatch):
     monkeypatch.setattr(sidecar, "find_stockfish", lambda: None)
     server._handle_request({"id": 1, "method": "engine_status"})
-    assert sent[0]["result"] == {"ok": False, "path": None}
+    assert sent[0]["result"] == {"ok": False, "path": None, "source": None, "name": None}
+
+
+def test_engine_status_names_the_running_engine(server, sent, monkeypatch):
+    """Settings shows "Stockfish 18" from the engine's own UCI id, only for the binary running."""
+    monkeypatch.setattr(sidecar, "find_stockfish", lambda: Path("/opt/sf"))
+    monkeypatch.setattr(sidecar, "stockfish_source", lambda p: "bundled")
+    server._engine = type("Worker", (), {"_path": str(Path("/opt/sf"))})()
+    monkeypatch.setattr(server, "_live_engine_version", lambda: "Stockfish 18")
+    server._handle_request({"id": 1, "method": "engine_status"})
+    assert sent[0]["result"]["name"] == "Stockfish 18"
+    assert sent[0]["result"]["source"] == "bundled"
 
 
 # ── I1a: insights replies from a worker, not the dispatch thread ─────────────
@@ -591,8 +606,22 @@ def test_insights_filters_reach_build_insights(
     _wait_for(lambda: blocked_insights.calls)
     assert blocked_insights.calls[0] == {
         "color": "white", "speeds": ["blitz"], "since": "2026-01-01",
-        "rated": "rated", "include_local": False,
+        "rated": "rated", "include_local": False, "view": "full",
     }
+
+
+def test_the_redesigned_insights_view_reaches_build_insights(
+    insights_server, sent, blocked_insights
+):
+    """UI-BUILD-2 C: the redesigned screen asks for view "v2" (core/insights_v2.py)."""
+    blocked_insights.gate.set()
+    insights_server._handle_request({
+        "id": 2, "method": "insights",
+        "params": {"color": "all", "speeds": ["daily"], "view": "v2"},
+    })
+    _wait_for(lambda: blocked_insights.calls)
+    assert blocked_insights.calls[0]["view"] == "v2"
+    assert blocked_insights.calls[0]["speeds"] == ["daily"]
 
 
 def test_insights_failure_replies_error_not_silence(insights_server, sent, monkeypatch):
@@ -887,6 +916,7 @@ def test_the_current_search_does_emit(live, monkeypatch):
     (name, data), = emitted
     assert name == "fen_analyzed"
     assert data["fen"] == "fen-a" and data["bestUci"] == "e2e4" and data["cp"] == 31
+    assert data["depth"] == sidecar.C.ANALYSIS_DEPTH  # shown beside live lines (UI-BUILD-3 C)
 
 
 def test_a_cancelled_search_publishes_nothing_at_all(live, monkeypatch):
@@ -1098,3 +1128,157 @@ def test_judge_move_refuses_an_illegal_move(server, sent):
     server._handle_request({"id": 1, "method": "judge_move",
                             "params": {"fen": chess.STARTING_FEN, "uci": "e2e5"}})
     assert "error" in sent[0]
+
+
+# ── Play: the time control reaches the saved game (UI-BUILD-2, Play) ─────────
+
+def test_new_game_time_control_files_the_saved_game_under_its_speed(server, tmp_path):
+    server._engine = types.SimpleNamespace(cancel=lambda: None, request_move=lambda *a: None)
+    server._openings = None
+    server._db = Database(tmp_path / "play.db")
+    res = server.rpc_new_game(color="white", skill=3, time_control="180+2")
+    assert res["engineToMove"] is False
+    assert server.rpc_user_move("e2e4")["ok"] is True
+    end = server.rpc_resign()["end"]
+    rec = server._db.get_game(end["gameId"])
+    assert '[TimeControl "180+2"]' in rec.pgn
+    assert rec.speed == "blitz"
+    assert rec.source == "local"
+
+
+def test_new_game_without_a_time_control_saves_no_speed(server, tmp_path):
+    server._engine = types.SimpleNamespace(cancel=lambda: None, request_move=lambda *a: None)
+    server._openings = None
+    server._db = Database(tmp_path / "play.db")
+    server.rpc_new_game(color="white", skill=3)
+    end = server.rpc_resign()["end"]
+    rec = server._db.get_game(end["gameId"])
+    assert "TimeControl" not in rec.pgn
+    assert rec.speed is None
+
+
+# ── Play: each move's clock reaches the saved game (UI-BUILD-3 F, ruling 9) ──
+
+def _play_server(server, tmp_path, monkeypatch):
+    asked = []
+    server._engine = types.SimpleNamespace(
+        cancel=lambda: None, request_move=lambda fen, skill, cb: asked.append(cb))
+    server._openings = None
+    server._db = Database(tmp_path / "play.db")
+    server.post_call = lambda fn: fn()
+    return asked
+
+
+def test_a_timed_game_played_through_the_rpcs_saves_every_clock(server, sent, tmp_path, monkeypatch):
+    asked = _play_server(server, tmp_path, monkeypatch)
+    now = [1000.0]
+    clock = types.SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
+    clock.monotonic = lambda: now[0]
+    monkeypatch.setattr(sidecar, "time", clock)
+    server.rpc_new_game(color="white", skill=3, time_control="180+2")
+    for uci, clock_ms, reply, think_s in [("e2e4", 181_000, "e7e5", 3.2),
+                                          ("g1f3", 176_400, "b8c6", 10.0)]:
+        assert server.rpc_user_move(uci, clock_ms=clock_ms)["ok"] is True
+        now[0] += think_s
+        asked.pop()(chess.Move.from_uci(reply))
+    end = server.rpc_resign()["end"]
+
+    moves = [f["data"] for f in sent if f.get("event") == "engine_move"]
+    assert [m["clockMs"] for m in moves] == [178_800, 170_800]    # 180-3.2+2; 178.8-10+2
+
+    rec = server._db.get_game(end["gameId"])
+    game = chess.pgn.read_game(io.StringIO(rec.pgn))
+    assert [n.clock() for n in game.mainline()] == [181.0, 178.8, 176.4, 170.8]
+    extras = server.rpc_review_extras(end["gameId"])["clock"]
+    assert extras["timeControl"] == "180+2" and extras["base"] == 180 and extras["increment"] == 2
+    assert extras["clocks"] == [181.0, 178.8, 176.4, 170.8]
+    assert extras["spent"] == [1.0, 3.2, 6.6, 10.0]
+
+
+def test_a_game_ended_by_the_users_move_keeps_that_moves_clock(server, sent, tmp_path, monkeypatch):
+    asked = _play_server(server, tmp_path, monkeypatch)
+    server.rpc_new_game(color="white", skill=3, time_control="60+0")
+    for uci, reply in [("f2f3", "e7e5"), ("g2g4", None)]:
+        server.rpc_user_move(uci, clock_ms=50_000)
+        if reply:
+            asked.pop()(chess.Move.from_uci(reply))
+    asked.pop()(chess.Move.from_uci("d8h4"))                      # Stockfish mates
+    end = next(f["data"]["end"] for f in sent if f.get("event") == "engine_move" and f["data"]["end"])
+    game = chess.pgn.read_game(io.StringIO(server._db.get_game(end["gameId"]).pgn))
+    assert all(n.clock() is not None for n in game.mainline())
+    assert len(list(game.mainline())) == 4
+
+
+def test_an_untimed_game_saves_no_clocks_and_reports_none(server, sent, tmp_path, monkeypatch):
+    asked = _play_server(server, tmp_path, monkeypatch)
+    server.rpc_new_game(color="white", skill=3)
+    server.rpc_user_move("e2e4", clock_ms=60_000)
+    asked.pop()(chess.Move.from_uci("e7e5"))
+    end = server.rpc_resign()["end"]
+    assert [f["data"]["clockMs"] for f in sent if f.get("event") == "engine_move"] == [None]
+    rec = server._db.get_game(end["gameId"])
+    assert "%clk" not in rec.pgn
+    assert server.rpc_review_extras(end["gameId"])["clock"]["clocks"] == []
+
+
+def test_an_older_frontend_sending_no_clock_still_plays_and_saves_none(server, sent, tmp_path, monkeypatch):
+    asked = _play_server(server, tmp_path, monkeypatch)
+    server.rpc_new_game(color="white", skill=3, time_control="180+2")
+    server._handle_request({"id": 1, "method": "user_move", "params": {"uci": "e2e4"}})
+    assert next(f for f in sent if f.get("id") == 1)["result"]["ok"] is True
+    asked.pop()(chess.Move.from_uci("e7e5"))
+    end = server.rpc_resign()["end"]
+    assert "%clk" not in server._db.get_game(end["gameId"]).pgn
+
+
+# ── Settings: the username check (UI-BUILD-3 G, ruling 5) ─────────────────────
+
+def test_check_usernames_replies_from_its_own_thread(server, sent, monkeypatch):
+    gate = threading.Event()
+    calls = []
+
+    def fake(names, **k):
+        calls.append(names)
+        gate.wait(5)
+        return {"chesscom": {"status": "found", "message": None}, "lichess": None}
+    monkeypatch.setattr(sidecar, "check_usernames", fake)
+    server._handle_request({"id": 4, "method": "check_usernames",
+                            "params": {"chesscom": "alice", "lichess": ""}})
+    server._handle_request({"id": 5, "method": "ping"})
+    assert [f["id"] for f in sent] == [5]          # the network never holds the dispatch loop
+    gate.set()
+    _wait_for(lambda: any(f.get("id") == 4 for f in sent))
+    assert calls == [{"chesscom": "alice", "lichess": ""}]
+    assert next(f for f in sent if f.get("id") == 4) == {"id": 4, "result": {
+        "chesscom": {"status": "found", "message": None}, "lichess": None}}
+
+
+def test_check_usernames_over_mocked_http(server, sent, monkeypatch):
+    """The whole path, the HTTP mocked at urlopen: found, not found."""
+    import urllib.error
+    from zugzwang.core import platform_sync as ps
+
+    class Ok:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake(req, timeout=None, **k):
+        if "chess.com" in req.full_url:
+            return Ok()
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+    monkeypatch.setattr(ps.urllib.request, "urlopen", fake)
+    server._handle_request({"id": 9, "method": "check_usernames",
+                            "params": {"chesscom": "alice", "lichess": "bob"}})
+    _wait_for(lambda: any(f.get("id") == 9 for f in sent))
+    assert sent[-1]["result"] == {"chesscom": {"status": "found", "message": None},
+                                  "lichess": {"status": "not_found", "message": None}}
+
+
+def test_check_usernames_with_no_names_asks_nothing(server, sent, monkeypatch):
+    from zugzwang.core import platform_sync as ps
+    monkeypatch.setattr(ps.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no request")))
+    server._handle_request({"id": 2, "method": "check_usernames", "params": {}})
+    _wait_for(lambda: any(f.get("id") == 2 for f in sent))
+    assert sent[-1] == {"id": 2, "result": {"chesscom": None, "lichess": None}}

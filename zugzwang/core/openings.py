@@ -36,6 +36,7 @@ class FamilyInfo:
     available: bool                             # trainable, or gated "limited coverage"
     line_count: int                             # curated lines at the chosen floor
     sample_moves: str                           # SAN of the top line (for move search)
+    shared_moves: str = ""                      # SAN of the moves every curated line shares (shown)
     lines: list[tuple[str, str, str, str]] = field(default_factory=list)  # (eco,name,fen,pgn)
 
 
@@ -404,6 +405,30 @@ def _san_line(uci_moves: list[str]) -> str:
     return " ".join(parts)
 
 
+def _shared_prefix(lines: list[list[str]], share: float = 1.0) -> list[str]:
+    """The moves a family's lines share (UI-BUILD-3 B2): the longest run of moves that at
+    least `share` of the lines play in that order (1.0: every line, the plain longest common
+    prefix). The trainer shows it at `C.TRAINER_FAMILY_SHARED_SHARE` (0.9) so that a few lines
+    reaching the family by another move order (the Italian's Scotch Gambit lines via 3. d4)
+    do not cut it short."""
+    out: list[str] = []
+    if not lines:
+        return out
+    need = share * len(lines)
+    while True:
+        i = len(out)
+        counts: dict[str, int] = {}
+        for moves in lines:
+            if len(moves) > i and moves[:i] == out:
+                counts[moves[i]] = counts.get(moves[i], 0) + 1
+        if not counts:
+            return out
+        move, n = max(counts.items(), key=lambda kv: kv[1])
+        if n < need:
+            return out
+        out.append(move)
+
+
 def _first_move_bucket(uci_moves: list[str]) -> str:
     if not uci_moves:
         return "other"
@@ -517,6 +542,7 @@ def build_family_index(
             available=available,
             line_count=len(curated),
             sample_moves=_san_line(top[6]) if top else "",
+            shared_moves=_san_line(_shared_prefix([r[6] for r in basis], C.TRAINER_FAMILY_SHARED_SHARE)),
             lines=[(eco, name, fen, pgn) for eco, name, pgn, fen, _, _, _ in curated],
         ))
 

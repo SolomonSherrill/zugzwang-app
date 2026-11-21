@@ -26,7 +26,8 @@ import chess
 from .. import config as C
 from . import pv_reading as P
 from .classification import (MISS_DECIDED_MATE_MAX, MISS_MIN_MATERIAL, WPL_EXCELLENT, WPL_GREAT_GAP,
-                             PlyScore, _can_be_great, classify, game_accuracy, win_prob, wpl)
+                             PlyScore, _can_be_great, book_holds, classify, game_accuracy,
+                             win_prob, wpl)
 from .database import MoveAnalysis
 from .explain import _VALUE, _holds_after_reply, _immediate_gain, explain_ply, see
 from .explain_text import capture_is_an_error
@@ -612,18 +613,36 @@ def forfeited_mate_in_one(board: chess.Board, played: chess.Move) -> bool:
     return False
 
 
+def in_book(ma: MoveAnalysis) -> bool:
+    """Whether a *labelled* ply (its `score_after_*` the depth-14 after-score, as
+    `label_ply` returns it) passes the book rule: its move is in the book (`is_book`, the
+    probe) and it is unscored or costs at most `WPL_INACCURACY`. The first ply that does not
+    ends the game's book prefix (BOOK-PREFIX)."""
+    return book_holds(ma.is_book, ma.score_before_cp, ma.score_before_mate,
+                      ma.score_after_cp, ma.score_after_mate)
+
+
 def label_ply(
     plies: Sequence[MoveAnalysis],
     i: int,
     final_lines: Sequence[dict] | None,
+    *,
+    book_open: bool = True,
 ) -> MoveAnalysis:
     """Ply *i* with its version-3 after-score and label.
 
     *plies* must hold ply i+1 and ply i+2 (its position and move) when they exist: the
     after-score reads ply i+1, J1 reads ply i+2, so the analysis loop calls this two plies
     behind. *final_lines* matters only on the last ply. The label reads this game only
-    (R4)."""
+    (R4).
+
+    *book_open* is whether the game's book prefix is still open: every earlier ply passed
+    the book rule (`in_book`). Book is a prefix (BOOK-PREFIX, owner ruling 10, 2026-11-20
+    fourth, version 8): once a ply fails it, no later ply is `book`, even one that
+    transposes back into a book position. The caller keeps it (`label_game` and the
+    analysis loop, in ply order); the stored `is_book` stays the probe."""
     ma = plies[i]
+    book = ma.is_book and book_open
     s_cp, s_mate = search_after(ma)
     a_cp, a_mate, _src = after_score(plies, i, final_lines)
     board = chess.Board(ma.fen_before)
@@ -641,7 +660,7 @@ def label_ply(
         second_best_uci=ma.second_best_uci,
         second_best_cp=ma.second_best_cp,
         second_best_mate=ma.second_best_mate,
-        is_book=ma.is_book,
+        is_book=book,
         only_legal_move=board.legal_moves.count() == 1,
         forfeited_mate_in_one=forfeited,
         brilliant=brilliant(ma, (a_cp, a_mate)),
@@ -658,7 +677,7 @@ def label_ply(
             score_before_cp=ma.score_before_cp, score_before_mate=ma.score_before_mate,
             score_after_cp=a_cp, score_after_mate=a_mate,
             second_best_uci=ma.second_best_uci, second_best_cp=ma.second_best_cp,
-            second_best_mate=ma.second_best_mate, is_book=ma.is_book,
+            second_best_mate=ma.second_best_mate, is_book=book,
             only_legal_move=board.legal_moves.count() == 1,
             forfeited_mate_in_one=False, brilliant=False, missed_win=False,
             critical_missed=False, great_eligible=great_eligible(plies, i),
@@ -672,8 +691,15 @@ def label_game(
     plies: Sequence[MoveAnalysis],
     final_lines: Sequence[dict] | None,
 ) -> list[MoveAnalysis]:
-    """Every ply of a run, labelled. *plies* ordered by ply, 0..n−1."""
-    return [label_ply(plies, i, final_lines) for i in range(len(plies))]
+    """Every ply of a run, labelled. *plies* ordered by ply, 0..n−1. The book prefix
+    (`label_ply`'s *book_open*) is kept here, in ply order, as the analysis loop keeps it."""
+    out: list[MoveAnalysis] = []
+    book_open = True
+    for i in range(len(plies)):
+        ma = label_ply(plies, i, final_lines, book_open=book_open)
+        book_open = book_open and in_book(ma)
+        out.append(ma)
+    return out
 
 
 def summary(plies: Sequence[MoveAnalysis]) -> dict:

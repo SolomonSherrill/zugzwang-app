@@ -165,3 +165,22 @@ def test_core_does_not_import_qt():
             imported.add(node.module.split(".")[0])
 
     assert not {"PyQt6", "PyQt5", "PySide6"} & imported
+
+
+def test_source_names_where_each_binary_came_from(monkeypatch, fake_engine):
+    """Settings' Engine row says how the binary was found (bundled, chosen, …), in
+    find_stockfish's own terms."""
+    env = fake_engine("env-sf")
+    bundled = fake_engine("bundled-sf")
+    on_path = fake_engine("path-sf")
+    picked = fake_engine("picked-sf")
+    monkeypatch.setattr("zugzwang.config.BUNDLED_STOCKFISH", bundled)
+    monkeypatch.setattr(engine_locator.shutil, "which", lambda _: str(on_path))
+    assert engine_locator.stockfish_source(bundled) == "bundled"
+    assert engine_locator.stockfish_source(on_path) == "path"
+    assert engine_locator.stockfish_source(picked) == "chosen"
+    assert engine_locator.stockfish_source(None) is None
+    monkeypatch.setenv("ZUGZWANG_STOCKFISH", str(env))
+    assert engine_locator.stockfish_source(env) == "env"
+    # what find_stockfish returns is always named
+    assert engine_locator.stockfish_source(engine_locator.find_stockfish()) == "env"

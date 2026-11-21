@@ -14,6 +14,14 @@ from zugzwang.core.engine_supervisor import DeathBreaker, EngineDied, Supervised
 
 
 
+@pytest.fixture(autouse=True)
+def _standard_depth_8(monkeypatch):
+    """RUNS-DEPTH: only a run at the standard depth satisfies a sync. These tests search at
+    depth 8 for speed, so the standard depth is 8 here (production: 14)."""
+    import zugzwang.config as _cfg
+    monkeypatch.setattr(_cfg, "ANALYSIS_STANDARD_DEPTH", 8)
+
+
 def test_breaker_trips_past_three_deaths_within_fifty_games():
     breaker = DeathBreaker(max_deaths=3, window=50)
     breaker.game_started()

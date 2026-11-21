@@ -173,6 +173,35 @@ class AnalysisRun:
         return json.loads(self.final_lines_json) if self.final_lines_json else []
 
 
+def standard_run_sql(alias: str = "r") -> str:
+    """RUNS-DEPTH (owner, 2026-11-20): a WHERE term true for a game's **standard run** — a
+    Stockfish run at `ANALYSIS_STANDARD_DEPTH` (14), or a run that is not Stockfish's (Lichess
+    cloud evals, stored at depth 0, which sync never re-analyses). Every aggregate reads only
+    these; a deeper Analyse again run sits beside it for Review alone. A Stockfish run at any
+    other depth (a beta tester's preset run at 10 or 18, before ruling 17) is not standard:
+    the game stays pending until it has a depth-14 run."""
+    return (f"({alias}.engine_name != 'Stockfish' "
+            f"OR {alias}.depth = {int(C.ANALYSIS_STANDARD_DEPTH)})")
+
+
+def run_slot(engine_name: str, depth: int) -> str:
+    """Which run a newly completed run replaces (RUNS-DEPTH): the standard run, or a
+    Stockfish run of the same depth."""
+    if engine_name != "Stockfish" or int(depth) == int(C.ANALYSIS_STANDARD_DEPTH):
+        return "standard"
+    return f"depth-{int(depth)}"
+
+
+@dataclass
+class RunInfo:
+    """One complete run of a game, for Review's run switch (RUNS-DEPTH)."""
+    id: int
+    engine_name: str
+    depth: int
+    completed_at: str
+    standard: bool
+
+
 @dataclass
 class RunSummary:
     """The part of a game's latest `analysis_runs` row a game *list* needs. Kept
@@ -832,6 +861,8 @@ class Database:
         """Complete runs with no counting facts row (this facts version, the run's classifier
         version, this `rule_version` — PATTERNS.md §6e: a rule change makes facts stale);
         every complete run with *every*."""
+        # Every complete run, a deeper one included (RUNS-DEPTH): completion writes facts for
+        # every run, and the patterns card joins standard runs only (insights_pattern_facts).
         if every:
             sql = "SELECT id FROM analysis_runs WHERE completed_at IS NOT NULL ORDER BY id"
             return [r[0] for r in self._conn.execute(sql)]
@@ -873,6 +904,7 @@ class Database:
                 f"""SELECT g.id, g.played_at, g.player_color, f.facts_json
                     FROM games g
                     JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                         AND {standard_run_sql()}
                     JOIN pattern_facts f ON f.run_id = r.id AND f.facts_version = ?
                          AND f.classifier_version IS r.classifier_version
                          AND f.rule_version IS ?
@@ -994,7 +1026,8 @@ class Database:
         the rest for "Analyse more" (`config.SYNC_AUTO_ANALYSE_RECENT`). *limit* caps
         how many are returned — "Analyse more" in a step the user chose.
 
-        A game is pending unless it already has a *satisfying* run — a **complete**
+        A game is pending unless it already has a *satisfying* **standard** run (RUNS-DEPTH:
+        a deeper Analyse again run never stands in for it) — a **complete**
         one (VAL-DEATH: a run cut short by a dead engine used to count as done, so
         nothing ever re-analysed its game) and either a non-Stockfish run (Lichess cloud evals, which store depth 0 but are far
         deeper than any local search and must never be clobbered) or a Stockfish
@@ -1025,16 +1058,35 @@ class Database:
                   SELECT 1 FROM analysis_runs r
                   WHERE r.game_id = g.id
                     AND r.completed_at IS NOT NULL
+                    AND {standard}
                     AND (r.engine_name != 'Stockfish' OR r.depth >= ?)
               )
               {window}
             ORDER BY g.played_at DESC, g.id DESC
             {cap}
             """.replace("{owned}", self._not_foreign_sql())
+               .replace("{standard}", standard_run_sql())
                .replace("{window}", window).replace("{cap}", cap),
             params,
         ).fetchall()
         return [GameRecord(**dict(r)) for r in rows]
+
+    def games_with_standard_run(self, game_ids, min_depth: int = 0) -> set[int]:
+        """Of *game_ids*, those that already have a satisfying complete standard run — the
+        test `games_pending_analysis` makes, for an explicit set of games of any source
+        (UI-BUILD-3 E: Import PGN's games are analysed at depth 14)."""
+        ids = [int(g) for g in game_ids]
+        if not ids:
+            return set()
+        ph = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""SELECT DISTINCT r.game_id FROM analysis_runs r
+                WHERE r.game_id IN ({ph}) AND r.completed_at IS NOT NULL
+                  AND {standard_run_sql()}
+                  AND (r.engine_name != 'Stockfish' OR r.depth >= ?)""",
+            (*ids, int(min_depth)),
+        ).fetchall()
+        return {int(r[0]) for r in rows}
 
     # ── Insights aggregation ────────────────────────────────────────────────────
 
@@ -1069,8 +1121,15 @@ class Database:
                 clauses.append("g.player_color = ?")
                 params.append(flt.color)
             if flt.speeds:
-                clauses.append(f"g.speed IN ({','.join('?' for _ in flt.speeds)})")
-                params.extend(flt.speeds)
+                # Daily (ruling 14) has no speed bucket: chess.com's "1/N" TimeControl.
+                timed = [s for s in flt.speeds if s != "daily"]
+                terms = []
+                if timed:
+                    terms.append(f"g.speed IN ({','.join('?' for _ in timed)})")
+                    params.extend(timed)
+                if "daily" in flt.speeds:
+                    terms.append("(g.speed IS NULL AND g.pgn LIKE '%[TimeControl \"1/%')")
+                clauses.append("(" + " OR ".join(terms) + ")")
             if flt.rated == "rated":
                 clauses.append("g.rated = 1")
             elif flt.rated == "casual":
@@ -1093,7 +1152,7 @@ class Database:
             f"""SELECT COUNT(*) FROM games g
                 WHERE {where}
                   AND EXISTS (SELECT 1 FROM analysis_runs r WHERE r.game_id = g.id
-                              AND r.completed_at IS NOT NULL)""",
+                              AND r.completed_at IS NOT NULL AND {standard_run_sql()})""",
             params,
         ).fetchone()[0]
         ex_where, ex_params = self._insights_where(flt, excluded_only=True)
@@ -1134,6 +1193,7 @@ class Database:
                    SUM(CASE WHEN {self._LOSS_SQL} THEN 1 ELSE 0 END) AS loss
             FROM games g
             JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                 AND {standard_run_sql()}
             WHERE {where}
               AND g.opening_name IS NOT NULL
               AND (CASE WHEN g.player_color='white'
@@ -1162,10 +1222,11 @@ class Database:
                    g.player_color AS color
             FROM games g
             JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                 AND {standard_run_sql()}
             WHERE {where}
               AND (CASE WHEN g.player_color='white'
                         THEN r.white_accuracy ELSE r.black_accuracy END) IS NOT NULL
-            ORDER BY g.played_at ASC
+            ORDER BY g.played_at ASC, g.id ASC
             """,
             params,
         ).fetchall()
@@ -1189,6 +1250,7 @@ class Database:
                    m.score_after_mate AS sa_mate
             FROM games g
             JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                 AND {standard_run_sql()}
             JOIN move_analyses m ON m.run_id = r.id
             WHERE {where}
               AND ((g.player_color='white' AND m.ply % 2 = 0)
@@ -1210,6 +1272,7 @@ class Database:
             SELECT g.pgn AS pgn, g.player_color AS color, g.result AS result
             FROM games g
             JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                 AND {standard_run_sql()}
             WHERE {where}
             """,
             params,
@@ -1228,6 +1291,7 @@ class Database:
                    COUNT(*) AS n
             FROM games g
             JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                 AND {standard_run_sql()}
             JOIN move_analyses m ON m.run_id = r.id
             WHERE {where}
               AND ((g.player_color='white' AND m.ply % 2 = 0)
@@ -1253,6 +1317,7 @@ class Database:
                         THEN r.white_accuracy ELSE r.black_accuracy END AS acc
             FROM games g
             LEFT JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                 AND {standard_run_sql()}
             WHERE {where}
             """,
             params,
@@ -1276,6 +1341,7 @@ class Database:
                    m.fen_before AS fen, g.player_color AS color
             FROM games g
             JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                 AND {standard_run_sql()}
             JOIN move_analyses m ON m.run_id = r.id
             WHERE {where}
             ORDER BY r.id, m.ply
@@ -1283,6 +1349,41 @@ class Database:
             params,
         ).fetchall()
         return [(r["run"], r["ply"], r["cls"], r["fen"], r["color"]) for r in rows]
+
+    def insights_game_rows(self, flt: "InsightsFilter | None" = None) -> list[tuple]:
+        """(id, played_at, player_color, result, termination, opening_eco, opening_name,
+        the user's accuracy, analysed) per game under the filters — the redesigned Insights
+        (core/insights_v2.py). Analysed = a complete standard run (RUNS-DEPTH)."""
+        where, params = self._insights_where(flt)
+        rows = self._conn.execute(
+            f"""SELECT g.id, g.played_at, g.player_color, g.result, g.termination,
+                       g.opening_eco, g.opening_name,
+                       CASE WHEN g.player_color='white' THEN r.white_accuracy
+                            ELSE r.black_accuracy END,
+                       r.id IS NOT NULL
+                FROM games g
+                LEFT JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                     AND {standard_run_sql()}
+                WHERE {where}
+                ORDER BY g.played_at, g.id""", params).fetchall()
+        return [tuple(r) for r in rows]
+
+    def insights_plies(self, flt: "InsightsFilter | None" = None) -> list[tuple]:
+        """(game id, player_color, ply, classification, fen_before, score_before_cp,
+        score_before_mate, score_after_cp, score_after_mate) for every ply of every analysed
+        game under the filters, by game then ply (standard runs only)."""
+        where, params = self._insights_where(flt)
+        rows = self._conn.execute(
+            f"""SELECT g.id, g.player_color, m.ply, m.classification, m.fen_before,
+                       m.score_before_cp, m.score_before_mate,
+                       m.score_after_cp, m.score_after_mate
+                FROM games g
+                JOIN analysis_runs r ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                     AND {standard_run_sql()}
+                JOIN move_analyses m ON m.run_id = r.id
+                WHERE {where}
+                ORDER BY g.id, m.ply""", params).fetchall()
+        return [tuple(r) for r in rows]
 
     def list_games(self, limit: int | None = None) -> list[GameRecord]:
         sql = """
@@ -1307,9 +1408,9 @@ class Database:
         Exists because calling `load_latest_run` per game was 1 859 unindexed
         scans of `analysis_runs` — 26 ms, growing with the library, and it only
         ever used three of the eight columns it loaded. The correlated subquery is
-        a deliberate literal transcription of `load_latest_run`'s
-        `ORDER BY id DESC LIMIT 1`, so the two cannot disagree about which run is
-        latest; it is also the form a `LIMIT` still applies to.
+        a deliberate literal transcription of `load_standard_run`'s ordering (the
+        standard run first, RUNS-DEPTH, then the latest), so the two cannot disagree
+        about which run a list shows; it is also the form a `LIMIT` still applies to.
 
         `None` means no run. A run with `None` accuracies is a different thing —
         analysed before v4 added the columns — which is why this returns a summary
@@ -1329,12 +1430,12 @@ class Database:
                    r.id AS run_id, r.white_accuracy, r.black_accuracy
             FROM games g
             LEFT JOIN analysis_runs r ON r.id = (
-                SELECT id FROM analysis_runs
-                WHERE game_id = g.id AND completed_at IS NOT NULL
-                ORDER BY id DESC LIMIT 1
+                SELECT s.id FROM analysis_runs s
+                WHERE s.game_id = g.id AND s.completed_at IS NOT NULL
+                ORDER BY {standard} DESC, s.id DESC LIMIT 1
             )
             ORDER BY g.played_at DESC
-        """
+        """.replace("{standard}", standard_run_sql("s"))
         params: tuple = ()
         if limit is not None:
             sql += " LIMIT ?"
@@ -1592,7 +1693,10 @@ class Database:
     ) -> None:
         """Make *run_id* the game's analysis, in one transaction: write *plies* (any not
         streamed already), check the run now holds every ply of its game, write the
-        summary and `completed_at`, and delete the game's other runs.
+        summary and `completed_at`, and delete the game's other runs **in the same slot**
+        (RUNS-DEPTH, owner 2026-11-20: a standard run replaces the standard run, a deeper
+        Stockfish run replaces a run of its own depth; a depth-18 run kept beside the
+        depth-14 one stays) and any incomplete run of the game.
 
         Raises `IncompleteRun`, writing nothing, if a ply is missing — the guard on
         the class of defect VAL-DEATH found, where 15 runs a dead engine cut short were
@@ -1600,9 +1704,9 @@ class Database:
         try:
             for ma in plies:
                 self._insert_move_analysis(run_id, ma)
-            game_id, pgn = self._conn.execute(
-                "SELECT g.id, g.pgn FROM analysis_runs r JOIN games g ON g.id = r.game_id"
-                " WHERE r.id = ?", (run_id,)).fetchone()
+            game_id, pgn, engine_name, depth = self._conn.execute(
+                "SELECT g.id, g.pgn, r.engine_name, r.depth FROM analysis_runs r"
+                " JOIN games g ON g.id = r.game_id WHERE r.id = ?", (run_id,)).fetchone()
             n = pgn_ply_count(pgn)
             stored, lo, hi = self._conn.execute(
                 "SELECT COUNT(*), MIN(ply), MAX(ply) FROM move_analyses WHERE run_id = ?",
@@ -1619,8 +1723,16 @@ class Database:
                  datetime.now(timezone.utc).isoformat(),
                  json.dumps(final_lines) if final_lines else None, run_id),
             )
-            self._conn.execute(
-                "DELETE FROM analysis_runs WHERE game_id = ? AND id != ?", (game_id, run_id))
+            slot = run_slot(engine_name, depth)
+            others = self._conn.execute(
+                "SELECT id, engine_name, depth, completed_at FROM analysis_runs"
+                " WHERE game_id = ? AND id != ?", (game_id, run_id)).fetchall()
+            gone = [o[0] for o in others
+                    if o[3] is None or run_slot(o[1], o[2]) == slot]
+            if gone:
+                self._conn.execute(
+                    f"DELETE FROM analysis_runs WHERE id IN ({','.join('?' * len(gone))})",
+                    gone)
         except BaseException:
             self._conn.rollback()
             raise
@@ -1708,18 +1820,47 @@ class Database:
         )
         self._conn.commit()
 
+    _RUN_COLS = ("id, game_id, engine_name, depth, created_at, payload_json, "
+                 "white_accuracy, black_accuracy, final_lines_json")
+
     def load_latest_run(self, game_id: int) -> AnalysisRun | None:
-        """The game's latest *complete* run; an incomplete one is never shown."""
+        """The run Review shows by default: the game's **deepest** *complete* run
+        (RUNS-DEPTH, owner 2026-11-20; ties to the latest). An incomplete one is never
+        shown. With one run per game, as before RUNS-DEPTH, that run."""
+        return self.load_review_run(game_id)
+
+    def load_review_run(self, game_id: int, run_id: int | None = None) -> AnalysisRun | None:
+        """*run_id* when it is a complete run of this game (Review's run switch), else the
+        deepest complete run. Never an incomplete run (VAL-DEATH)."""
+        if run_id is not None:
+            row = self._conn.execute(
+                f"SELECT {self._RUN_COLS} FROM analysis_runs"
+                " WHERE id=? AND game_id=? AND completed_at IS NOT NULL",
+                (int(run_id), game_id)).fetchone()
+            if row is not None:
+                return AnalysisRun(**dict(row))
         row = self._conn.execute(
-            """
-            SELECT id, game_id, engine_name, depth, created_at, payload_json,
-                   white_accuracy, black_accuracy, final_lines_json
-            FROM analysis_runs WHERE game_id=? AND completed_at IS NOT NULL
-            ORDER BY id DESC LIMIT 1
-            """,
-            (game_id,),
-        ).fetchone()
+            f"SELECT {self._RUN_COLS} FROM analysis_runs"
+            " WHERE game_id=? AND completed_at IS NOT NULL ORDER BY depth DESC, id DESC LIMIT 1",
+            (game_id,)).fetchone()
         return AnalysisRun(**dict(row)) if row else None
+
+    def load_standard_run(self, game_id: int) -> AnalysisRun | None:
+        """The game's complete **standard** run (`standard_run_sql`): what every aggregate
+        reads (RUNS-DEPTH). None when the game has only a deeper run, or none."""
+        row = self._conn.execute(
+            f"SELECT {self._RUN_COLS} FROM analysis_runs r"
+            f" WHERE r.game_id=? AND r.completed_at IS NOT NULL AND {standard_run_sql()}"
+            " ORDER BY r.id DESC LIMIT 1", (game_id,)).fetchone()
+        return AnalysisRun(**dict(row)) if row else None
+
+    def list_complete_runs(self, game_id: int) -> list[RunInfo]:
+        """Every complete run of the game, deepest first (Review's run switch)."""
+        rows = self._conn.execute(
+            f"""SELECT r.id, r.engine_name, r.depth, r.completed_at, {standard_run_sql()}
+                FROM analysis_runs r WHERE r.game_id=? AND r.completed_at IS NOT NULL
+                ORDER BY r.depth DESC, r.id DESC""", (game_id,)).fetchall()
+        return [RunInfo(r[0], r[1], r[2], r[3], bool(r[4])) for r in rows]
 
     def load_move_analyses(self, run_id: int) -> list[MoveAnalysis]:
         rows = self._conn.execute(

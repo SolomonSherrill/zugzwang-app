@@ -26,7 +26,9 @@ from typing import NamedTuple, Sequence
 # label written today. Bump it with any change that can alter a label, and say in the
 # commit which rows it affects. NULL in the column means "written before the write path
 # stamped one" — every run from I3 until 2026-11-07 (W9, W22).
-CLASSIFIER_VERSION = 7   # 7: X1, brilliant excludes an immune piece behind a pin, a lost position
+CLASSIFIER_VERSION = 8   # 8: BOOK-PREFIX, book is a prefix: once a ply fails the book rule, no later
+                         # ply of the game is book (owner ruling 10, 2026-11-20 fourth; every live run
+                         # carried 7). 7: X1, brilliant excludes an immune piece behind a pin, a lost position
                          # (wp before < 0.30) and a cost above WPL_EXCELLENT (2026-11-19; every live
                          # run carried 6). 6: W, brilliant "nearly best" and B5 dropped (2026-11-19; every
                          # live run carried 5). 5: K1, J1 only for a material event, never a missed mate (2026-11-14;
@@ -205,6 +207,26 @@ def _already_lost_before_move(cp: int | None, mate: int | None) -> bool:
     return win_prob(cp, mate) <= win_prob(-WP_CP_CLAMP, None)
 
 
+def book_holds(
+    is_book: bool,
+    score_before_cp: int | None,
+    score_before_mate: int | None,
+    score_after_cp: int | None,
+    score_after_mate: int | None,
+) -> bool:
+    """The book rule on one ply: the move is in the book and is unscored or costs at most
+    `WPL_INACCURACY`. `classify` labels such a ply `book` (after brilliant), and a game's
+    book prefix ends at the first ply that fails it (BOOK-PREFIX, owner ruling 10,
+    2026-11-20 fourth)."""
+    if not is_book:
+        return False
+    if not (_has_score(score_before_cp, score_before_mate)
+            and _has_score(score_after_cp, score_after_mate)):
+        return True
+    return wpl(score_before_cp, score_before_mate,
+               score_after_cp, score_after_mate) <= WPL_INACCURACY
+
+
 def classify(
     *,
     played_uci: str,
@@ -250,17 +272,15 @@ def classify(
     # — treating that as a real evaluation would score those rows against a
     # fabricated dead-equal position. Absent data means "cannot judge", not "was
     # fine", so the label stands until an eval actually exists.
-    if is_book:
-        scored = _has_score(score_before_cp, score_before_mate) and _has_score(
-            score_after_cp, score_after_mate
-        )
-        if not scored:
-            return "book"
-        if wpl(score_before_cp, score_before_mate,
-               score_after_cp, score_after_mate) <= WPL_INACCURACY:
-            return "book"
-        # Played badly enough to be worth flagging — fall through and let the
-        # normal ladder name it.
+    #
+    # Book is a prefix (BOOK-PREFIX, version 8): *is_book* is the book probe only while
+    # every earlier ply of the game passed this rule; the caller decides that
+    # (`labelling.label_game`, the analysis loops), since it needs the game.
+    if book_holds(is_book, score_before_cp, score_before_mate,
+                  score_after_cp, score_after_mate):
+        return "book"
+    # Not in the book, or played badly enough to be worth flagging — fall through and
+    # let the normal ladder name it.
 
     if only_legal_move:
         return "best"

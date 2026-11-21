@@ -27,6 +27,10 @@ const SIDECAR_SCRIPT = __SIDECAR_SCRIPT__
  *  cache; 0.3–3.5 s once warm) and an Insights build is ~12 s. */
 const REQUEST_TIMEOUT_MS = 90_000
 
+function timeoutError(method: string): Error {
+  return new Error(`${method} timed out after ${REQUEST_TIMEOUT_MS / 1000}s`)
+}
+
 function isWindows(): boolean {
   return typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
 }
@@ -48,8 +52,20 @@ type Pending = {
 }
 type EventHandler = (data: Record<string, unknown>) => void
 
+/** The process behind the RPC client. The app uses Tauri's shell plugin (the default);
+ *  the browser harness (`desktop/harness/`) swaps in a fake answering from fixtures, so a
+ *  screen can be rendered and screenshotted headlessly with no Tauri and no Python. */
+export interface SidecarProcess {
+  write(line: string): Promise<void>
+  kill(): Promise<void>
+}
+export interface SidecarTransport {
+  spawn(onLine: (chunk: string) => void, onClose: () => void): Promise<SidecarProcess>
+}
+
 export class Sidecar {
-  private child: Child | null = null
+  private child: Child | SidecarProcess | null = null
+  private transport: SidecarTransport | null = null
   private nextId = 1
   private pending = new Map<number, Pending>()
   private handlers = new Map<string, EventHandler[]>()
@@ -58,6 +74,24 @@ export class Sidecar {
   /** set by stop(), so a deliberate kill is not mistaken for a crash */
   private stopping = false
   private respawned = false
+  /** the first start() in flight or done, so a second call does not spawn twice */
+  private starting: Promise<void> | null = null
+  /** Settles when the first spawn does. A request made before it (FIX-STARTUP: a screen's
+   *  onMount runs before App's, which is what calls start()) waits on this instead of failing. */
+  private started: Promise<void>
+  private startedOk!: () => void
+  private startedFailed!: (e: Error) => void
+  /** why the first spawn failed; later requests reject with it at once */
+  private startError: Error | null = null
+
+  constructor() {
+    this.started = new Promise<void>((resolve, reject) => {
+      this.startedOk = resolve
+      this.startedFailed = reject
+    })
+    // nobody need be waiting when it fails: start()'s own caller hears of it
+    this.started.catch(() => {})
+  }
 
   get status(): SidecarStatus {
     return this.current
@@ -93,12 +127,37 @@ export class Sidecar {
     if (i >= 0) arr.splice(i, 1)
   }
 
-  async start(): Promise<void> {
+  /** Replace the Tauri process with another transport; call before start(). */
+  useTransport(t: SidecarTransport): void {
+    this.transport = t
+  }
+
+  start(): Promise<void> {
+    // already running or on its way (the harness starts it before mounting, then App asks again)
+    if (this.child) return Promise.resolve()
+    if (this.starting) return this.starting
     this.setStatus('starting')
-    await this.spawn()
+    this.starting = this.spawn().then(
+      () => this.startedOk(),
+      (e: unknown) => {
+        const err = e instanceof Error ? e : new Error(String(e))
+        this.startError = err
+        this.startedFailed(err)
+        throw err
+      },
+    )
+    return this.starting
   }
 
   private async spawn(): Promise<void> {
+    if (this.transport) {
+      this.child = await this.transport.spawn(
+        (line) => this.onLine(line),
+        () => this.onClose(),
+      )
+      this.setStatus('up')
+      return
+    }
     // The packaged build spawns the frozen sidecar from its resource folder
     // (capabilities/beta.json, `$RESOURCE/sidecar/…`; the executable's name differs on
     // Windows); the dev run spawns the checkout's script with its venv (default.json).
@@ -168,25 +227,53 @@ export class Sidecar {
     }
   }
 
+  /** Why a request cannot be sent now, when there is no process and none is starting. */
+  private notRunning(): Error {
+    if (this.current === 'restarting') return new Error('the engine backend is restarting')
+    if (this.current === 'down') return new Error('the engine backend is not running')
+    if (this.startError) return this.startError
+    return new Error('sidecar not started')
+  }
+
   request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const child = this.child
-    if (!child) {
-      return Promise.reject(
-        new Error(
-          this.current === 'restarting'
-            ? 'the engine backend is restarting'
-            : this.current === 'down'
-              ? 'the engine backend is not running'
-              : 'sidecar not started',
-        ),
+    if (child) return this.send<T>(child, method, params, REQUEST_TIMEOUT_MS)
+    // Still starting (FIX-STARTUP): the first spawn is in flight, or start() has not been
+    // called yet because the screen asking mounted before App. Wait for it, within the same
+    // timeout as the reply. 'restarting' and 'down' still reject at once.
+    if (this.current !== 'starting' || this.startError) return Promise.reject(this.notRunning())
+    const asked = Date.now()
+    return new Promise<T>((resolve, reject) => {
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        reject(timeoutError(method))
+      }, REQUEST_TIMEOUT_MS)
+      this.started.then(
+        () => {
+          if (timedOut) return
+          clearTimeout(timer)
+          const c = this.child
+          if (!c) return reject(this.notRunning()) // it died between spawning and now
+          const left = Math.max(0, REQUEST_TIMEOUT_MS - (Date.now() - asked))
+          this.send<T>(c, method, params, left).then(resolve, reject)
+        },
+        (e: Error) => {
+          if (timedOut) return
+          clearTimeout(timer)
+          reject(e)
+        },
       )
-    }
+    })
+  }
+
+  private send<T>(child: Child | SidecarProcess, method: string, params: Record<string, unknown>, timeoutMs: number): Promise<T> {
     const id = this.nextId++
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error(`${method} timed out after ${REQUEST_TIMEOUT_MS / 1000}s`))
-      }, REQUEST_TIMEOUT_MS)
+        reject(timeoutError(method))
+      }, timeoutMs)
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer })
       child.write(JSON.stringify({ id, method, params }) + '\n').catch((e) => {
         this.pending.delete(id)

@@ -15,7 +15,9 @@
 # artifacts (BETA item 8). Without them the bundles still build, unsigned for updates.
 #
 # The Python suite skips the three tests that need the opening book (W20): the book is
-# gitignored and not available to CI, and CLAUDE.md records them as failing on purpose.
+# gitignored, and CLAUDE.md records them as failing on purpose without one. The packaged smoke
+# test does run its opening-trainer checks (BETA-4 D): the Standard book is fetched from the
+# books-v1 release (tools/fetch_book.py, verified against the manifest) and cached between runs.
 
 name: beta
 
@@ -117,14 +119,24 @@ jobs:
           [ "$RUNNER_OS" = "Windows" ] && exe="$exe.exe"
           python packaging/guard_check.py "$exe"
 
-      - name: Packaged sidecar smoke test (play, import, one analysed game, flags, puzzles)
+      - name: Opening book (Standard, books-v1), cached between runs
+        uses: actions/cache@v6
+        with:
+          path: .book
+          # the manifest's sha256 of the Standard book (zugzwang/core/books.py)
+          key: book-all-20-d2ab4795e227435450c55ef742dc1d634fa8323bf3535f92533eb54aaadf600a
+
+      - name: Fetch the book on a cache miss; verify it either way (size and sha256)
+        run: python tools/fetch_book.py all-20 .book
+
+      - name: Packaged sidecar smoke test (play, import, one analysed game, flags, puzzles, the trainer)
         run: |
           exe=build/sidecar-dist/zugzwang-sidecar/zugzwang-sidecar
           [ "$RUNNER_OS" = "Windows" ] && exe="$exe.exe"
           # Outside the app the frozen sidecar has no Stockfish beside it: point it at the
           # binary verified above. (Inside the app it finds its own — the launch check.)
           export ZUGZWANG_STOCKFISH="$PWD/stockfish/$(python -c "import zugzwang.config as C; print(C.STOCKFISH_ASSETS[C.host_target()]['binary'])")"
-          python sidecar/smoke_test.py --sidecar "$exe" --skip-trainer
+          python sidecar/smoke_test.py --sidecar "$exe" --book .book/books/zugzwang-book-all-20-games.bin
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

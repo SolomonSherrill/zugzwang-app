@@ -15,10 +15,11 @@
     ply?: number | null
     label?: string | null
     context?: string | null
+    /** the note form is open; bindable, so ⌘K's "Flag this move" can open it (BETA-4 B) */
+    open?: boolean
   }
-  let { kind, shown, gameId, ply = null, label = null, context = null }: Props = $props()
+  let { kind, shown, gameId, ply = null, label = null, context = null, open = $bindable(false) }: Props = $props()
 
-  let open = $state(false)
   let note = $state('')
   let saving = $state(false)
   let savedPath = $state<string | null>(null)

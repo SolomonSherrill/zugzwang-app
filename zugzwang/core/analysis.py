@@ -37,9 +37,9 @@ import chess.engine
 import chess.pgn
 
 import zugzwang.config as C
-from zugzwang.core.classification import PlyScore, classify, game_accuracy, win_prob
+from zugzwang.core.classification import PlyScore, book_holds, classify, game_accuracy, win_prob
 from zugzwang.core.database import MoveAnalysis
-from zugzwang.core.labelling import forfeited_mate_in_one, label_ply
+from zugzwang.core.labelling import forfeited_mate_in_one, in_book, label_ply
 from zugzwang.core.labelling import summary as labelled_summary
 from zugzwang.core.engine_supervisor import DEATH
 
@@ -180,9 +180,13 @@ def analyze_game_plies(
         return
     plies: list[MoveAnalysis] = []      # searched, not yet labelled
     labelled: list[MoveAnalysis] = []
+    # Book is a prefix (BOOK-PREFIX, version 8): open until a labelled ply fails the book
+    # rule, as `labelling.label_game` keeps it, so a relabel from the stored rows agrees.
+    book_open = [True]
 
     def _labelled(i: int, final: list[dict] | None) -> MoveAnalysis:
-        ma = label_ply(plies, i, final)
+        ma = label_ply(plies, i, final, book_open=book_open[0])
+        book_open[0] = book_open[0] and in_book(ma)
         labelled.append(ma)
         return ma
 
@@ -438,6 +442,8 @@ def analyze_game_from_evals(
     # first move is not scored as having thrown away a nonexistent equality.
     prev_cp: int | None = 15
     prev_mate: int | None = None
+    # Book is a prefix (BOOK-PREFIX, version 8), as in `labelling.label_game`.
+    book_open = True
 
     node = game
     ply = 0
@@ -485,10 +491,11 @@ def analyze_game_from_evals(
             second_best_uci=None,
             second_best_cp=None,
             second_best_mate=None,
-            is_book=is_book,
+            is_book=is_book and book_open,
             only_legal_move=only_legal,
             forfeited_mate_in_one=forfeited_mate,
         )
+        book_open = book_open and book_holds(is_book, sb_cp, sb_mate, sa_cp, sa_mate)
 
         ma = MoveAnalysis(
             ply=ply,

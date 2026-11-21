@@ -44,6 +44,9 @@ export interface EngineMoveEvent {
   san: string
   fen: string
   end: GameEndInfo | null
+  /** the engine's clock after this move, increment included, as the sidecar measured it
+   *  (UI-BUILD-3 F); null in an untimed game, absent from an older sidecar */
+  clockMs?: number | null
 }
 
 export interface MoveAnalysisInfo {
@@ -58,6 +61,8 @@ export interface MoveAnalysisInfo {
   scoreAfterCp: number | null
   scoreAfterMate: number | null
   classification: string
+  // The book probe: the move is in the book in use. Not the label: past the game's book
+  // prefix (BOOK-PREFIX) a move the book holds is not labelled book.
   isBook: boolean
   lines: EngineLine[]
 }
@@ -187,6 +192,8 @@ export interface PlyInfo {
 }
 
 export interface GameAnalysis {
+  /** the run shown (RUNS-DEPTH: the deepest complete run unless another was asked for) */
+  runId: number
   depth: number
   whiteAccuracy: number | null
   blackAccuracy: number | null
@@ -342,6 +349,64 @@ export type GameReport =
       lines: string[]
     }
 
+/** `rpc_home_summary` (core/home_summary.py). */
+export interface HomeRating {
+  platform: string
+  speed: 'bullet' | 'blitz' | 'rapid' | 'classical' | 'daily' | 'puzzles'
+  rating: number
+  /** latest minus the last rating before the 30-day window; null when there is none */
+  change: number | null
+  games: number
+  lastPlayed: string
+  newPeak?: boolean
+  series: { t: string; rating: number }[]
+}
+export interface HomeRecent {
+  id: number
+  playedAt: string
+  playerColor: Color | null
+  outcome: 'win' | 'loss' | 'draw' | null
+  result: string
+  termination: string
+  source: GameSource
+  opponent: string | null
+  openingEco: string | null
+  openingName: string | null
+  timeControl: string | null
+  accuracy: number | null
+  opponentAccuracy: number | null
+}
+export interface HomeSummary {
+  games: number
+  analysed: number
+  avgAccuracy: number | null
+  winRate: number | null
+  ratings: HomeRating[]
+  puzzles: HomeRating | null
+  recent: HomeRecent[]
+}
+
+/** `rpc_review_extras` (core/review_extras.py). */
+export interface ReviewExtras {
+  analysed: boolean
+  depth: number | null
+  plies: number
+  /** the first ply of each phase by core/divider.py; null when the game never reached it */
+  phases: { middlegame: number | null; endgame: number | null }
+  clock: {
+    timeControl: string | null
+    base: number | null
+    increment: number | null
+    /** clock left after each ply, seconds */
+    clocks: (number | null)[]
+    /** seconds spent on each ply; null where unknown */
+    spent: (number | null)[]
+  }
+  accuracyByPhase: Record<'white' | 'black', Record<'opening' | 'middlegame' | 'endgame', number | null>> | null
+  errors: { ply: number; side: 'white' | 'black'; classification: string; kind: 'tactical' | null }[]
+  errorCounts: Record<'white' | 'black', { tactical: number; errors: number }> | null
+}
+
 export interface GameDetail
   extends Omit<GameSummary, 'whiteAccuracy' | 'blackAccuracy' | 'analyzed' | 'white' | 'black'> {
   startFen: string
@@ -349,6 +414,17 @@ export interface GameDetail
   white: string
   black: string
   analysis: GameAnalysis | null
+  /** every complete run of the game, deepest first (RUNS-DEPTH); `standard` is the depth-14
+   *  run every aggregate reads */
+  runs: RunInfo[]
+}
+
+export interface RunInfo {
+  id: number
+  depth: number
+  engine: string
+  completedAt: string
+  standard: boolean
 }
 
 export interface AnalysisPlyEvent {
@@ -379,11 +455,64 @@ export interface FenAnalyzedEvent {
   cp: number | null
   mate: number | null
   lines: EngineLine[]
+  /** the live search's depth (config.ANALYSIS_DEPTH); absent from an older sidecar */
+  depth?: number
 }
 
 export type ProbedMove =
   | { legal: false }
   | { legal: true; fen: string; san: string; check: boolean; gameOver: boolean }
+
+// ── the Games screen (UI-BUILD-3 E) ─────────────────────────────────────────
+
+export type GamesSpeed = 'bullet' | 'blitz' | 'rapid' | 'classical' | 'daily'
+export type GamesSort = 'recent' | 'oldest' | 'accuracy_low' | 'accuracy_high' | 'opening'
+
+export interface GamesPageParams {
+  search?: string
+  result?: 'all' | 'win' | 'draw' | 'loss'
+  color?: 'all' | Color
+  speeds?: GamesSpeed[]
+  source?: 'all' | GameSource
+  rated?: 'all' | 'rated' | 'casual'
+  analysis?: 'all' | 'analyzed' | 'unanalyzed'
+  opening?: string
+  /** ISO instants: since inclusive, until exclusive */
+  since?: string
+  until?: string
+  sort?: GamesSort
+  offset?: number
+  limit?: number
+}
+
+/** One listed game: list_games's fields plus what the Games screen shows. */
+export interface GamesItem extends GameSummary {
+  speedBucket: GamesSpeed | null
+  /** the PGN's TimeControl ("180+2", "1/86400"); null for none, "-" or "?" */
+  timeControl: string | null
+  /** the user's result; null when unfinished or the side is unknown */
+  outcome: 'win' | 'loss' | 'draw' | null
+}
+
+export interface GamesMonth {
+  /** "2026-11", local calendar month */
+  month: string
+  games: number
+  won: number
+  lost: number
+  drawn: number
+}
+
+export interface GamesPage {
+  games: GamesItem[]
+  /** games the filters keep */
+  total: number
+  /** every stored game */
+  all: number
+  offset: number
+  /** each month's record over every game the filters keep, newest first */
+  months: GamesMonth[]
+}
 
 // ── platform sync ────────────────────────────────────────────────────────────
 
@@ -627,6 +756,71 @@ export interface InsightsResult {
   patterns: InsightsPatterns
 }
 
+// ── insights, redesigned (UI-BUILD-2 C; core/insights_v2.py) ─────────────────
+
+export type InsightsSpeedV2 = InsightsSpeed | 'daily'
+export type QualityClassV2 =
+  | 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder'
+export interface QualityShares {
+  moves: number
+  counts: Record<QualityClassV2, number>
+  pct: Record<QualityClassV2, number | null>
+}
+export interface InsightsMonth {
+  month: string
+  games: number
+  analysed: number
+  accuracy: number | null
+  winRate: number | null
+  blundersPerGame: number | null
+}
+export interface InsightsOpeningFamily {
+  name: string
+  eco: string | null
+  games: number
+  won: number | null
+  drawn: number | null
+  lost: number | null
+  score: number | null
+  accuracy: number | null
+}
+export interface InsightsEnd {
+  games: number
+  pct: number | null
+  mate: number | null
+  resigned: number | null
+  time: number | null
+  other: number | null
+}
+export interface InsightsV2 {
+  view: 'v2'
+  overview: { total: number; analyzed: number; pending: number; excluded: number }
+  ready: boolean
+  summary: { accuracy: number | null; winRate: number | null; games: number; analysed: number; blundersPerGame: number | null }
+  monthly: InsightsMonth[]
+  daily: { day: string; games: number; accuracy: number | null }[]
+  heat: {
+    cells: { day: number; block: number; games: number; accuracy: number | null }[]
+    hours: string[]
+    days: string[]
+    minGames: number
+    best: { day: number; block: number; games: number; accuracy: number; dayName: string; hours: string } | null
+  }
+  openings: { white: InsightsOpeningFamily[]; black: InsightsOpeningFamily[] }
+  ends: { win: InsightsEnd; draw: InsightsEnd; loss: InsightsEnd }
+  moveQuality: { you: QualityShares; opponents: QualityShares }
+  byPhase: {
+    phases: {
+      phase: 'opening' | 'middlegame' | 'endgame'
+      games: number
+      accuracy: { you: number | null; opponents: number | null }
+      quality: { you: QualityShares; opponents: QualityShares }
+    }[]
+  }
+  castling: { side: string; label: string; games: number; share: number | null; winRate: number | null }[]
+  patterns: InsightsPatterns
+}
+
 // ── puzzles ──────────────────────────────────────────────────────────────────
 
 export interface PuzzleStatus {
@@ -659,6 +853,38 @@ export interface PuzzleMode {
   ratingRange: number
 }
 
+/** One row of the Puzzles lobby's recent sessions (`rpc_puzzle_summary`, core/puzzle_summary.py). */
+export interface PuzzleSessionRow {
+  /** null for an inferred session (attempts with no stored session, grouped by time) */
+  id: number | null
+  startedAt: string
+  mode: 'rated' | 'theme' | 'rush' | 'survival' | string
+  timeLimit: number | null
+  tried: number
+  /** solved without a miss */
+  solved: number
+  /** Rush and Survival: the session's score */
+  score: number | null
+  /** rated: last rating after minus first rating before */
+  ratingChange: number | null
+  /** Rush and Survival: equals that board's best */
+  best: boolean
+  inferred: boolean
+}
+
+/** `rpc_puzzle_summary`: the Puzzles lobby's figures. */
+export interface PuzzleSummary {
+  /** Home's puzzle row; null before any attempt in the last 30 days */
+  rating: HomeRating | null
+  tries: number
+  solved: number
+  /** best finished Rush score per length in seconds ("180", "300") */
+  rushBest: Record<string, number | null>
+  survivalBest: number | null
+  sessions: PuzzleSessionRow[]
+  sessionGapMin: number
+}
+
 export interface LeaderboardResult {
   entries: { score: number; date: string }[]
   newRank: number
@@ -676,14 +902,26 @@ export interface TrainerFamilySummary {
   threshold: number
   available: boolean
   sampleMoves: string
+  /** the moves 90 % of the family's curated lines share, in order; '' when they share none (UI-BUILD-3 B2) */
+  sharedMoves: string
   drilled: number
   mastered: number
+}
+
+export interface TrainerLineRecord {
+  attempts: number
+  completions: number
+  distinctLines: number
+  bestAccuracy: number | null
+  mastered: boolean
 }
 
 export interface TrainerLineProgress {
   distinctLines: number
   bestAccuracy: number | null
   mastered: boolean
+  /** ruling 18: the record per colour (UI-BUILD-2 E3) */
+  byColor?: { white: TrainerLineRecord; black: TrainerLineRecord }
 }
 
 export interface TrainerLine {
@@ -738,6 +976,10 @@ export interface GameState {
 export interface EngineStatus {
   ok: boolean
   path: string | null
+  /** how find_stockfish found it: env, bundled, path (on PATH) or chosen (the user's pick) */
+  source?: 'env' | 'bundled' | 'path' | 'chosen' | null
+  /** the running engine's UCI name ("Stockfish 18"), when it is this binary */
+  name?: string | null
 }
 
 export interface RelabelResult {
@@ -820,6 +1062,62 @@ export interface AppInfo {
   licence: string
 }
 
+/** One site's answer to the username check (UI-BUILD-3 G): found, not found, or the site could
+ *  not be asked (message: why, e.g. "HTTP 503", "timed out"). */
+export interface UsernameCheck {
+  status: 'found' | 'not_found' | 'unreachable'
+  message: string | null
+}
+/** check_usernames' reply: null for a name that was empty (not checked). */
+export interface UsernameChecks {
+  chesscom: UsernameCheck | null
+  lichess: UsernameCheck | null
+}
+
+/** The user_move params (UI-BUILD-3 F): the move and, when the game has a clock, the user's clock
+ *  after it in whole milliseconds; a missing or unusable clock is left out, as an older frontend
+ *  sent it, and the sidecar then saves the game without clocks. */
+export function userMoveParams(uci: string, clockMs?: number | null): { uci: string; clock_ms?: number } {
+  return typeof clockMs === 'number' && Number.isFinite(clockMs) && clockMs >= 0
+    ? { uci, clock_ms: Math.round(clockMs) }
+    : { uci }
+}
+
+/** What a sidecar from before UI-BUILD-3 F answers a user_move carrying clock_ms: Python's own
+ *  TypeError for the unknown keyword, raised while binding the arguments, before the move is
+ *  touched (measured on 42bfa69's dispatch: "Server.rpc_user_move() got an unexpected keyword
+ *  argument 'clock_ms'"). Matched narrowly: any other error is a real one. */
+export const CLOCK_REFUSED = /rpc_user_move\(\) got an unexpected keyword argument 'clock_ms'/
+
+/** user_move, tolerant of an older sidecar (the dev run hot-reloads the frontend while its
+ *  sidecar keeps running): when the sidecar refuses clock_ms, the move is sent again once without
+ *  it, and no clock is sent for the rest of that sidecar's life (until it is restarted). The game
+ *  then saves without clocks, as an untimed one does. */
+export function userMoveSender(
+  request: (params: { uci: string; clock_ms?: number }) => Promise<MoveResult>,
+  onStatus: (fn: (s: SidecarStatus) => void) => unknown,
+): (uci: string, clockMs?: number | null) => Promise<MoveResult> {
+  let refused = false
+  // a new sidecar process may be a newer one: ask again with the clock
+  onStatus((s) => {
+    if (s !== 'up') refused = false
+  })
+  return async (uci, clockMs) => {
+    const params = userMoveParams(uci, refused ? null : clockMs)
+    try {
+      return await request(params)
+    } catch (e) {
+      if (params.clock_ms === undefined || !(e instanceof Error) || !CLOCK_REFUSED.test(e.message)) throw e
+      refused = true
+      return request(userMoveParams(uci))
+    }
+  }
+}
+const sendUserMove = userMoveSender(
+  (params) => sidecar.request<MoveResult>('user_move', params),
+  (fn) => sidecar.onStatus(fn),
+)
+
 export const api = {
   engineStatus: () => sidecar.request<EngineStatus>('engine_status'),
   appInfo: () => sidecar.request<AppInfo>('app_info'),
@@ -860,25 +1158,50 @@ export const api = {
    *  callers recover through their existing `ready` handler rather than here. */
   setStockfishPath: (path: string) =>
     sidecar.request<{ ok: boolean; path: string; name: string }>('set_stockfish_path', { path }),
-  newGame: (color: Color, skill: number, fen?: string) =>
-    sidecar.request<NewGameResult>('new_game', { color, skill, ...(fen ? { fen } : {}) }),
+  /** timeControl: the PGN TimeControl ("600+0") written into the saved game */
+  newGame: (color: Color, skill: number, fen?: string, timeControl?: string) =>
+    sidecar.request<NewGameResult>('new_game', {
+      color,
+      skill,
+      ...(fen ? { fen } : {}),
+      ...(timeControl ? { time_control: timeControl } : {}),
+    }),
   getState: () => sidecar.request<GameState>('get_state'),
-  userMove: (uci: string) => sidecar.request<MoveResult>('user_move', { uci }),
+  /** Settings' check on Save (UI-BUILD-3 G, ruling 5): whether each name is a player on its site;
+   *  an empty name is not sent and comes back null. The sidecar answers within a few seconds
+   *  whatever the network does. */
+  checkUsernames: (names: { chesscom: string; lichess: string }) =>
+    sidecar.request<UsernameChecks>('check_usernames', {
+      ...(names.chesscom.trim() ? { chesscom: names.chesscom.trim() } : {}),
+      ...(names.lichess.trim() ? { lichess: names.lichess.trim() } : {}),
+    }),
+  /** clockMs: the user's clock after this move, increment included, saved as its [%clk]
+   *  (UI-BUILD-3 F); left out when there is none, or when the running sidecar is older than the
+   *  clocks (userMoveSender) */
+  userMove: (uci: string, clockMs?: number | null) => sendUserMove(uci, clockMs),
   resign: () => sidecar.request<{ end: GameEndInfo }>('resign'),
   draw: () => sidecar.request<{ end: GameEndInfo }>('draw'),
   flag: (loser: Color) => sidecar.request<{ end: GameEndInfo }>('flag', { loser }),
   abandon: () => sidecar.request<{ end: GameEndInfo }>('abandon'),
   listGames: (limit?: number) =>
     sidecar.request<{ games: GameSummary[] }>('list_games', limit === undefined ? {} : { limit }),
-  getGame: (gameId: number) => sidecar.request<GameDetail>('get_game', { game_id: gameId }),
+  /** runId: one of the game's complete runs (Review's run switch, RUNS-DEPTH); none, the deepest */
+  getGame: (gameId: number, runId?: number | null) =>
+    sidecar.request<GameDetail>('get_game', { game_id: gameId, ...(runId != null ? { run_id: runId } : {}) }),
   // Takes the game and ply, not the position: the sidecar reads the stored row so
   // that the engine scores the rules need cannot be silently omitted here.
-  explainMove: (gameId: number, ply: number) =>
-    sidecar.request<ExplainResult>('explain_move', { game_id: gameId, ply }),
+  explainMove: (gameId: number, ply: number, runId?: number | null) =>
+    sidecar.request<ExplainResult>('explain_move', { game_id: gameId, ply, ...(runId != null ? { run_id: runId } : {}) }),
   judgeMove: (fen: string, uci: string) =>
     sidecar.request<{ token: number }>('judge_move', { fen, uci }),
-  gameReport: (gameId: number) =>
-    sidecar.request<GameReport>('game_report', { game_id: gameId }),
+  gameReport: (gameId: number, runId?: number | null) =>
+    sidecar.request<GameReport>('game_report', { game_id: gameId, ...(runId != null ? { run_id: runId } : {}) }),
+  /** The redesigned Home's figures (UI-BUILD C, core/home_summary.py). Read-only. */
+  homeSummary: () => sidecar.request<HomeSummary>('home_summary'),
+  /** The redesigned Review's figures (UI-BUILD B3): phases, accuracy by phase,
+   *  tactical errors, N of M (gate P, ruling 3; never "positional"), clocks. Read-only. */
+  reviewExtras: (gameId: number, runId?: number | null) =>
+    sidecar.request<ReviewExtras>('review_extras', { game_id: gameId, ...(runId != null ? { run_id: runId } : {}) }),
   analyzeGame: (gameId: number, depth?: number) =>
     sidecar.request<{ runId: number; depth: number }>('analyze_game', {
       game_id: gameId,
@@ -898,26 +1221,32 @@ export const api = {
   /** Where one move lands, decided in Python. An illegal move answers `legal: false`
    *  and nothing else, so a variation node can never hold an unreachable position. */
   probeMove: (fen: string, uci: string) => sidecar.request<ProbedMove>('probe_move', { fen, uci }),
-  syncStatus: (depth?: number) =>
-    sidecar.request<SyncStatus>('sync_status', depth != null ? { depth } : {}),
-  startSync: (lichess: string, chesscom = '', depth?: number) =>
-    sidecar.request<{ started: boolean; sources: GameSource[] }>('start_sync', {
-      lichess,
-      chesscom,
-      ...(depth != null ? { depth } : {}),
-    }),
+  // Sync and "analyse pending" send no depth: every game is analysed at depth 14 (ruling 17;
+  // the sidecar ignores any depth sent, Server._clamp_depth). One game goes deeper only
+  // through Analyse again (analyzeGame).
+  syncStatus: () => sidecar.request<SyncStatus>('sync_status', {}),
+  startSync: (lichess: string, chesscom = '') =>
+    sidecar.request<{ started: boolean; sources: GameSource[] }>('start_sync', { lichess, chesscom }),
   cancelSync: () => sidecar.request<{ ok: boolean }>('cancel_sync'),
   /** Analyse synced games still pending, newest first. *count* is one "Analyse more"
    *  step (the *count* most recent pending games); omitted, all of them (BETA-PUB Q4). */
-  analyzePending: (source?: 'lichess' | 'chesscom', depth?: number, count?: number) =>
+  analyzePending: (source?: 'lichess' | 'chesscom', count?: number) =>
     sidecar.request<{ started: boolean; sources: GameSource[]; count: number | null }>(
       'analyze_pending',
       {
         ...(source ? { source } : {}),
-        ...(depth != null ? { depth } : {}),
         ...(count != null ? { count } : {}),
       },
     ),
+  /** Analyse exactly these games at depth 14 through the bulk queue and its sync_* events
+   *  (Import PGN's games, UI-BUILD-3 E); those already analysed are skipped. */
+  analyzeGames: (gameIds: number[]) =>
+    sidecar.request<{ started: boolean; sources: GameSource[]; count: number }>('analyze_pending', {
+      game_ids: gameIds,
+    }),
+  /** The Games screen's page (UI-BUILD-3 E, core/games_list.py): the games under the filters,
+   *  the count they keep, and each month's record over all of them. Read-only. */
+  gamesPage: (params: GamesPageParams) => sidecar.request<GamesPage>('games_page', { ...params }),
   repairColors: (lichess: string, chesscom = '') =>
     sidecar.request<{ changed: number }>('repair_colors', { lichess, chesscom }),
   insights: (
@@ -936,7 +1265,20 @@ export const api = {
       ...(opts.rated && opts.rated !== 'all' ? { rated: opts.rated } : {}),
       ...(opts.includeLocal ? { include_local: true } : {}),
     }),
+  /** The redesigned Insights (UI-BUILD-2 C): one payload under the filter bar's filters. */
+  insightsV2: (
+    opts: { color?: InsightsColor; speeds?: InsightsSpeedV2[]; since?: string; rated?: InsightsRated; includeLocal?: boolean } = {},
+  ) =>
+    sidecar.request<InsightsV2 | InsightsSuperseded>('insights', {
+      view: 'v2',
+      color: opts.color ?? 'all',
+      ...(opts.speeds && opts.speeds.length ? { speeds: opts.speeds } : {}),
+      ...(opts.since ? { since: opts.since } : {}),
+      ...(opts.rated && opts.rated !== 'all' ? { rated: opts.rated } : {}),
+      ...(opts.includeLocal ? { include_local: true } : {}),
+    }),
   puzzleStatus: () => sidecar.request<PuzzleStatus>('puzzle_status'),
+  puzzleSummary: () => sidecar.request<PuzzleSummary>('puzzle_summary'),
   importPuzzles: (csvPath?: string) =>
     sidecar.request<{ started: boolean }>('import_puzzles', csvPath ? { csv_path: csvPath } : {}),
   cancelPuzzleImport: () => sidecar.request<{ ok: boolean }>('cancel_puzzle_import'),
@@ -1039,63 +1381,7 @@ export const PUZZLE_RUSH_TIMES: [number, string][] = [
   [300, '5 min'],
 ]
 
-export const PUZZLE_THEMES: [string, string][] = [
-  ['Fork', 'fork'],
-  ['Pin', 'pin'],
-  ['Skewer', 'skewer'],
-  ['Discovered Attack', 'discoveredAttack'],
-  ['Double Check', 'doubleCheck'],
-  ['Back Rank Mate', 'backRankMate'],
-  ['Mating Net', 'mate'],
-  ['Mate in 1', 'mateIn1'],
-  ['Mate in 2', 'mateIn2'],
-  ['Sacrifice', 'sacrifice'],
-  ['Deflection', 'deflection'],
-  ['Attraction', 'attraction'],
-  ['Clearance', 'clearance'],
-  ['X-Ray Attack', 'xRayAttack'],
-  ['Hanging Piece', 'hangingPiece'],
-  ['Trapped Piece', 'trappedPiece'],
-  ['Quiet Move', 'quietMove'],
-  ['Promotion', 'promotion'],
-  ['Under-Promotion', 'underPromotion'],
-  ['En Passant', 'enPassant'],
-  ['Endgame', 'endgame'],
-  ['Rook Endgame', 'rookEndgame'],
-  ['Pawn Endgame', 'pawnEndgame'],
-  ['Queen Endgame', 'queenEndgame'],
-  ['Knight Endgame', 'knightEndgame'],
-  ['Bishop Endgame', 'bishopEndgame'],
-  ['Middlegame', 'middlegame'],
-  ['Opening', 'opening'],
-  ['Crushing', 'crushing'],
-  ['Advantage', 'advantage'],
-  ['Zugzwang', 'zugzwang'],
-]
-
 // ── display constants (mirrors config.py) ───────────────────────────────────
-
-export interface TimeControl {
-  label: string
-  initialS: number
-  incrementS: number
-}
-
-export const TIME_CONTROLS: TimeControl[] = [
-  { label: '1+0 · Bullet', initialS: 60, incrementS: 0 },
-  { label: '2+1 · Bullet', initialS: 120, incrementS: 1 },
-  { label: '3+0 · Blitz', initialS: 180, incrementS: 0 },
-  { label: '3+2 · Blitz', initialS: 180, incrementS: 2 },
-  { label: '5+0 · Blitz', initialS: 300, incrementS: 0 },
-  { label: '5+3 · Blitz', initialS: 300, incrementS: 3 },
-  { label: '10+0 · Rapid', initialS: 600, incrementS: 0 },
-  { label: '10+5 · Rapid', initialS: 600, incrementS: 5 },
-  { label: '15+10 · Rapid', initialS: 900, incrementS: 10 },
-  { label: '30+0 · Classical', initialS: 1800, incrementS: 0 },
-]
-export const TIME_CONTROL_DEFAULT = 6 // 10+0
-
-export const SKILL_DEFAULT = 10
 
 export function describeTermination(termination: string): string {
   const names: Record<string, string> = {

@@ -539,13 +539,16 @@ def build_insights(
     since: str | None = None,
     rated: str = "all",
     include_local: bool = False,
+    view: str = "full",
 ) -> dict:
     """Assemble the full insights payload from the database, optionally filtered
     to one colour, a set of time-control speed buckets, a start date, and/or
     rated vs. casual games. `include_local` adds games played here against
     Stockfish, which are left out by default."""
     color = color if color in ("white", "black") else "all"
-    speeds = tuple(s for s in (speeds or ()) if s in _VALID_SPEEDS)
+    # Daily is the redesign's (ruling 14); the old payload's speeds stay the four buckets.
+    valid = (*_VALID_SPEEDS, "daily") if view == "v2" else _VALID_SPEEDS
+    speeds = tuple(s for s in (speeds or ()) if s in valid)
     since = since if (since and isinstance(since, str)) else None
     rated = rated if rated in ("rated", "casual") else "all"
     flt = InsightsFilter(
@@ -553,6 +556,9 @@ def build_insights(
         include_local=bool(include_local),
     )
 
+    if view == "v2":     # the redesigned screen (UI-BUILD-2 C)
+        from .insights_v2 import build_insights_v2
+        return build_insights_v2(db, flt)
     overview = db.insights_overview(flt)
     ready = overview["analyzed"] > 0
     details = db.insights_game_details(flt)

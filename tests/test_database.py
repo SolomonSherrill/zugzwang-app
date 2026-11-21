@@ -144,9 +144,9 @@ def test_list_games_with_runs_agrees_with_the_per_game_path(db):
 
 
 def test_list_games_with_runs_carries_the_platform_game_id(db):
-    # The Games screen's search finds a game by its chess.com / Lichess id
-    # (`desktop/src/lib/gameSearch.ts`), and that id reaches it only through this
-    # list. Before 2026-11-11 the SELECT omitted it and every record read None.
+    # The list carries each game's chess.com / Lichess id (the Games screen's id search now
+    # runs in `core/games_list.py`, UI-BUILD-3 E; Review's recent games still read this
+    # list). Before 2026-11-11 the SELECT omitted it and every record read None.
     platform = _sample(db, source="chesscom", external_id="900000000001",
                        played_at="2026-02-01T00:00:00+00:00")
     local = _sample(db, played_at="2026-01-01T00:00:00+00:00")
@@ -508,7 +508,7 @@ _CHESSCOM = dict(source="chesscom", result="1-0")
 
 
 def _with_run(db, gid, accuracy=80.0):
-    run = db.save_analysis_run(game_id=gid, engine_name="Stockfish", depth=10)
+    run = db.save_analysis_run(game_id=gid, engine_name="Stockfish", depth=14)   # standard (RUNS-DEPTH)
     mark_complete(db, run, white_accuracy=accuracy, black_accuracy=accuracy)
 
 

@@ -1,0 +1,8 @@
+/* Geist, bundled (SIL OFL 1.1; src/assets/fonts/geist/OFL.txt). Nothing loads from Google Fonts. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: block;
+  src: url('../../assets/fonts/geist/Geist-Variable.woff2') format('woff2');
+}

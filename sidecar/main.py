@@ -50,6 +50,7 @@ from zugzwang.core.analysis import (
     eval_coverage,
 )
 from zugzwang.core.database import (
+    standard_run_sql,
     AttributionPending,
     Database,
     GameRecord,
@@ -57,7 +58,9 @@ from zugzwang.core.database import (
     MoveAnalysis,
     rated_from_pgn,
 )
-from zugzwang.core.engine_locator import find_stockfish, persist_path, popen_engine
+from zugzwang.core.engine_locator import (
+    find_stockfish, persist_path, popen_engine, stockfish_source,
+)
 from zugzwang.core.engine_supervisor import (
     ENGINE_GONE,
     DeathBreaker,
@@ -71,6 +74,11 @@ from zugzwang.core.explain_text import UNKNOWN_SIDE
 from zugzwang.core import provenance
 from zugzwang.core.positions import legal_board
 from zugzwang.core.game_report import build_report, opening_exit, opening_sentence
+from zugzwang.core import review_extras as RX
+from zugzwang.core import home_summary as HS
+from zugzwang.core import games_list as GL
+from zugzwang.core import puzzle_summary as PS
+from zugzwang.core.classification import PlyScore
 from zugzwang.core.retry import judge as judge_try
 from zugzwang.core.game import GameEnd, GameSession
 from zugzwang.core.import_pgn import parse_pgn_report
@@ -78,6 +86,7 @@ from zugzwang.core.insights import build_insights
 from zugzwang.core.patterns import FACTS_VERSION, facts_row, write_facts_for_run
 from zugzwang.core.platform_sync import (
     SyncError,
+    check_usernames,
     fetch_chesscom_games,
     fetch_lichess_games,
 )
@@ -629,7 +638,8 @@ class FenAnalysisRunner:
                 self._do_fen(*job)
             except Exception as exc:
                 logger.exception("fen analysis failed")
-                _emit("analysis_error", {"message": self._failed(exc)})
+                # fen: tells a live position's failure from a game analysis's (UI-BUILD-3 C)
+                _emit("analysis_error", {"fen": job[1], "message": self._failed(exc)})
         if self._engine is not None:
             try:
                 self._engine.quit()
@@ -679,7 +689,9 @@ class FenAnalysisRunner:
         mate = top["mate"] if top else None
         _emit(
             "fen_analyzed",
-            {"fen": fen, "bestUci": best_uci, "cp": cp, "mate": mate, "lines": lines},
+            # depth: what Review's engine lines show beside a live line (UI-BUILD-3 C)
+            {"fen": fen, "bestUci": best_uci, "cp": cp, "mate": mate, "lines": lines,
+             "depth": C.ANALYSIS_DEPTH},
         )
 
 
@@ -846,17 +858,18 @@ class SyncRunner:
         self._thread.start()
 
     def start_analyze(self, *, sources: list[str], db_path: Path, depth: int,
-                      count: int | None = None) -> None:
+                      count: int | None = None, chosen: dict | None = None) -> None:
         """Analyse already-synced games that still lack a satisfying run, with no
         network fetch. Shares the running()/cancel machinery with full sync so the
         two can never overlap on the engine or DB connection. *count* is "Analyse
         more" in a step: the *count* most recent pending games across *sources*;
-        None is all of them (BETA-PUB Q4)."""
+        None is all of them (BETA-PUB Q4). *chosen* is an explicit queue by source (Import
+        PGN's games, UI-BUILD-3 E), read before *count*."""
         if self.running():
             raise RuntimeError("a sync is already running")
         self._cancel = False
         self._thread = threading.Thread(
-            target=self._run_analyze, args=(sources, db_path, depth, count),
+            target=self._run_analyze, args=(sources, db_path, depth, count, chosen),
             name="analyze-pending", daemon=True,
         )
         self._thread.start()
@@ -915,14 +928,14 @@ class SyncRunner:
         picked = merged[:count]
         return {s: [r for r in picked if r.source == s] for s in sources}
 
-    def _run_analyze(self, sources, db_path, depth, count=None) -> None:
+    def _run_analyze(self, sources, db_path, depth, count=None, chosen=None) -> None:
         db: Database | None = None
         openings: OpeningsBook | None = None
         try:
             db = Database(db_path)
             openings = OpeningsBook()
-            chosen = (self._newest_pending(db, sources, depth, count)
-                      if count is not None else None)
+            if chosen is None and count is not None:
+                chosen = self._newest_pending(db, sources, depth, count)
             for source in sources:
                 if self._cancel:
                     break
@@ -1382,7 +1395,7 @@ def _game_dict(rec: GameRecord) -> dict:
 
 # Methods that reply from a worker thread instead of returning a result.
 # _handle_request passes req_id through and does not reply on their behalf.
-_DEFERRED_METHODS = {"insights"}
+_DEFERRED_METHODS = {"insights", "check_usernames"}
 
 
 class RelabelRunner:
@@ -1917,9 +1930,18 @@ class Server:
 
     def rpc_engine_status(self) -> dict:
         """Where Stockfish was resolved from, for the settings screen. Recomputed
-        rather than cached because `set_stockfish_path` can change the answer."""
+        rather than cached because `set_stockfish_path` can change the answer.
+
+        *source* is how it was found (`stockfish_source`: env, bundled, path, chosen);
+        *name* is the version the running engine reports over UCI ("Stockfish 18"), given
+        only when the running engine is that same binary, else None."""
         path = find_stockfish()
-        return {"ok": path is not None, "path": None if path is None else str(path)}
+        name = None
+        worker = getattr(self, "_engine", None)
+        if path is not None and worker is not None and getattr(worker, "_path", None) == str(path):
+            name = self._live_engine_version()
+        return {"ok": path is not None, "path": None if path is None else str(path),
+                "source": stockfish_source(path), "name": name}
 
     def rpc_set_stockfish_path(self, path: str) -> dict:
         """Adopt a user-picked Stockfish binary, persist it, and re-announce `ready`.
@@ -1944,12 +1966,18 @@ class Server:
         return {"ok": ok, "path": str(p), "name": name}
 
     def rpc_new_game(self, color: str = "white", skill: int = SKILL_DEFAULT,
-                     fen: str | None = None) -> dict:
+                     fen: str | None = None, time_control: str | None = None) -> dict:
+        """*time_control*: the clock the app runs, as a PGN TimeControl ("600+0"); written
+        into the saved game's headers so it files under its speed. The clocks run in the
+        frontend (it flags, see rpc_flag); the clock after each move is saved as [%clk]
+        (UI-BUILD-3 F): the user's as the frontend sends it with the move (rpc_user_move), the
+        engine's measured here (_apply_engine_move)."""
         self._engine.cancel()
         player_color = chess.WHITE if color == "white" else chess.BLACK
         self._skill = skill
         self._session = GameSession(
             player_color, skill, openings=self._openings, starting_fen=fen,
+            time_control=time_control,
         )
         self._session.set_opening_listener(
             lambda eco, name: _emit("opening", {"eco": eco, "name": name})
@@ -1959,13 +1987,18 @@ class Server:
             self._request_engine_move()
         return {"fen": self._session.board.fen(), "engineToMove": engine_to_move}
 
-    def rpc_user_move(self, uci: str) -> dict:
+    def rpc_user_move(self, uci: str, clock_ms: float | None = None) -> dict:
+        """*clock_ms*: the user's clock after this move, increment included, as the frontend
+        shows it (UI-BUILD-3 F). Optional: an older frontend sends none, and the game then
+        saves no clocks (GameSession.has_clocks)."""
         session = self._require_session()
         move = chess.Move.from_uci(uci)
         if move not in session.board.legal_moves:
             return {"ok": False, "fen": session.board.fen()}
         san = session.board.san(move)
-        end = session.push(move)
+        clock = (clock_ms / 1000.0 if isinstance(clock_ms, (int, float))
+                 and not isinstance(clock_ms, bool) else None)
+        end = session.push(move, clock)
         if end is None:
             self._request_engine_move()
         return {"ok": True, "san": san, "fen": session.board.fen(),
@@ -2018,7 +2051,13 @@ class Server:
             games.append(d)
         return {"games": games}
 
-    def rpc_get_game(self, game_id: int) -> dict:
+    def rpc_games_page(self, **params) -> dict:
+        """The Games screen's page (UI-BUILD-3 E; core/games_list.py): the games under the
+        screen's filters, `offset`/`limit` at a time, the count they keep, and each month's
+        record over all of them. Both players' accuracies from the standard run."""
+        return GL.games_page(self._db._conn, GL.GamesQuery.from_params(params))
+
+    def rpc_get_game(self, game_id: int, run_id: int | None = None) -> dict:
         rec = self._db.get_game(game_id)
         if rec is None:
             raise RuntimeError(f"no game with id {game_id}")
@@ -2055,10 +2094,15 @@ class Server:
         out["white"] = game.headers.get("White", "White")
         out["black"] = game.headers.get("Black", "Black")
 
-        run = self._db.load_latest_run(rec.id)
+        # RUNS-DEPTH: the deepest complete run unless Review asked for another of the game's.
+        run = self._db.load_review_run(rec.id, run_id)
+        out["runs"] = [{"id": r.id, "depth": r.depth, "engine": r.engine_name,
+                        "completedAt": r.completed_at, "standard": r.standard}
+                       for r in self._db.list_complete_runs(rec.id)]
         if run is not None:
             analyses = self._db.load_move_analyses(run.id)
             out["analysis"] = {
+                "runId": run.id,
                 "depth": run.depth,
                 "whiteAccuracy": run.white_accuracy,
                 "blackAccuracy": run.black_accuracy,
@@ -2069,7 +2113,7 @@ class Server:
             out["analysis"] = None
         return out
 
-    def rpc_explain_move(self, game_id: int, ply: int) -> dict:
+    def rpc_explain_move(self, game_id: int, ply: int, run_id: int | None = None) -> dict:
         """Structured findings plus rendered sentences for one analysed ply.
 
         Reads the stored row rather than taking the position from the caller. The
@@ -2083,8 +2127,11 @@ class Server:
         The game is loaded for one field, `player_color`, which decides whether a
         sentence about the played move addresses the reader or names the side. The
         stored ply does not carry it.
+
+        *run_id* picks one of the game's complete runs (Review's run switch, RUNS-DEPTH);
+        none, the deepest.
         """
-        run = self._db.load_latest_run(game_id)
+        run = self._db.load_review_run(game_id, run_id)
         if run is None:
             return {"ply": ply, "findings": [], "sentences": [], "analysed": False}
         by_ply = {ma.ply: ma for ma in self._db.load_move_analyses(run.id)}
@@ -2123,7 +2170,7 @@ class Server:
             "ruleVersion": RULE_VERSION,
         }
 
-    def rpc_game_report(self, game_id: int) -> dict:
+    def rpc_game_report(self, game_id: int, run_id: int | None = None) -> dict:
         """The game report: moments, point of no return, ending, what it cost.
 
         Engine-free and computed on every call from the stored run; see
@@ -2144,7 +2191,7 @@ class Server:
             pgn_moves.append((board.fen(), n.move.uci()))
             board.push(n.move)
         book = getattr(self, "_openings", None)
-        run = self._db.load_latest_run(game_id)
+        run = self._db.load_review_run(game_id, run_id)      # RUNS-DEPTH
         if run is None:
             op = opening_exit(pgn_moves, book)
             return {
@@ -2166,12 +2213,79 @@ class Server:
             final_lines=run.final_lines,
         )
 
+    def rpc_review_extras(self, game_id: int, run_id: int | None = None) -> dict:
+        """Read-only figures for the redesigned Review (UI-BUILD B3; core/review_extras.py):
+        the game's own phase division, accuracy by phase, each error's tactical or
+        positional kind (gate P, ruling 3) and the clocks. Engine-free, from the PGN and
+        the stored run; an unanalysed game still gets its phases and clocks."""
+        rec = self._db.get_game(game_id)
+        if rec is None:
+            raise RuntimeError(f"no game with id {game_id}")
+        game = chess.pgn.read_game(io.StringIO(rec.pgn))
+        nodes = list(game.mainline()) if game is not None else []
+        board = game.board() if game is not None else chess.Board()
+        fens = RX.fens_before_moves(board, [n.move for n in nodes])
+        middle, end = RX.division(fens)
+        clocks = RX.clock_series([n.clock() for n in nodes],
+                                 game.headers.get("TimeControl") if game is not None else None,
+                                 white_first=board.turn == chess.WHITE)
+        out: dict = {"analysed": False, "depth": None, "plies": len(nodes),
+                     "phases": {"middlegame": middle, "endgame": end}, "clock": clocks,
+                     "accuracyByPhase": None, "errors": [], "errorCounts": None}
+        run = self._db.load_review_run(game_id, run_id)      # RUNS-DEPTH
+        if run is None:
+            return out
+        mas = self._db.load_move_analyses(run.id)
+        rows = {ma.ply: {**stored_ply_row(ma), "pv_uci": ma.pv_uci, "lines": ma.lines,
+                         "hard_only_move": ma.hard_only_move} for ma in mas}
+        phases = RX.phase_of_plies([ma.fen_before for ma in mas])
+        scores = [PlyScore("white" if " w " in ma.fen_before else "black",
+                           ma.score_before_cp, ma.score_before_mate,
+                           ma.score_after_cp, ma.score_after_mate) for ma in mas]
+        errors = RX.error_kinds(rows, run.final_lines)
+        out.update({"analysed": True, "depth": run.depth,
+                    "accuracyByPhase": RX.accuracy_by_phase(scores, phases),
+                    "errors": errors, "errorCounts": RX.error_counts(errors)})
+        return out
+
+    def rpc_home_summary(self, now: str | None = None) -> dict:
+        """Read-only figures for the redesigned Home (UI-BUILD C; core/home_summary.py):
+        games and analysed counts, average accuracy, win rate, ratings per time control
+        with their 30-day change, the puzzle rating, and the five latest games. *now* (ISO)
+        is for tests; the app sends none."""
+        t = HS.parse_time(now) if now else None
+        when = t or datetime.now(timezone.utc)
+        rows = self._db._conn.execute(
+            """SELECT g.id, g.played_at, g.player_color, g.result, g.termination, g.source,
+                      g.speed, g.pgn, g.opening_eco, g.opening_name,
+                      r.white_accuracy, r.black_accuracy, r.id IS NOT NULL
+               FROM games g LEFT JOIN analysis_runs r
+                 ON r.game_id = g.id AND r.completed_at IS NOT NULL
+                    AND """ + standard_run_sql()).fetchall()     # RUNS-DEPTH: depth-14 runs only
+        out = HS.summarize(rows, when)
+        try:
+            attempts = self._db._conn.execute(
+                "SELECT attempted_at, rating_before, rating_after FROM puzzle_attempts").fetchall()
+            cur = self._db._conn.execute(
+                "SELECT rating FROM puzzle_rating ORDER BY id DESC LIMIT 1").fetchone()
+        except sqlite3.OperationalError:
+            attempts, cur = [], None
+        p = HS.puzzle_row(attempts, cur[0] if cur else None, when)
+        out["puzzles"] = p
+        return out
+
     def rpc_analyze_game(self, game_id: int, depth: int | None = None) -> dict:
         self._refuse_during_book_relabel()
         rec = self._db.get_game(game_id)
         if rec is None:
             raise RuntimeError(f"no game with id {game_id}")
-        depth = depth or C.ANALYSIS_DEPTH
+        if depth is not None and not (
+                C.ANALYSIS_DEPTH_MIN <= int(depth) <= C.ANALYSIS_AGAIN_DEPTH_MAX):
+            # Analyse again goes to 24 for one game (ruling 7); nothing goes deeper.
+            raise ValueError(f"depth {depth} is outside {C.ANALYSIS_DEPTH_MIN}.."
+                             f"{C.ANALYSIS_AGAIN_DEPTH_MAX}")
+        # No depth sent: the standard depth (ruling 17; was ANALYSIS_DEPTH, 18, RA-DEPTH).
+        depth = int(depth) if depth else int(C.ANALYSIS_STANDARD_DEPTH)
         self._analysis.cancel()  # stop any in-flight run first
         run_id = self._db.save_analysis_run(
             game_id=game_id, engine_name="Stockfish", depth=depth,
@@ -2221,7 +2335,7 @@ class Server:
         elif kind == "cancelled":
             _emit("analysis_cancelled", {"gameId": game_id})
         elif kind == "error":
-            _emit("analysis_error", {"message": event[1]})
+            _emit("analysis_error", {"gameId": game_id, "message": event[1]})
         elif kind == "engine_died":
             # The run stays incomplete — never shown, never counted — and the game's
             # previous analysis, if it had one, is untouched.
@@ -2385,11 +2499,12 @@ class Server:
 
     @staticmethod
     def _clamp_depth(depth: int | None) -> int:
-        """Clamp a requested sync-analysis depth into the supported range,
-        falling back to the bulk default when unset."""
-        if depth is None:
-            return C.ANALYSIS_BULK_DEPTH
-        return max(C.ANALYSIS_DEPTH_MIN, min(C.ANALYSIS_DEPTH_MAX, int(depth)))
+        """The depth sync and "Analyse more" analyse at: **always the standard depth**
+        (`ANALYSIS_STANDARD_DEPTH`, 14), whatever a client sends (owner rulings 17 and
+        RUNS-DEPTH, 2026-11-20: every game is analysed at depth 14 so all games compare; a
+        sync at another depth would write runs no aggregate reads and queue the games
+        forever). One game goes deeper only through Analyse again."""
+        return int(C.ANALYSIS_STANDARD_DEPTH)
 
     def rpc_sync_status(self, depth: int | None = None) -> dict:
         min_depth = self._clamp_depth(depth)
@@ -2421,6 +2536,27 @@ class Server:
             "chesscom": counts("chesscom"),
         }
 
+    def rpc_check_usernames(self, req_id, chesscom: str = "", lichess: str = "") -> None:
+        """Settings' check on Save (UI-BUILD-3 G, ruling 5): whether each username is a player on
+        its site. Deferred: the two GETs run on a thread of their own and reply when both are
+        done, within USERNAME_CHECK_TIMEOUT_S plus a second, so the dispatch loop never waits on
+        the network. Replies {"chesscom": result | null, "lichess": result | null}, a result
+        being {"status": "found" | "not_found" | "unreachable", "message": str | null}; null for
+        an empty name, which is not checked."""
+        names = {"chesscom": chesscom if isinstance(chesscom, str) else "",
+                 "lichess": lichess if isinstance(lichess, str) else ""}
+
+        def run() -> None:
+            try:
+                result = check_usernames(names)
+            except Exception as exc:
+                logger.exception("username check failed")
+                _reply_error(req_id, str(exc))
+                return
+            _reply(req_id, result)
+
+        threading.Thread(target=run, name="username-check", daemon=True).start()
+
     def rpc_start_sync(
         self, lichess: str = "", chesscom: str = "", depth: int | None = None
     ) -> dict:
@@ -2451,23 +2587,41 @@ class Server:
         return {"started": True, "sources": [s for s, _ in jobs]}
 
     def rpc_analyze_pending(self, source: str = "", depth: int | None = None,
-                            count: int | None = None) -> dict:
+                            count: int | None = None,
+                            game_ids: list | None = None) -> dict:
         """Analyse already-synced games that still lack a satisfying run, without
         re-fetching from the network. *source* picks one platform ('lichess' /
         'chesscom'); empty means all synced platforms. *depth* is clamped like
         sync, so selecting a deeper depth re-queues shallower games. *count* is
         "Analyse more" in a step the user chose: the *count* most recent pending
-        games; omitted, all of them (BETA-PUB Q4). Newest first either way."""
+        games; omitted, all of them (BETA-PUB Q4). Newest first either way.
+
+        *game_ids* (UI-BUILD-3 E: Import PGN's "analysed at depth 14") queues exactly those
+        games, of any source, that still lack a satisfying standard run, through the same bulk
+        queue and its `sync_*` events; *source* and *count* are then ignored."""
         if self._sync.running():
             raise RuntimeError("A sync is already running.")
         self._refuse_during_book_relabel()
+        depth = self._clamp_depth(depth)
+        if game_ids is not None:
+            wanted = {int(g) for g in game_ids}
+            done = self._db.games_with_standard_run(wanted, depth)
+            records = [rec for gid in sorted(wanted - done)
+                       if (rec := self._db.get_game(gid)) is not None]
+            records.sort(key=lambda r: (r.played_at or "", r.id), reverse=True)
+            chosen: dict[str, list] = {}
+            for rec in records:
+                chosen.setdefault(rec.source, []).append(rec)
+            self._sync.start_analyze(sources=list(chosen), db_path=self._db_path, depth=depth,
+                                     chosen=chosen)
+            return {"started": True, "sources": list(chosen), "count": len(records)}
         if count is not None:
             count = int(count)
             if count < 1:
                 raise RuntimeError("count must be at least 1")
         sources = [source] if source else ["lichess", "chesscom"]
         self._sync.start_analyze(
-            sources=sources, db_path=self._db_path, depth=self._clamp_depth(depth),
+            sources=sources, db_path=self._db_path, depth=depth,
             count=count,
         )
         return {"started": True, "sources": sources, "count": count}
@@ -2493,8 +2647,10 @@ class Server:
         since: str | None = None,
         rated: str = "all",
         include_local: bool = False,
+        view: str = "full",
     ) -> None:
-        """Deferred: hands off to InsightsRunner, which replies when done."""
+        """Deferred: hands off to InsightsRunner, which replies when done. *view* "v2" is the
+        redesigned screen's payload (core/insights_v2.py, UI-BUILD-2 C)."""
         self._insights.submit(
             req_id,
             {
@@ -2503,6 +2659,7 @@ class Server:
                 "since": since,
                 "rated": rated,
                 "include_local": include_local,
+                "view": "v2" if view == "v2" else "full",
             },
         )
 
@@ -2605,6 +2762,23 @@ class Server:
         self._db.update_puzzle_session(session_id, score=score, peak_rating=peak_rating)
         return {"ok": True}
 
+    def rpc_puzzle_summary(self, now: str | None = None) -> dict:
+        """Read-only figures for the redesigned Puzzles lobby (UI-BUILD-2 E2;
+        core/puzzle_summary.py): the rating row (Home's), solved of tries, Rush and Survival
+        bests, recent sessions. *now* (ISO) is for tests; the app sends none."""
+        t = HS.parse_time(now) if now else None
+        when = t or datetime.now(timezone.utc)
+        conn = self._db._conn
+        attempts = conn.execute(
+            """SELECT id, session_id, mode, attempted_at, solved, failed, rating_before,
+                      rating_after FROM puzzle_attempts""").fetchall()
+        sessions = conn.execute(
+            """SELECT id, mode, started_at, ended_at, time_limit_s, score
+               FROM puzzle_sessions""").fetchall()
+        cur = conn.execute("SELECT rating FROM puzzle_rating WHERE id = 1").fetchone()
+        return PS.summarize([tuple(a) for a in attempts], [tuple(s) for s in sessions],
+                            float(cur[0]) if cur else None, when)
+
     def rpc_count_theme_puzzles(self, themes: list[str], rating_range: int) -> dict:
         rating, _rd, _v = self._db.get_puzzle_rating()
         return {"count": self._db.count_puzzles_for_themes(themes, rating, rating_range)}
@@ -2625,8 +2799,20 @@ class Server:
         best_dl = 0
         best_acc: float | None = None
         mastered = False
+        # Ruling 18 (2026-11-20): the trainer's words are per colour, from what is recorded.
+        by_color: dict[str, dict] = {}
         for color in ("white", "black"):
             prog = self._db.get_trainer_progress(eco, name, color)
+            by_color[color] = {
+                "attempts": int((prog or {}).get("attempts") or 0),
+                "completions": int((prog or {}).get("completions") or 0),
+                "distinctLines": int((prog or {}).get("distinct_lines") or 0),
+                "bestAccuracy": (prog or {}).get("best_accuracy"),
+                "mastered": bool(prog) and (
+                    int(prog.get("distinct_lines") or 0) >= C.TRAINER_MASTERY_DISTINCT_LINES
+                    and prog.get("best_accuracy") is not None
+                    and prog["best_accuracy"] >= C.TRAINER_MASTERY_MIN_ACCURACY),
+            }
             if not prog:
                 continue
             dl = prog.get("distinct_lines", 0) or 0
@@ -2637,7 +2823,8 @@ class Server:
             if (dl >= C.TRAINER_MASTERY_DISTINCT_LINES
                     and acc is not None and acc >= C.TRAINER_MASTERY_MIN_ACCURACY):
                 mastered = True
-        return {"distinctLines": best_dl, "bestAccuracy": best_acc, "mastered": mastered}
+        return {"distinctLines": best_dl, "bestAccuracy": best_acc, "mastered": mastered,
+                "byColor": by_color}
 
     def _family_progress(
         self, pairs: set[tuple[str, str]], progress: dict
@@ -2680,6 +2867,7 @@ class Server:
                 "threshold": fi.threshold,
                 "available": fi.available,
                 "sampleMoves": fi.sample_moves,
+                "sharedMoves": fi.shared_moves,
                 "drilled": drilled,
                 "mastered": mastered,
             })
@@ -2782,6 +2970,9 @@ class Server:
 
     def _request_engine_move(self) -> None:
         fen = self._session.board.fen()
+        # The engine's thinking time is measured here, from the request to the move's arrival
+        # on this thread (UI-BUILD-3 F); the frontend shows the clock it gets back.
+        self._engine_asked_at = time.monotonic()
         # callback runs on the engine thread → marshal back to the app thread
         self._engine.request_move(
             fen, self._skill,
@@ -2793,10 +2984,15 @@ class Server:
         if session is None or session.over or move not in session.board.legal_moves:
             return
         san = session.board.san(move)
-        end = session.push(move)
+        asked = getattr(self, "_engine_asked_at", None)
+        clock = (session.clock_after(session.board.turn, time.monotonic() - asked)
+                 if asked is not None else None)
+        end = session.push(move, clock)
         _emit("engine_move", {
             "uci": move.uci(), "san": san, "fen": session.board.fen(),
             "end": self._finish(end),
+            # The engine's clock after this move, increment included; null when untimed.
+            "clockMs": round(clock * 1000) if clock is not None else None,
         })
 
     # ── game end / persistence ────────────────────────────────────────────────
