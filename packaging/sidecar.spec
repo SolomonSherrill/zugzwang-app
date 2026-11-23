@@ -2,6 +2,7 @@
 #   pyinstaller --noconfirm --distpath build/sidecar-dist --workpath build/sidecar-work packaging/sidecar.spec
 # One-dir by default; ZUGZWANG_ONEFILE=1 builds the one-file variant (measured in BETA.md).
 import os
+import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -21,9 +22,20 @@ try:
 except ImportError:
     pass
 
+# Windows: cryptography's Rust extension (_rust.pyd, an abi3t wheel on Python 3.15) imports
+# python3t.dll, the stable-ABI DLL beside python.exe, which PyInstaller 6.22.3 does not collect; without it
+# the frozen sidecar dies at import ("DLL load failed while importing _rust", BETA-5 D, the third beta.5 CI run).
+binaries = []
+if sys.platform == "win32":
+    py3t = Path(sys.base_prefix) / "python3t.dll"
+    if not py3t.exists():
+        raise SystemExit(f"error: {py3t} not found; the frozen sidecar could not load cryptography")
+    binaries.append((str(py3t), "."))
+
 a = Analysis(
     [str(ROOT / "sidecar" / "main.py")],
     pathex=[str(ROOT)],
+    binaries=binaries,
     datas=datas,
     hiddenimports=collect_submodules("zugzwang") + collect_submodules("chess"),
     excludes=["tkinter", "test", "unittest", "pydoc_data", "pytest", "mypy"],

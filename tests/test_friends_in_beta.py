@@ -30,6 +30,13 @@ def test_the_packaged_sidecar_bundles_every_asset_folder():
         assert f'"{leaf}"' in spec or any(f'"{leaf.rsplit("/", n)[0]}"' in spec for n in range(1, leaf.count("/"))), leaf
 
 
+def test_the_windows_sidecar_bundles_python3t_dll():
+    """BETA-5 D: cryptography's _rust.pyd (abi3t, Python 3.15) imports python3t.dll, which PyInstaller does
+    not collect; the frozen Windows sidecar failed at import without it (the third beta.5 CI run)."""
+    spec = (ROOT / "packaging/sidecar.spec").read_text()
+    assert 'Path(sys.base_prefix) / "python3t.dll"' in spec and "binaries=binaries" in spec
+
+
 def test_a_packaged_build_has_its_own_keychain_entry():
     assert keystore.SERVICE_DEV == "dev.zugzwang.friends"
     assert keystore.SERVICE_PACKAGED == "dev.zugzwang.desktop.friends"   # the beta's app identifier
