@@ -64,7 +64,7 @@ class App:
     def __init__(self, name: str, root: Path, env_extra: dict) -> None:
         self.name = name
         d = root / name
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=True)     # FRIENDS-2's run restarts an app on its own data
         env = dict(os.environ, ZUGZWANG_DB=str(d / "zugzwang.db"), ZUGZWANG_DATA_DIR=str(d),
                    ZUGZWANG_KEYSTORE="file:" + str(d / "keystore.json"), **env_extra)
         self.proc = subprocess.Popen([sys.executable, str(SIDECAR)], stdin=subprocess.PIPE,
@@ -175,7 +175,7 @@ def main() -> int:
         check("a reserved handle is refused", A.call("friends_check_handle", {"handle": "support"})["reason"] == "reserved")
         no = A.call("friends_signup", {"handle": ha, "ageConfirmed": True, "termsAccepted": False})
         check("sign-up without the Terms box is refused", no.get("error", {}).get("code") == "terms_required")
-        sa = A.call("friends_signup", {"handle": ha, "ageConfirmed": True, "termsAccepted": True, "shareGames": True})
+        sa = A.call("friends_signup", {"handle": ha, "ageConfirmed": True, "termsAccepted": True})
         code_a = sa.get("recoveryCode", "")
         check("A signs up and gets a recovery code", sa.get("handle") == ha and len(code_a) == 44, code_a[:4] + "…")
         sb = B.call("friends_signup", {"handle": hb, "ageConfirmed": True, "termsAccepted": True})

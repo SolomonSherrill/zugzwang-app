@@ -180,8 +180,17 @@ export function resultCell(g: Pick<GamesItem, 'outcome' | 'result'>): { word: st
   return { word: g.result.replace('-', '–'), tone: null }
 }
 
+/** A side's rating as the list shows it: the PGN's, or (FRIENDS-2, R1-R3) a friend game's rating at its
+ *  start, "≈" when it is a Lichess estimate; null when none is known. */
+export function ratingOf(g: Pick<GamesItem, 'whiteElo' | 'blackElo' | 'startRatings'>, side: 'white' | 'black'): string | null {
+  const elo = side === 'white' ? g.whiteElo : g.blackElo
+  if (elo != null) return String(elo)
+  const r = g.startRatings?.[side]
+  return r && r.rating != null ? (r.estimated ? '≈' : '') + r.rating : null
+}
+
 /** The Opponent cell: the name and, in brackets, the rating, or Stockfish's level. */
-export function opponentCell(g: Pick<GamesItem, 'source' | 'playerColor' | 'white' | 'black' | 'whiteElo' | 'blackElo' | 'skillLevel' | 'ladderVersion'>): {
+export function opponentCell(g: Pick<GamesItem, 'source' | 'playerColor' | 'white' | 'black' | 'whiteElo' | 'blackElo' | 'startRatings' | 'skillLevel' | 'ladderVersion'>): {
   name: string
   detail: string | null
 } {
@@ -191,8 +200,7 @@ export function opponentCell(g: Pick<GamesItem, 'source' | 'playerColor' | 'whit
   }
   const side = g.playerColor === 'black' ? 'white' : 'black'
   const name = (side === 'white' ? g.white : g.black)?.trim() || 'Unknown'
-  const elo = side === 'white' ? g.whiteElo : g.blackElo
-  return { name, detail: elo != null ? String(elo) : null }
+  return { name, detail: ratingOf(g, side) }
 }
 
 export function userAccuracy(g: Pick<GamesItem, 'analyzed' | 'playerColor' | 'whiteAccuracy' | 'blackAccuracy'>): number | null {
@@ -230,13 +238,13 @@ export interface PlayerLine {
  *  (Level N)" as before (F5's "old scale" kept) and the user's line is the stored name ("You").
  *  A game whose side is unknown has no "yours": both names bright, both accuracies dim. */
 export function playerLines(
-  g: Pick<GamesItem, 'source' | 'playerColor' | 'white' | 'black' | 'whiteElo' | 'blackElo' | 'skillLevel' | 'ladderVersion' | 'analyzed' | 'whiteAccuracy' | 'blackAccuracy'>,
+  g: Pick<GamesItem, 'source' | 'playerColor' | 'white' | 'black' | 'whiteElo' | 'blackElo' | 'startRatings' | 'skillLevel' | 'ladderVersion' | 'analyzed' | 'whiteAccuracy' | 'blackAccuracy'>,
 ): [PlayerLine, PlayerLine] {
   const line = (color: 'white' | 'black'): PlayerLine => {
     const you = g.playerColor === color
     const engine = g.source === 'local' && !!g.playerColor && !you
     const stored = (color === 'white' ? g.white : g.black)?.trim()
-    const elo = color === 'white' ? g.whiteElo : g.blackElo
+    const elo = ratingOf(g, color)
     const level = g.ladderVersion === null ? `Level ${g.skillLevel}, old scale` : `Level ${g.skillLevel}`
     const acc = g.analyzed ? (color === 'white' ? g.whiteAccuracy : g.blackAccuracy) : null
     return {
@@ -277,6 +285,7 @@ export const SOURCE_LABEL: Record<GameSource, string> = {
   lichess: 'Lichess',
   local: 'Played here',
   imported: 'Imported',
+  friends: 'Friends',
 }
 
 const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']

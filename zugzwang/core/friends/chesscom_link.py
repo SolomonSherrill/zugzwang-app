@@ -26,6 +26,9 @@ from zugzwang.core.friends.client import FriendsError
 
 #: at most one check per pending link in this many milliseconds (on its own; Check now always checks)
 CHECK_EVERY_MS = 15 * 60_000
+#: Check now runs at most once in this many milliseconds (FRIENDS.md ruling Z4, owner 2026-11-22): a press
+#: sooner sends no request and says when it can be pressed again (`checkNowAt`)
+CHECK_NOW_GAP_MS = 30_000
 #: the setting the record is kept under
 KEY = "chesscom_link"
 
@@ -65,8 +68,11 @@ class ChesscomLink:
     def _public(self, rec: dict) -> dict:
         last = rec.get("last_check")
         nxt = (int(last) + CHECK_EVERY_MS) if rec["state"] == "waiting" and last is not None else None
+        forced = rec.get("last_forced")
+        now_at = int(forced) + CHECK_NOW_GAP_MS if forced is not None else None
         return {"state": rec["state"], "username": rec.get("username"), "code": rec.get("code"),
                 "expires": rec.get("expires"), "lastCheck": last, "nextCheck": nxt,
+                "checkNowAt": now_at if now_at is not None and now_at > self.clock() else None,
                 "error": rec.get("error")}
 
     # ── what the user does ─────────────────────────────────────────────────
@@ -91,6 +97,11 @@ class ChesscomLink:
             if not force and (rec["state"] != "waiting"
                               or now < int(rec.get("last_check") or 0) + CHECK_EVERY_MS):
                 return cur
+            if force:
+                # Z4: Check now at most once every 30 s; a press sooner checks nothing
+                if rec.get("last_forced") is not None and now < int(rec["last_forced"]) + CHECK_NOW_GAP_MS:
+                    return cur
+                rec = self._save({**rec, "last_forced": now})
             try:
                 out = self.client().chesscom_verify(rec["username"])
             except FriendsError as exc:

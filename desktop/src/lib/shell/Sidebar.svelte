@@ -134,7 +134,7 @@
         onclick={() => onopengame?.(g.id)}
       >
         <span class="dot {o ?? 'none'}" aria-hidden="true"></span>
-        <span class="grow">{opponent(g)}{#if o}<span class="sr">, {RESULT_WORD[o]}</span>{/if}</span>
+        <span class="grow" title={opponent(g)}>{opponent(g)}{#if o}<span class="sr">, {RESULT_WORD[o]}</span>{/if}</span>
         <span class="date">{when(g.playedAt)}</span>
       </button>
     {/each}

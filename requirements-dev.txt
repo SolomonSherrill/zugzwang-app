@@ -1,1 +1,3 @@
 mypy==2.4.1
+# tools/make_icons.py (BETA-6, LOGO-2): the app icons drawn from the msbm10 glyph
+pillow==13.0.0

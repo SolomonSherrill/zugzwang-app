@@ -668,7 +668,7 @@
     <div class="crumb">
       <button type="button" class="back" onclick={onback}>Games</button>
       <span class="sep" aria-hidden="true">/</span>
-      <span class="title">{game ? `${names.white} vs ${names.black}` : ''}</span>
+      <span class="title" title={game ? `${names.white} vs ${names.black}` : undefined}>{game ? `${names.white} vs ${names.black}` : ''}</span>
     </div>
     <div class="actions">
       <Button kbd="F" onclick={flip}>Flip</Button>

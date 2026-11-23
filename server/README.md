@@ -47,13 +47,46 @@ npx wrangler dev --local --var LINK_SECRET:dev   # http://localhost:8787
 node scripts/live-check.mjs http://localhost:8787
 ```
 
+## Live games (FRIENDS-2)
+
+Two Durable Object classes, both SQLite-backed (the only kind the Workers Free plan has), their WebSockets
+accepted through the Hibernation API: **`Lobby`** (`src/lobby.ts`, one for the server: pending challenges and
+each open app's live connection, `GET /v1/live`) and **`Game`** (`src/game.ts`, one per live game,
+`GET /v1/games/<id>/live`; the rules are `src/gamecore.ts`, legality by chess.js, BSD-2-Clause). Chat is held in
+the game object's memory only. A challenge reaches the challenged app down its lobby socket at once. The
+routes: `PUT /v1/settings` (chat; a `share_games` sent by an older app is ignored: BETA-6 ruling SG1 dropped shared games), `POST /v1/challenges`, `POST /v1/challenges/<id>/accept|decline`,
+`DELETE /v1/challenges/<id>`, `GET /v1/games/<id>` (the view and, once over, the PGN), `POST /v1/games/<id>/ack`
+(saved; the game is deleted once both saved), `POST /v1/games/<id>/rematch`. The socket messages are listed at the top of `src/game.ts`'s `webSocketMessage` and in
+`zugzwang/core/friends/live.py`.
+
+**The Free plan's limits** (read 2026-11-22 from developers.cloudflare.com, Durable Objects "Pricing" and
+"Limits", Workers "Limits"): Durable Objects requests 100,000 a day (WebSocket messages received count 1 in
+20; messages sent are free; alarms count), duration 13,000 GB-s a day (not billed while a hibernatable object
+is idle), rows read 5 million and rows written 100,000 a day (each `setAlarm` a row), 5 GB stored; Workers
+100,000 requests a day and 10 ms of CPU per invocation (the same per message for a Durable Object).
+
+**A 10-minute game (10+0, about 80 plies), estimated from the code:** Worker requests about 8 (challenge,
+accept, two game sockets, two results, two saves), plus the heartbeats there are anyway. Durable Object
+requests about 135: about 12 calls from the Worker and between the objects, about 345 messages received
+(80 moves, about 20 chat lines, a few offers, and the apps' pings every 10 s on four sockets if pings count)
+= 17, and about 105 alarms (one per move for the flag, one every 25 s to look at silent sockets). Rows written
+about 195 (the state once per move, the alarm once per move, the looks at the sockets; an alarm that changes
+nothing writes only the next alarm). Duration: with hibernation only the handlers' time, about 300 events of a
+few ms, under 1 GB-s; even an object that never hibernated would be 600 s × 128 MB = 77 GB-s. CPU per message:
+the position is kept in the state, so no message replays the game (a full replay measured 4.7 ms for 115
+plies in Node, 2026-11-22; `test/gamecore.test.ts` holds a move after a wake under 5 ms). **So the Free plan
+runs it**: rows written bind first, at roughly 500 such games a day (100,000 / 195), then requests at
+roughly 750 (100,000 / about 135); far above what Friends will see in beta.
+
 ## Deploy
 
 **Deployed 2026-11-22** (FRIENDS-1B C; redeployed 2026-11-23 by BETA-5 C: the Chess.com code lasts 24 hours,
 ruling K3): the Worker `zugzwang-friends` over the D1 database
 `zugzwang-friends` (region ENAM), served **only at https://api.zugzwangapp.com**, a Workers custom domain on
-the owner's zone `zugzwangapp.com` (FRIENDS.md ruling V8). `workers_dev = false`: the account has no
-workers.dev subdomain and none is needed. The app's `config.FRIENDS_SERVER_URL` is that address.
+the owner's zone `zugzwangapp.com` (FRIENDS.md ruling V8). `workers_dev = false`: the Worker is not served on workers.dev.
+The account's workers.dev subdomain (`zugzwangapp`) was created on 2026-11-23 by FRIENDS-2 B through the API
+(`PUT /accounts/<id>/workers/subdomain`), because Cloudflare refuses to deploy Durable Objects without one
+(error 10063); nothing is served there. The app's `config.FRIENDS_SERVER_URL` is that address.
 **Email Routing on the domain is the owner's: nothing here touches it** (a custom domain adds only the
 `api` record).
 
@@ -72,7 +105,9 @@ The steps, as run (and to redeploy). Nothing here prints or stores the token any
    ```
 3. **The database** (done once): `npx wrangler d1 create zugzwang-friends` printed the `database_id` that
    `wrangler.toml` holds; then `npx wrangler d1 migrations apply zugzwang-friends --remote` (and again after
-   any new file in `migrations/`).
+   any new file in `migrations/`, **before** the deploy that reads it: FRIENDS-2's `0002_friends2.sql` adds
+   columns the new code selects, and adding them does not disturb the code already deployed). The Durable
+   Object classes are created by the deploy itself (`[[migrations]]` in `wrangler.toml`).
 4. **Your admin key** (done once; ruling A4): `node scripts/admin.mjs keygen` wrote
    `~/.config/zugzwang/friends-admin-key.json` (mode 600; back it up with the updater key, never commit it)
    and printed the `ADMIN_PUBLIC_KEY` that `wrangler.toml` holds.

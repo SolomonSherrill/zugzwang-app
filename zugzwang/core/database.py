@@ -225,7 +225,7 @@ class GameRecord:
     final_fen: str
     opening_eco: str | None
     opening_name: str | None
-    source: str = 'local'    # 'local' | 'imported' | 'lichess' | 'chesscom'
+    source: str = 'local'    # 'local' | 'imported' | 'lichess' | 'chesscom' | 'friends' (FRIENDS-2)
     external_id: str | None = None   # source platform game id (sync dedup)
     speed: str | None = None  # 'bullet' | 'blitz' | 'rapid' | 'classical' | None
     rated: int | None = None  # 1 rated / 0 casual / None unknown (stored as INTEGER)
@@ -235,6 +235,14 @@ class GameRecord:
     # 1 = not the user's game (no configured handle on either side); excluded from
     # every aggregate. Only present after `migrate_attribution` (FIXPLAN O5).
     not_owner: int = 0
+    # FRIENDS-2 (rulings R1-R3): a friend game's ratings at its start, apart from the real rating
+    # fields (the PGN's WhiteElo / BlackElo, which a friend game never has: it is unrated). The
+    # Chess.com rating for the mode, or 1 in *_est with a Lichess-only player's "≈" estimate; NULL
+    # when unknown (shown blank). Only present after v21.
+    start_white_rating: int | None = None
+    start_black_rating: int | None = None
+    start_white_est: int | None = None
+    start_black_est: int | None = None
 
 
 #: The version `_apply_schema` leaves the database at, i.e. the highest
@@ -243,7 +251,7 @@ class GameRecord:
 #: itself by probing `PRAGMA table_info`, which is what lets them run
 #: unconditionally on every open and stay correct on a database whose stored
 #: version says nothing useful. Bump this when adding a migration.
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -512,6 +520,7 @@ class Database:
         self._migrate_v18()
         self._migrate_v19()
         self._migrate_v20()
+        self._migrate_v21()
         # Stamped last, and overwritten rather than inserted-if-absent: the old
         # `INSERT OR IGNORE` meant the first value a database ever received was
         # the only one it ever had. On the live database that value was '1',
@@ -840,6 +849,15 @@ class Database:
                 PRIMARY KEY (run_id, facts_version)
             )""")
 
+    def _migrate_v21(self) -> None:
+        # FRIENDS-2 (rulings G2, R1-R3): games against friends are stored in `games` with the
+        # "friends" source; their ratings at the game's start go in four new columns, apart from the
+        # real rating fields, NULL when unknown. Additive.
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(games)")}
+        for name in ("start_white_rating", "start_black_rating", "start_white_est", "start_black_est"):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE games ADD COLUMN {name} INTEGER")
+
     def _migrate_v20(self) -> None:
         # FRIENDS-1 (FRIENDS.md rulings G1, G5): friends' public games, stored apart from the
         # user's own (`games`), never read by Games or Insights. Additive: two new tables.
@@ -1048,6 +1066,7 @@ class Database:
         source: str = 'local',
         external_id: str | None = None,
         not_owner: bool = False,
+        start_ratings: dict | None = None,
     ) -> int:
         """`player_color` None and `not_owner` need the attribution schema
         (`migrate_attribution`). Before it has run, such a game is refused with
@@ -1078,6 +1097,7 @@ class Database:
                     int(bool(not_owner)),
                 ),
             )
+            self._set_start_ratings(cur.lastrowid, start_ratings)
             self._conn.commit()
             logger.info("Game saved id=%s result=%s source=%s", cur.lastrowid, result,
                         source)
@@ -1102,9 +1122,30 @@ class Database:
                 C.ENGINE_LADDER_VERSION if source == 'local' else None,
             ),
         )
+        self._set_start_ratings(cur.lastrowid, start_ratings)
         self._conn.commit()
         logger.info("Game saved id=%s result=%s source=%s", cur.lastrowid, result, source)
         return cur.lastrowid
+
+    def _set_start_ratings(self, game_id: int, ratings: dict | None) -> None:
+        """FRIENDS-2 (R1-R3): {"white": {"rating": int|None, "estimated": bool}, "black": ...}."""
+        if not ratings:
+            return
+        vals = []
+        for side in ("white", "black"):
+            r = ratings.get(side) or {}
+            rating = r.get("rating")
+            rating = int(rating) if isinstance(rating, (int, float)) and rating > 0 else None
+            vals += [rating, (1 if r.get("estimated") else 0) if rating is not None else None]
+        self._conn.execute(
+            "UPDATE games SET start_white_rating = ?, start_white_est = ?, start_black_rating = ?,"
+            " start_black_est = ? WHERE id = ?", (*vals, game_id))
+
+    def friend_game_saved(self, game_id: str) -> int | None:
+        """The library id of the friend game the server knows as *game_id* (FRIENDS-2), or None."""
+        row = self._conn.execute("SELECT id FROM games WHERE source = 'friends' AND external_id = ?",
+                                 (game_id,)).fetchone()
+        return row[0] if row else None
 
     # ── Platform sync helpers ───────────────────────────────────────────────────
 
@@ -1542,6 +1583,7 @@ class Database:
                    g.termination, g.move_count, g.pgn, g.final_fen,
                    g.opening_eco, g.opening_name, g.source, g.speed,
                    g.ladder_version, g.external_id,
+                   g.start_white_rating, g.start_black_rating, g.start_white_est, g.start_black_est,
                    r.id AS run_id, r.white_accuracy, r.black_accuracy
             FROM games g
             LEFT JOIN analysis_runs r ON r.id = (
@@ -1702,15 +1744,21 @@ class Database:
                     speed          TEXT,
                     rated          INTEGER,
                     ladder_version INTEGER,
-                    not_owner      INTEGER NOT NULL DEFAULT 0
+                    not_owner      INTEGER NOT NULL DEFAULT 0,
+                    start_white_rating INTEGER,
+                    start_black_rating INTEGER,
+                    start_white_est    INTEGER,
+                    start_black_est    INTEGER
                 );
                 INSERT INTO games_new
                     (id, played_at, player_color, skill_level, result, termination,
                      move_count, opening_eco, opening_name, pgn, final_fen, source,
-                     external_id, speed, rated, ladder_version)
+                     external_id, speed, rated, ladder_version, start_white_rating,
+                     start_black_rating, start_white_est, start_black_est)
                 SELECT id, played_at, player_color, skill_level, result, termination,
                        move_count, opening_eco, opening_name, pgn, final_fen, source,
-                       external_id, speed, rated, ladder_version
+                       external_id, speed, rated, ladder_version, start_white_rating,
+                       start_black_rating, start_white_est, start_black_est
                 FROM games;
                 DROP TABLE games;
                 ALTER TABLE games_new RENAME TO games;

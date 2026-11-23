@@ -1,7 +1,8 @@
 """Friends' local settings, in `settings.json` beside the database (key "friends"), never the key.
 
 handle          your handle once signed up (also the server's; kept to show offline)
-share_games     "Share the games you play in Zugzwang" (sign-up and Settings; used from FRIENDS-2)
+share_games     "Share the games you play in Zugzwang": BETA-6 (ruling SG1) hides the switch and sends it nowhere;
+                a stored value is kept as it is, unused, until a screen shows shared games
 appear_offline  "Appear offline" (also sent to the server, ruling C2)
 chat_enabled    "Chat in friend games" (used from FRIENDS-2, ruling H3); on by default
 chesscom_link   a pending Chess.com link: username, code, when it expires, the last check (chesscom_link.py)

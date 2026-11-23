@@ -9,7 +9,13 @@ export default defineConfig(async () => {
     plugins: [
       cloudflareTest({
         wrangler: { configPath: './wrangler.toml' },
-        miniflare: { bindings: { TEST_MIGRATIONS: migrations, LINK_SECRET: 'test-link-secret' } },
+        // FRIENDS-2's times, shortened so the rules that wait (P1, P2, a challenge's expiry) run in seconds
+        miniflare: {
+          bindings: {
+            TEST_MIGRATIONS: migrations, LINK_SECRET: 'test-link-secret',
+            FIRST_MOVE_MS: '1500', DISCONNECT_MS: '700', CHALLENGE_MS: '1500', STALE_MS: '60000',
+          },
+        },
       }),
     ],
     test: { setupFiles: ['./test/apply-migrations.ts'] },

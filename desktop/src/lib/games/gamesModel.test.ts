@@ -223,3 +223,15 @@ describe('opening names (as drawn)', () => {
     expect(shortOpening(null)).toBe('Unknown opening')
   })
 })
+
+describe('FRIENDS-2: a friend game\'s ratings at its start (R1-R3)', () => {
+  it('shows the PGN rating first, else the start rating, ≈ for an estimate, nothing when unknown', async () => {
+    const { ratingOf } = await import('./gamesModel')
+    expect(ratingOf({ whiteElo: 1500, blackElo: null, startRatings: null }, 'white')).toBe('1500')
+    const sr = { white: { rating: 1446, estimated: false }, black: { rating: 1390, estimated: true } }
+    expect(ratingOf({ whiteElo: null, blackElo: null, startRatings: sr }, 'white')).toBe('1446')
+    expect(ratingOf({ whiteElo: null, blackElo: null, startRatings: sr }, 'black')).toBe('≈1390')
+    expect(ratingOf({ whiteElo: null, blackElo: null, startRatings: { white: null, black: null } }, 'black')).toBeNull()
+    expect(ratingOf({ whiteElo: null, blackElo: null }, 'black')).toBeNull()
+  })
+})

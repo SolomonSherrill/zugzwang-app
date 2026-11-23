@@ -15,6 +15,9 @@
 #   e2e      .venv/bin/python sidecar/friends_e2e.py: two app identities (real sidecars) against the
 #            Worker under `wrangler dev --local` and a local Chess.com/Lichess stand-in, no network
 #            (FRIENDS-1 E; in the gate since FRIENDS-1B E, 14 s measured 2026-11-22)
+#   play     .venv/bin/python sidecar/friends_play_e2e.py: games against friends, the same two identities
+#            and local servers, the rules' times shortened, and the test opponent sidecar/friends_bot.py
+#            (FRIENDS-2 E, F; under the 60 s the run's prompt set: 36 s measured 2026-11-22)
 # Full logs go to <main checkout>/.work/gates/<sha>/<check>.log; the summary goes to
 # <main checkout>/.work/gates/<sha>.txt and stdout: one line per check (PASS/FAIL, measured counts,
 # seconds) and, for a failure, the failing tests with at most 40 lines each. Exit 1 on any failure.
@@ -35,7 +38,7 @@ GATES="$MAIN/.work/gates"
 LOGS="$GATES/$SHA"
 SUMMARY="$GATES/$SHA.txt"
 PY="$MAIN/.venv/bin/python"
-ALL="python smoke vitest check cargo scan rpcmap server e2e"
+ALL="python smoke vitest check cargo scan rpcmap server e2e play"
 ONLY=${GATE_ONLY:-$ALL}
 mkdir -p "$LOGS"
 : > "$SUMMARY"
@@ -234,6 +237,18 @@ if wanted e2e && [ -d "$ROOT/server" ]; then
   OK=$(grep -c '^✓' "$L"); BAD=$(grep -c '^✗' "$L")
   if [ $RC -eq 0 ]; then line PASS e2e "$OK checks passed, $BAD failed" "$SECS"; else
     FAILED=1; line FAIL e2e "$OK checks passed, $BAD failed (exit $RC)" "$SECS"
+    grep '^✗' "$L" | head -40 | sed 's/^/    /' | tee -a "$SUMMARY"
+    [ "$BAD" = "0" ] && tail -40 "$L" | sed 's/^/    /' | tee -a "$SUMMARY"
+  fi
+fi
+
+if wanted play && [ -d "$ROOT/server" ]; then
+  server_deps
+  run play "$ROOT" "$PY" sidecar/friends_play_e2e.py
+  L=$LOGS/play.log
+  OK=$(grep -c '^✓' "$L"); BAD=$(grep -c '^✗' "$L")
+  if [ $RC -eq 0 ]; then line PASS play "$OK checks passed, $BAD failed" "$SECS"; else
+    FAILED=1; line FAIL play "$OK checks passed, $BAD failed (exit $RC)" "$SECS"
     grep '^✗' "$L" | head -40 | sed 's/^/    /' | tee -a "$SUMMARY"
     [ "$BAD" = "0" ] && tail -40 "$L" | sed 's/^/    /' | tee -a "$SUMMARY"
   fi

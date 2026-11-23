@@ -73,8 +73,7 @@ class FriendsService:
     def check_handle(self, handle: str) -> dict:
         return self.client().handle_available(handle)
 
-    def signup(self, handle: str, *, age_confirmed: bool, terms_accepted: bool,
-               share_games: bool = False) -> dict:
+    def signup(self, handle: str, *, age_confirmed: bool, terms_accepted: bool) -> dict:
         if not age_confirmed:
             raise FriendsError("age_required", "Confirm you are 13 or older to sign up.")
         if not terms_accepted:
@@ -93,8 +92,14 @@ class FriendsService:
         except BaseException:
             self._store(None)
             raise
-        fsettings.save(handle=out.get("handle", handle), share_games=bool(share_games),
-                       appear_offline=False)
+        # BETA-6 (ruling SG1): sign-up no longer asks about sharing; a stored share_games is kept, unused
+        fsettings.save(handle=out.get("handle", handle), appear_offline=False)
+        # FRIENDS-2: the server honours the chat switch; a failure here is mended by the heartbeat's push
+        try:
+            s = fsettings.load()
+            self.client(ident).set_settings(chat_on=bool(s["chat_enabled"]))
+        except FriendsError as exc:
+            logger.info("friends: the switches were not sent at sign-up: %s", exc.code)
         return {"handle": out.get("handle", handle), "recoveryCode": ident.recovery_code}
 
     def recovery_code(self) -> str:

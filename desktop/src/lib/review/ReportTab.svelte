@@ -136,7 +136,7 @@
   </figure>
 
   <div class="acc">
-    <div class="cols" aria-hidden="true"><span></span>{#each cols as s (s)}<span>{colName(s)}</span>{/each}</div>
+    <div class="cols" aria-hidden="true"><span></span>{#each cols as s (s)}<span title={colName(s)}>{colName(s)}</span>{/each}</div>
     <dl>
       <div class="row top">
         <dt>Accuracy</dt>

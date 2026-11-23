@@ -8,6 +8,8 @@
   import Button from '../ui/Button.svelte'
   import EmptyState from '../ui/EmptyState.svelte'
   import Avatar from './Avatar.svelte'
+  import ChallengePopover from './ChallengePopover.svelte'
+  import { floating } from '../ui/floating'
   import { sparkline } from '../home/homeModel'
   import { friendsApi, type OpeningRow, type Profile, type RecentGame } from './friendsApi'
   import {
@@ -32,6 +34,8 @@
   let asking = $state<'remove' | 'block' | null>(null)
   let acting = $state(false)
   let allTogether = $state(false)
+  // FRIENDS-2 (MinimalFriend-challenge.html): Challenge, for a friend online (C2)
+  let challenging = $state(false)
 
   async function load(refresh = true) {
     try {
@@ -120,6 +124,15 @@
     <div class="actions">
       <span class="upd">{profile?.data.fetching ? 'Updating…' : updated}</span>
       <Button variant="quiet" disabled={!profile || profile.data.fetching} onclick={refresh}>Refresh</Button>
+      {#if profile?.friend.online}
+        <div class="chal">
+          <Button variant="primary" ariaHaspopup="dialog" ariaExpanded={challenging} onclick={() => (challenging = !challenging)}>Challenge</Button>
+          {#if challenging}
+            <div class="veil" role="presentation" onclick={() => (challenging = false)}></div>
+                  <div class="popat" use:floating={{ gap: 6 }}><ChallengePopover {handle} online={profile.friend.online} onclose={() => (challenging = false)} /></div>
+          {/if}
+        </div>
+      {/if}
       <div class="more">
         <Button variant="quiet" ariaLabel="More: Remove friend, Block" ariaExpanded={menu} ariaHaspopup="menu" onclick={toggleMenu}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg>
@@ -281,7 +294,7 @@
         <section class="panel" aria-labelledby="rg-h">
           <div class="ph"><h2 id="rg-h">{handle}'s recent games</h2><span class="muted">Not analysed. Analyse any of them on this computer.</span></div>
           {#if profile.recent.length}
-            <div class="rrow colhead" aria-hidden="true"><span>{handle}</span><span>Players</span><span>Opening</span><span>Time</span><span class="r">Date</span><span></span></div>
+            <div class="rrow colhead" aria-hidden="true"><span class="el" title={handle}>{handle}</span><span>Players</span><span>Opening</span><span>Time</span><span class="r">Date</span><span></span></div>
             {#each profile.recent as g (g.id)}
               {@const side = friendSide(g)}
               <!-- the row opens Analyse, as its button does (the button is the keyboard's way) -->
@@ -315,6 +328,23 @@
 </div>
 
 <style>
+  /* the popover's backdrop: a click outside closes it, and what lies under it is out of reach meanwhile */
+  .veil {
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    cursor: default;
+  }
+  .chal {
+    position: relative;
+  }
+  .popat {
+    position: fixed;
+    z-index: 30;
+  }
   .screen {
     display: flex;
     flex-direction: column;

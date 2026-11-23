@@ -23,7 +23,7 @@ describe('health and routing', () => {
     expect((await c.send('GET', '/v1/nothing')).status).toBe(404)
     expect((await c.send('PATCH', '/v1/me')).status).toBe(405)
   })
-  it('has exactly the six tables of ruling V1', async () => {
+  it('has exactly the six tables of ruling V1 (FRIENDS-2\'s shared_games dropped, BETA-6 SG1)', async () => {
     const t = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'd1_%' AND name NOT LIKE '_cf%' AND name NOT LIKE 'sqlite_%' ORDER BY name").all<{ name: string }>()
     expect(t.results.map((r) => r.name)).toEqual([...TABLES].sort())
   })

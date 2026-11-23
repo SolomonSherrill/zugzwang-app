@@ -14,7 +14,9 @@
      */
     "allowJs": true,
     "checkJs": true,
-    "moduleDetection": "force"
+    "moduleDetection": "force",
+    /* BETA-6: src's browser tests import the harness's node scripts (harness/beta6Checks.ts), which name .ts files */
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte"]
 }

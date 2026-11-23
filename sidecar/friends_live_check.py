@@ -53,6 +53,8 @@ def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="zz-friends-live-"))
     tag = secrets.token_hex(3)
     ha, hb = f"live-a-{tag}", f"live-b-{tag}"
+    # BETA-6: the server has real users now, so the tables are compared with their counts before the run
+    before = None if a.no_tables else remote_counts()
     apps: list = []
     signed: list = []
     try:
@@ -87,7 +89,8 @@ def main() -> int:
         E.check("A's handle is free again", B.call("friends_check_handle", {"handle": ha})["available"] is True)
         if not a.no_tables:
             counts = remote_counts()
-            E.check("every server table is empty after", all(v == 0 for v in counts.values()), json.dumps(counts))
+            E.check("every server table is as it was before the run (nothing left of A or B)", counts == before,
+                    json.dumps({"before": before, "after": counts}))
     except Exception as exc:
         E.check("no exception", False, repr(exc))
         for x in signed:   # never leave a test account behind

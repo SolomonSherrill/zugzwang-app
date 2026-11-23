@@ -59,6 +59,64 @@ export class Client {
     const res = await handle(req, (o.env ?? env) as Env, now)
     return { status: res.status, body: (await res.json()) as Record<string, any> }
   }
+
+  /** a signed WebSocket (FRIENDS-2): the lobby (/v1/live) or a game (/v1/games/<id>/live) */
+  async live(path: string, o: SendOptions = {}): Promise<Live> {
+    const now = o.now ?? Date.now()
+    const time = String(now)
+    const nonce = b64urlEncode(crypto.getRandomValues(new Uint8Array(16)))
+    const msg = canonical('GET', path, time, nonce, await sha256Hex(''))
+    const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, this.keys.privateKey, new TextEncoder().encode(msg)))
+    const headers = { Upgrade: 'websocket', 'CF-Connecting-IP': this.ip, 'X-Zz-Key': this.pub, 'X-Zz-Time': time, 'X-Zz-Nonce': nonce, 'X-Zz-Sig': b64urlEncode(sig) }
+    const res = await handle(new Request('https://friends.test' + path, { headers }), (o.env ?? env) as Env, now)
+    if (res.status !== 101 || !res.webSocket) throw new Error(`live ${path}: ${res.status} ${await res.text()}`)
+    return new Live(res.webSocket)
+  }
+}
+
+/** one side of a WebSocket, its messages kept in order, with waits for the next that matches */
+export class Live {
+  msgs: Record<string, any>[] = []
+  closed = false
+  private waiters: { pred: (m: Record<string, any>) => boolean; resolve: (m: Record<string, any>) => void }[] = []
+  private seen = 0
+  constructor(readonly ws: WebSocket) {
+    ws.accept()
+    ws.addEventListener('message', (e) => {
+      const m = JSON.parse(typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data as ArrayBuffer))
+      this.msgs.push(m)
+      for (const w of [...this.waiters]) if (w.pred(m)) {
+        this.waiters.splice(this.waiters.indexOf(w), 1)
+        w.resolve(m)
+      }
+    })
+    ws.addEventListener('close', () => (this.closed = true))
+  }
+  send(m: Record<string, unknown>): void {
+    this.ws.send(JSON.stringify(m))
+  }
+  /** the first message after the last one taken that matches, waiting up to ms */
+  next(pred: (m: Record<string, any>) => boolean = () => true, ms = 3000): Promise<Record<string, any>> {
+    for (let i = this.seen; i < this.msgs.length; i++) if (pred(this.msgs[i])) {
+      this.seen = i + 1
+      return Promise.resolve(this.msgs[i])
+    }
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('no such message in ' + ms + ' ms: ' + JSON.stringify(this.msgs.slice(-3)))), ms)
+      this.waiters.push({ pred, resolve: (m) => { clearTimeout(t); this.seen = this.msgs.indexOf(m) + 1; resolve(m) } })
+    })
+  }
+  /** the latest state message */
+  state(): Record<string, any> | undefined {
+    return [...this.msgs].reverse().find((m) => m.t === 'state')
+  }
+  close(): void {
+    try {
+      this.ws.close(1000, 'bye')
+    } catch {
+      /* closed */
+    }
+  }
 }
 
 export async function signup(handleName: string): Promise<Client> {

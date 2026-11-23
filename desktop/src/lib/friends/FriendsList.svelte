@@ -1,8 +1,11 @@
 <script lang="ts">
   /** Friends, signed in (MinimalFriends.html): add by handle, requests, the friends list (online
-   *  first), and your linked accounts until both are proven. Challenge buttons wait for FRIENDS-2. */
+   *  first), and your linked accounts until both are proven. FRIENDS-2: a Challenge button on each online friend's
+   *  row opens the Challenge popover (MinimalFriends-challenge.html; ruling C2: none for a friend offline). */
   import Button from '../ui/Button.svelte'
   import Avatar from './Avatar.svelte'
+  import ChallengePopover from './ChallengePopover.svelte'
+  import { floating } from '../ui/floating'
   import LinkedAccounts from './LinkedAccounts.svelte'
   import { friendsApi, type FriendsList, type Linked } from './friendsApi'
   import { ago, dayLabel, handleShape, onlineFirst, presence, ratingCell, recordLabel } from './friendsModel'
@@ -56,6 +59,8 @@
       note = { text: errorText(e), bad: true }
     }
   }
+  // FRIENDS-2: the Challenge popover, open for one friend at a time
+  let challenging = $state<string | null>(null)
 </script>
 
 <main class="page">
@@ -103,8 +108,8 @@
       <ul>
         {#each friends as f (f.handle)}
           {@const p = presence(f, now)}
-          <li>
-            <button type="button" class="grid row" onclick={() => onopen(f.handle)} aria-label="{f.handle}, {p.text}">
+          <li class="fli">
+            <button type="button" class="grid row four" onclick={() => onopen(f.handle)} aria-label="{f.handle}, {p.text}">
               <span class="who">
                 <Avatar handle={f.handle} size={28} online={p.online} />
                 <span class="names"><span class="el strong">{f.handle}</span><span class="el sub" class:on={p.online}>{p.text}</span></span>
@@ -121,8 +126,18 @@
               </span>
               {#if f.record.games}<span class="fig">{recordLabel(f.record)}</span>{:else}<span class="muted">No games yet</span>{/if}
               <span class="muted">{dayLabel(f.lastGame, new Date(now))}</span>
-              <span class="end"></span>
             </button>
+            <span class="end">
+              {#if p.online}
+                <Button size="sm" ariaHaspopup="dialog" ariaExpanded={challenging === f.handle} onclick={() => (challenging = challenging === f.handle ? null : f.handle)}
+                  >Challenge</Button
+                >
+                {#if challenging === f.handle}
+                  <div class="veil" role="presentation" onclick={() => (challenging = null)}></div>
+                  <div class="popat" use:floating><ChallengePopover handle={f.handle} online={p.online} onclose={() => (challenging = null)} /></div>
+                {/if}
+              {/if}
+            </span>
           </li>
         {/each}
       </ul>
@@ -146,6 +161,55 @@
 </main>
 
 <style>
+  /* the popover's backdrop: a click outside closes it, and what lies under it is out of reach meanwhile */
+  .veil {
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    cursor: default;
+  }
+  /* FRIENDS-2: the row's link and its Challenge cell side by side, the columns as the header's five */
+  .fli {
+    display: flex;
+    align-items: stretch;
+    position: relative;
+    border-top: 1px solid var(--divider);
+  }
+  .fli:hover {
+    background: var(--surface);
+  }
+  .fli .row {
+    flex: 1;
+    min-width: 0;
+    border-top: 0;
+    padding-right: 0;
+  }
+  .fli .row:hover {
+    background: transparent;
+  }
+  .grid.four {
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.2fr) 120px 84px;
+  }
+  .fli > .end {
+    flex: none;
+    box-sizing: content-box;
+    width: 104px;
+    margin-left: 20px;
+    padding-right: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    position: relative;
+  }
+  /* placed by use:floating (position: fixed at the row's Challenge cell), so the panel's overflow: hidden cannot
+     clip it; below the row, or above it when there is no room below (BETA-6 B) */
+  .popat {
+    position: fixed;
+    z-index: 30;
+  }
   .page {
     padding: 20px 28px 28px;
     display: flex;

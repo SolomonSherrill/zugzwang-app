@@ -45,7 +45,7 @@ class GamesQuery:
     result: str = "all"          # all | win | draw | loss
     color: str = "all"           # all | white | black
     speeds: Sequence[str] = field(default_factory=tuple)
-    source: str = "all"          # all | local | chesscom | lichess | imported
+    source: str = "all"          # all | local | chesscom | lichess | imported | friends
     rated: str = "all"           # all | rated | casual
     analysis: str = "all"        # all | analyzed | unanalyzed
     opening: str = ""
@@ -93,6 +93,11 @@ class Row:
     run_id: int | None
     white_accuracy: float | None
     black_accuracy: float | None
+    # FRIENDS-2: a friend game's ratings at its start (R1-R3), NULL when unknown
+    start_white_rating: int | None = None
+    start_white_est: int | None = None
+    start_black_rating: int | None = None
+    start_black_est: int | None = None
     # derived once
     h: dict = field(default_factory=dict)
     t: datetime | None = None
@@ -151,7 +156,8 @@ def load_rows(conn) -> list[Row]:
                CASE WHEN instr(g.pgn, char(10) || char(10)) > 0
                     THEN substr(g.pgn, 1, instr(g.pgn, char(10) || char(10)))
                     ELSE g.pgn END AS head,
-               r.id AS run_id, r.white_accuracy, r.black_accuracy
+               r.id AS run_id, r.white_accuracy, r.black_accuracy,
+               g.start_white_rating, g.start_white_est, g.start_black_rating, g.start_black_est
         FROM games g
         LEFT JOIN analysis_runs r ON r.id = (
             SELECT s.id FROM analysis_runs s
@@ -258,6 +264,14 @@ def _sorted(rows: list[Row], sort: str) -> list[Row]:
     return rows                                                      # recent: as loaded
 
 
+def start_ratings(w: int | None, w_est: int | None, b: int | None, b_est: int | None) -> dict | None:
+    """A friend game's ratings at its start (FRIENDS-2), or None when neither is known."""
+    if w is None and b is None:
+        return None
+    return {"white": {"rating": w, "estimated": bool(w_est)} if w is not None else None,
+            "black": {"rating": b, "estimated": bool(b_est)} if b is not None else None}
+
+
 def game_item(r: Row) -> dict:
     """One listed game, in `list_games`'s field names plus `timeControl` and `outcome`."""
     return {
@@ -269,6 +283,9 @@ def game_item(r: Row) -> dict:
         "rated": r.rated, "timeControl": r.time_control,
         "white": r.name("white"), "black": r.name("black"),
         "whiteElo": r.elo("white"), "blackElo": r.elo("black"),
+        # FRIENDS-2 (R1-R3): stored apart from the real ratings; "≈" when estimated
+        "startRatings": start_ratings(r.start_white_rating, r.start_white_est,
+                                      r.start_black_rating, r.start_black_est),
         "whiteAccuracy": r.white_accuracy if r.run_id is not None else None,
         "blackAccuracy": r.black_accuracy if r.run_id is not None else None,
         "analyzed": r.run_id is not None,

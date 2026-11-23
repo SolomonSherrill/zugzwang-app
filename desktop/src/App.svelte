@@ -25,7 +25,10 @@
   import FriendsView from './lib/friends/FriendsView.svelte'
   import FriendProfile from './lib/friends/FriendProfile.svelte'
   import { friendsApi } from './lib/friends/friendsApi'
-  import { incomingCount, startFriends } from './lib/friends/friendsState.svelte'
+  import { incomingCount, startFriends, friendsState } from './lib/friends/friendsState.svelte'
+  import ChallengeBanners from './lib/friends/ChallengeBanners.svelte'
+  import FriendGame from './lib/play/FriendGame.svelte'
+  import { incomingChallenges, live, liveHooks, startLive } from './lib/friends/live.svelte'
   import UpdateCheck from './lib/UpdateCheck.svelte'
 
   type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'insights' | 'friends' | 'friend' | 'settings'
@@ -96,6 +99,12 @@
     reviewTarget = { gameId, ply: lastPly, action: 'analyse' }
     route = 'review'
   }
+  /** Review the game (a friend game, saved to the library): it is analysed there as any game */
+  function openFromPlayFriend(gameId: number, lastPly: number) {
+    reviewOrigin = 'play'
+    reviewTarget = { gameId, ply: lastPly }
+    route = 'review'
+  }
   /** The breadcrumb's first word on Analyse a position: where Back returns. */
   const ORIGIN_LABEL: Partial<Record<Route, string>> = {
     home: 'Home', games: 'Games', play: 'Play', puzzles: 'Puzzles', trainer: 'Openings', insights: 'Insights', settings: 'Settings',
@@ -133,6 +142,11 @@
   )
   onMount(() => {
     if (SHOW_FRIENDS) startFriends()
+  })
+  // FRIENDS-2: the live connection once signed in; a game that starts opens Play
+  liveHooks.ongamestart = () => navTo('play')
+  $effect(() => {
+    if (SHOW_FRIENDS && backend === 'up' && friendsState.status?.signedIn) startLive()
   })
   let recent = $state<GameSummary[] | null>(null)
   $effect(() => {
@@ -203,7 +217,7 @@
     active={sidebarActive}
     showOpenings={SHOW_TRAINER}
     showFriends={SHOW_FRIENDS}
-    friendsCount={SHOW_FRIENDS ? incomingCount() : 0}
+    friendsCount={SHOW_FRIENDS ? incomingCount() + incomingChallenges().length : 0}
     recent={route === 'review' ? recent : null}
     currentGameId={reviewTarget?.gameId ?? null}
     onnav={(r) => navTo(r as Route)}
@@ -215,10 +229,25 @@
     {#if spawnError}
       <div class="spawn-error">Could not start the engine sidecar: {spawnError}</div>
     {:else}
+      <!-- FRIENDS-2: challenges to you, on any screen (ruling S2); BETA-6 (S6): a floating card, in no screen's flow -->
+      {#if SHOW_FRIENDS}<ChallengeBanners />{/if}
       <!-- Play stays mounted so a running game (and its clocks) survives navigation -->
-      <div class="screen" style:display={route === 'play' ? '' : 'none'}>
-        <PlayView bind:this={play} onreview={openFromPlay} onsettings={() => navTo('settings')} active={route === 'play'} />
+      <div class="screen" style:display={route === 'play' && !live.activeId ? '' : 'none'}>
+        <PlayView
+          bind:this={play}
+          onreview={openFromPlay}
+          onsettings={() => navTo('settings')}
+          onfriends={() => navTo('friends')}
+          active={route === 'play' && !live.activeId}
+        />
       </div>
+      {#if SHOW_FRIENDS && live.activeId}
+        <!-- FRIENDS-2: a game against a friend, on Play's screen while it lasts; mounted on every screen so
+             its clocks and chat keep up -->
+        <div class="screen" style:display={route === 'play' ? '' : 'none'}>
+          <FriendGame onreview={openFromPlayFriend} active={route === 'play'} />
+        </div>
+      {/if}
       {#if route === 'home'}
         <HomeView
           showTrain={SHOW_TRAINER}
@@ -347,6 +376,8 @@
   }
   .screen {
     height: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .spawn-error {
     height: 100%;

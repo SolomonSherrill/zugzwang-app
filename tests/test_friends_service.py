@@ -27,6 +27,7 @@ class FakeFriendsServer:
     def __init__(self):
         self.accounts = {}      # key -> handle
         self.seen = []
+        self.bodies = []        # (method, path, JSON body) of each signed request
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -58,6 +59,7 @@ class FakeFriendsServer:
                     return self._reply(401, {"error": "stale", "message": "stale"})
                 outer.seen.append((method, self.path))
                 data = json.loads(body or b"{}")
+                outer.bodies.append((method, self.path, data))
                 if self.path == "/v1/signup":
                     if data.get("handle", "").lower() in {v.lower() for v in outer.accounts.values()}:
                         return self._reply(409, {"error": "handle_taken", "message": "That handle is taken."})
@@ -72,6 +74,8 @@ class FakeFriendsServer:
                     return self._reply(200, {"status": "deleted"})
                 if self.path == "/v1/friends":
                     return self._reply(200, {"friends": [], "incoming": [], "outgoing": [], "blocked": []})
+                if self.path == "/v1/settings" and method == "PUT":
+                    return self._reply(200, {"chat_on": bool(data.get("chat_on"))})
                 return self._reply(404, {"error": "not_found", "message": "no"})
 
             def do_GET(self):  # noqa: N802
@@ -82,6 +86,9 @@ class FakeFriendsServer:
 
             def do_DELETE(self):  # noqa: N802
                 self._handle("DELETE")
+
+            def do_PUT(self):  # noqa: N802
+                self._handle("PUT")
 
         class S(ThreadingHTTPServer):
             def server_bind(self):
@@ -105,11 +112,16 @@ def test_sign_up_keeps_the_key_in_the_keystore_and_never_the_database(fake, tmp_
     ks = FileKeystore(tmp_path / "keys.json")
     svc = FriendsService(keystore=ks, base=fake.base)
     assert svc.check_handle("pawn_one") == {"handle": "pawn_one", "available": True, "reason": None}
-    out = svc.signup("pawn_one", age_confirmed=True, terms_accepted=True, share_games=True)
+    # BETA-6 ruling SG1: a sharing switch stored before is kept as it is, unused; sign-up does not touch it
+    fsettings.save(share_games=True)
+    out = svc.signup("pawn_one", age_confirmed=True, terms_accepted=True)
     assert out["handle"] == "pawn_one"
     assert Identity.from_code(out["recoveryCode"]).secret.hex() == ks.get()
     st = svc.state()
     assert st["signedIn"] and st["handle"] == "pawn_one" and st["settings"]["shareGames"] is True
+    # …and is sent nowhere: the server is told only the chat switch
+    assert ("PUT", "/v1/settings", {"chat_on": True}) in fake.bodies
+    assert all("share_games" not in json.dumps(b) for _m, _p, b in fake.bodies)
     assert fake.seen[0] == ("POST", "/v1/signup")
     # the database and the settings file never hold the secret
     for p in tmp_path.rglob("*"):

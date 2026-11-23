@@ -27,6 +27,9 @@
   import { accounts } from '../settings.svelte'
   import { commandMenu, registerCommands, type Command } from '../shell/commands.svelte'
   import { playState } from './playState.svelte'
+  import FriendSetup from './FriendSetup.svelte'
+  import { SHOW_FRIENDS } from '../build'
+  import { friendsState } from '../friends/friendsState.svelte'
   import {
     LEVEL_MAX, PLAY_TIME_CONTROLS, TC_GROUPS, clockAfterMove, clockText, crumbTitle, engineClockAfter, engineStrip, moveRows, openingSub,
     readPrefs, resultSentence, tcLabel, tcPgn, writePrefs, youStrip,
@@ -44,8 +47,18 @@
     onsettings: () => void
     /** true while the Play route is visible: gates the keys and Review opening by itself */
     active?: boolean
+    /** FRIENDS-2: the Friends screen (Play's "A friend" with no friends yet) */
+    onfriends?: () => void
   }
-  let { onreview, onsettings, active = false }: Props = $props()
+  let { onreview, onsettings, active = false, onfriends }: Props = $props()
+  // FRIENDS-2 D (MinimalPlaySetup-friend.html): against Stockfish or a friend, once signed in to Friends
+  let against = $state<'stockfish' | 'friend'>('stockfish')
+  const friendsOn = $derived(SHOW_FRIENDS && !!friendsState.status?.signedIn)
+  const vsFriend = $derived(friendsOn && against === 'friend')
+  /** choose against whom, from outside (a friend's "Challenge" elsewhere lands here with a friend) */
+  export function chooseFriend() {
+    against = 'friend'
+  }
 
   const chess = new Chess()
   let board: Board | undefined = $state()
@@ -369,7 +382,8 @@
     } else if (e.key === 'Enter') {
       // ↵ is the panel's primary action; a focused button other than a choice keeps its own
       if (t && (t.tagName === 'A' || (t.tagName === 'BUTTON' && t.getAttribute('role') !== 'radio'))) return
-      if (phase === 'setup') void startGame()
+      if (phase === 'setup' && !vsFriend) void startGame()
+      else if (phase === 'setup') return
       else if (phase === 'over') openReview()
       else return
     } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && started && t?.getAttribute('role') !== 'radio') {
@@ -384,7 +398,7 @@
   function provide(): Command[] {
     if (!active) return []
     const out: Command[] = []
-    if (phase === 'setup') out.push({ id: 'play-start', group: 'Actions', label: 'Start game', kbd: '↵', run: () => void startGame() })
+    if (phase === 'setup' && !vsFriend) out.push({ id: 'play-start', group: 'Actions', label: 'Start game', kbd: '↵', run: () => void startGame() })
     if (inGame) {
       out.push({ id: 'play-draw', group: 'Actions', label: 'Offer a draw', run: () => requestAction('draw') })
       out.push({ id: 'play-resign', group: 'Actions', label: 'Resign', run: () => requestAction('resign') })
@@ -612,8 +626,31 @@
       </aside>
     {:else}
       <aside aria-label="New game">
-        <div class="ptitle"><h2>New game against Stockfish</h2></div>
-        {#if phase === 'boot'}
+        <div class="ptitle"><h2>{vsFriend ? 'New game against a friend' : 'New game against Stockfish'}</h2></div>
+        {#snippet againstSeg()}
+          {#if friendsOn}
+            <div>
+              <div id="vs-l" class="lbl">Against</div>
+              <div class="seg" role="radiogroup" aria-labelledby="vs-l">
+                {#each [['stockfish', 'Stockfish'], ['friend', 'A friend']] as [v, label] (v)}
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={against === v}
+                    tabindex={against === v ? 0 : -1}
+                    data-v={v === 'stockfish' ? 0 : 1}
+                    onclick={() => (against = v as 'stockfish' | 'friend')}
+                    onkeydown={(e) => radioKeys(e, [0, 1], against === 'stockfish' ? 0 : 1, (n) => (against = n === 0 ? 'stockfish' : 'friend'))}
+                    >{label}</button
+                  >
+                {/each}
+              </div>
+            </div>
+          {/if}
+        {/snippet}
+        {#if vsFriend}
+          <FriendSetup active={active && phase === 'setup'} {onfriends} head={againstSeg} />
+        {:else if phase === 'boot'}
           <div class="pad"><EmptyState sentence="Starting the engine…" /></div>
         {:else if phase === 'noengine'}
           <div class="pad">
@@ -625,6 +662,7 @@
           </div>
         {:else}
           <div class="form">
+            {@render againstSeg()}
             {#if lostAt !== null}
               <EmptyState
                 tone="error"

@@ -46,7 +46,7 @@
     {:else}
       <span class="avatar" class:you={you || name === 'You'} aria-hidden="true">{initial}</span>
     {/if}
-    <span class="name"
+    <span class="name" title={name}
       >{name}{#if rating != null && rating !== ''}{' '}<span class="rating">({rating})</span>{/if}</span
     >
     {#if note}<span class="you-word">{note}</span>{:else if youWord}<span class="you-word">You</span>{/if}

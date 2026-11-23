@@ -23,6 +23,7 @@ import zugzwang.config as C
 from zugzwang.core.friends import platform_games as PG
 from zugzwang.core.friends import scouting
 from zugzwang.core.friends.client import FriendsError
+from zugzwang.core.friends.live import LiveLink
 from zugzwang.core.friends.service import FriendsService
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,46 @@ class FriendsRunner:
         self._started = False
         self._stop = threading.Event()
         self.heartbeat_s = C.FRIENDS_HEARTBEAT_S
+        self._live: LiveLink | None = None
+        self._settings_pushed = False
+
+    # ── FRIENDS-2: the live connection (core/friends/live.py) ────────────────
+    @property
+    def live(self) -> LiveLink:
+        if self._live is None:
+            self._live = LiveLink(lambda: self.service.client(), self.emit, self._save_on_app)
+        return self._live
+
+    def _save_on_app(self, gid: str, state: dict, ratings: dict | None) -> int | None:
+        """Save a finished friend game on the app thread (which alone writes the database)."""
+        done = threading.Event()
+        box: dict = {"id": None, "error": None}
+
+        def run() -> None:
+            try:
+                box["id"] = self._save_friend_game(gid, state, ratings)
+            except Exception as exc:  # reported to the caller's thread
+                box["error"] = exc
+            finally:
+                done.set()
+
+        self.post_call(run)
+        if not done.wait(60):
+            raise RuntimeError("the app thread did not save the game in 60 s")
+        if box["error"] is not None:
+            raise box["error"]
+        return box["id"]
+
+    #: set by the sidecar: saves a finished friend game to the library (app thread)
+    _save_friend_game: Callable = staticmethod(lambda gid, state, ratings: None)
+
+    def push_settings(self) -> None:
+        """Send "Chat in friend games" to the server (FRIENDS-2), so it honours it; on the server thread.
+        "Share the games you play in Zugzwang" is not sent (BETA-6 ruling SG1: kept locally, unused)."""
+        from zugzwang.core.friends import settings as fsettings
+        s = fsettings.load()
+        self.service.client().set_settings(chat_on=bool(s["chat_enabled"]))
+        self._settings_pushed = True
 
     @property
     def service(self) -> FriendsService:
@@ -75,6 +116,8 @@ class FriendsRunner:
         threading.Thread(target=self._beat, name="friends-heartbeat", daemon=True).start()
 
     def shutdown(self) -> None:
+        if self._live is not None:
+            self._live.stop()
         self._stop.set()
         self._jobs.put(None)
         self._fetches.put(None)
@@ -114,6 +157,9 @@ class FriendsRunner:
                     def beat() -> None:
                         try:
                             self.service.heartbeat()
+                            if not self._settings_pushed:
+                                self.push_settings()
+                            self.live.ensure()
                             lst = self.service.friends()
                             self.emit("friends_update", {
                                 "incoming": len(lst.get("incoming", [])),

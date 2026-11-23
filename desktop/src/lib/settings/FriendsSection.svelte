@@ -27,7 +27,7 @@
       error = errorText(e)
     }
   }
-  async function set(p: { shareGames?: boolean; chatEnabled?: boolean }) {
+  async function set(p: { chatEnabled?: boolean }) {
     try {
       friendsState.status = await friendsApi.setSettings(p)
     } catch (e) {
@@ -76,12 +76,8 @@
       {#if code}<span class="code">{code}</span>{:else}<span class="dots" aria-label="Hidden">••••-••••-••••-••••-••••</span>{/if}
       <Button size="sm" onclick={toggleCode}>{code ? 'Hide' : 'Show'}</Button>
     </div>
-    <Switch
-      checked={st.settings.shareGames}
-      label="Share the games you play in Zugzwang"
-      sub="Games against friends and Stockfish. Your Chess.com and Lichess games are public already."
-      onchange={(v) => set({ shareGames: v })}
-    />
+    <!-- BETA-6 (FRIENDS.md ruling SG1): "Share the games you play in Zugzwang" is hidden until a screen shows
+         shared games; its stored value is kept, unused -->
     <Switch checked={st.settings.appearOffline} label="Appear offline" sub="Friends see you as offline and can’t challenge you." onchange={offline} />
     <Switch
       checked={st.settings.chatEnabled}

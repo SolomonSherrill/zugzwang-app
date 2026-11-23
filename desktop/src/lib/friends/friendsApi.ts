@@ -32,6 +32,7 @@ export interface FriendsStatus {
   keystore: { kind: string; label: string; available: boolean }
   signedIn: boolean
   handle: string | null
+  /** shareGames: the stored value of the hidden sharing switch, unused (BETA-6 ruling SG1) */
   settings: { shareGames: boolean; appearOffline: boolean; chatEnabled: boolean }
   ratingSource: { source: string; url: string; retrieved: string }
 }
@@ -162,14 +163,115 @@ export interface ChesscomLink {
   error?: string | null
   /** a check was already running, so this call made none */
   checking?: boolean
+  /** Check now can be pressed again at this time (Unix ms; FRIENDS.md ruling Z4: once every 30 s); null when it can now */
+  checkNowAt?: number | null
   verified?: boolean
 }
+
+// ── FRIENDS-2: challenges and live games (core/friends/live.py; server/README.md "Live games") ──────────
+
+export type TimeControl = '1+0' | '2+1' | '3+0' | '3+2' | '5+0' | '5+3' | '10+0' | '10+5' | '15+10' | '30+0'
+/** the ten live time controls of ruling C1, grouped as the mockups list them */
+export const TIME_CONTROLS: { group: string; tcs: TimeControl[] }[] = [
+  { group: 'Bullet', tcs: ['1+0', '2+1'] },
+  { group: 'Blitz', tcs: ['3+0', '3+2', '5+0', '5+3'] },
+  { group: 'Rapid', tcs: ['10+0', '10+5', '15+10'] },
+  { group: 'Classical', tcs: ['30+0'] },
+]
+export type Colour = 'white' | 'black'
+export type AskedColour = Colour | 'random'
+export interface Challenge {
+  id: string
+  from_handle: string
+  to_handle: string
+  tc: TimeControl
+  /** the colour the challenger asked for */
+  colour: AskedColour
+  created: number
+  expires: number
+  rematch_of: string | null
+}
+export interface LiveGameRow {
+  id: string
+  white_handle: string
+  black_handle: string
+  tc: string
+  status: 'live' | 'over'
+  created: number
+}
+export interface LiveSnapshot {
+  connected: boolean
+  challenges: Challenge[]
+  games: LiveGameRow[]
+}
+export interface StartRating {
+  rating: number | null
+  estimated: boolean
+  site?: Site | null
+  speed?: string
+}
+export type StartRatings = Record<Colour, StartRating | null>
+export interface GameState {
+  t: 'state'
+  id: string
+  you: Colour
+  white: { handle: string; linked: Linked[] }
+  black: { handle: string; linked: Linked[] }
+  tc: TimeControl
+  speed: 'bullet' | 'blitz' | 'rapid'
+  created: number
+  ended: number | null
+  moves: string[]
+  sans: string[]
+  fen: string
+  turn: Colour
+  status: 'waiting' | 'playing' | 'over'
+  result: '1-0' | '0-1' | '1/2-1/2' | '*' | null
+  termination: string | null
+  termination_text: string | null
+  winner: Colour | null
+  /** each side's time left at server_time */
+  clock: Record<Colour, number>
+  running: Colour | null
+  server_time: number
+  first_deadline: number | null
+  draw_offer: Colour | null
+  can_offer_draw: boolean
+  /** when you may claim the win or call a draw (P1), or null */
+  claim_at: number | null
+  opponent: { connected: boolean; gone_since: number | null; chat_on: boolean }
+  chat_on: boolean
+  chat_blocked: boolean
+  muted: boolean
+  rematch_from: Colour | null
+  acked: boolean
+  pgn: string | null
+}
+export interface ChatLine {
+  from: Colour
+  handle: string
+  text: string
+  at: number
+}
+export interface LiveGameView {
+  id: string
+  state: GameState | null
+  chat: ChatLine[]
+  ratings: StartRatings | null
+  savedGameId: number | null
+  connected: boolean
+}
+export type GameMessage =
+  | { t: 'move'; uci: string; ply: number }
+  | { t: 'resign' | 'draw_offer' | 'draw_accept' | 'draw_decline' | 'claim_win' | 'call_draw' | 'sync' }
+  | { t: 'chat'; text: string }
+  | { t: 'mute'; on: boolean }
 
 export const friendsApi = {
   status: () => sidecar.request<FriendsStatus>('friends_status'),
   checkHandle: (handle: string) =>
     call(sidecar.request<{ handle: string; available: boolean; reason: 'invalid' | 'reserved' | 'taken' | null }>('friends_check_handle', { handle })),
-  signup: (p: { handle: string; ageConfirmed: boolean; termsAccepted: boolean; shareGames: boolean }) =>
+  signup: (p: { handle: string; ageConfirmed: boolean; termsAccepted: boolean }) =>
     call(sidecar.request<{ handle: string; recoveryCode: string }>('friends_signup', p)),
   recoveryCode: () => sidecar.request<{ code: string }>('friends_recovery_code'),
   recover: (code: string) => call(sidecar.request<{ handle: string }>('friends_recover', { code })),
@@ -182,7 +284,7 @@ export const friendsApi = {
   block: (handle: string) => call(sidecar.request<{ status: string }>('friends_block', { handle })),
   unblock: (handle: string) => call(sidecar.request<{ status: string }>('friends_unblock', { handle })),
   appearOffline: (on: boolean) => call(sidecar.request<{ appear_offline: boolean }>('friends_appear_offline', { on })),
-  setSettings: (p: { shareGames?: boolean; chatEnabled?: boolean }) => sidecar.request<FriendsStatus>('friends_set_settings', p),
+  setSettings: (p: { chatEnabled?: boolean }) => sidecar.request<FriendsStatus>('friends_set_settings', p),
   linkLichess: () => call(sidecar.request<{ site: 'lichess'; username: string; verified: boolean }>('friends_link_lichess')),
   chesscomStart: (username: string) =>
     call(sidecar.request<ChesscomLink & { site: 'chesscom'; username: string; code: string; field: string; expires: number }>('friends_chesscom_start', { username })),
@@ -198,4 +300,18 @@ export const friendsApi = {
     call(sidecar.request<Profile>('friends_profile', { handle, mine, recentLimit, recentOffset, refresh })),
   refresh: (handle: string, older = false) => sidecar.request<{ started: boolean }>('friends_refresh', { handle, older }),
   game: (id: number) => sidecar.request<FriendGame>('friends_game', { id }),
+  // FRIENDS-2
+  live: () => sidecar.request<LiveSnapshot>('friends_live'),
+  challenge: (handle: string, tc: TimeControl, colour: AskedColour) =>
+    call(sidecar.request<{ challenge: Challenge }>('friends_challenge', { handle, tc, colour })),
+  challengeAnswer: (id: string, accept: boolean) =>
+    call(sidecar.request<{ game?: LiveGameRow; status?: string }>('friends_challenge_answer', { id, accept })),
+  challengeCancel: (id: string) => call(sidecar.request<{ status: string }>('friends_challenge_cancel', { id })),
+  liveGame: (id: string) => sidecar.request<LiveGameView>('friends_live_game', { id }),
+  gameSend: (id: string, msg: GameMessage) => call(sidecar.request<{ sent: boolean }>('friends_game_send', { id, msg })),
+  gameClose: (id: string) => sidecar.request<{ ok: boolean }>('friends_game_close', { id }),
+  rematch: (id: string) => call(sidecar.request<{ challenge: Challenge }>('friends_rematch', { id })),
+  ratings: (handle: string, tc: TimeControl) =>
+    call(sidecar.request<{ you: StartRating; them: StartRating }>('friends_ratings', { handle, tc })),
+  opening: (id: string) => sidecar.request<{ eco: string | null; name: string | null }>('friends_opening', { id }),
 }

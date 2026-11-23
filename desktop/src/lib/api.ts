@@ -12,7 +12,7 @@ export const sidecar = new Sidecar()
 
 export type Color = 'white' | 'black'
 
-export type GameSource = 'local' | 'imported' | 'lichess' | 'chesscom'
+export type GameSource = 'local' | 'imported' | 'lichess' | 'chesscom' | 'friends'
 
 export interface GameEndInfo {
   result: string // '1-0' | '0-1' | '1/2-1/2' | '*'
@@ -159,6 +159,9 @@ export interface GameSummary {
   black: string | null
   whiteElo: number | null
   blackElo: number | null
+  /** FRIENDS-2 (R1-R3): a friend game's ratings at its start, apart from whiteElo/blackElo; "≈" when
+   *  estimated; null when neither is known */
+  startRatings?: { white: { rating: number; estimated: boolean } | null; black: { rating: number; estimated: boolean } | null } | null
   whiteAccuracy: number | null
   blackAccuracy: number | null
   analyzed: boolean

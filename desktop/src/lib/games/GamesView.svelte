@@ -611,7 +611,7 @@
                     {#each lines as l (l.color)}
                       <span class="pl el">
                         <span class="sq {l.color}" role="img" aria-label={l.color === 'white' ? 'White' : 'Black'}></span>
-                        <span class="el"><span class="pname {l.nameTone}">{l.name}</span>{#if l.detail}{' '}<span class="muted">{l.detail}</span>{/if}</span>
+                        <span class="el" title={l.name}><span class="pname {l.nameTone}">{l.name}</span>{#if l.detail}{' '}<span class="muted">{l.detail}</span>{/if}</span>
                       </span>
                     {/each}
                   </span>

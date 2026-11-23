@@ -5,7 +5,8 @@
 name = "zugzwang-friends"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
-# Served only at the custom domain: the account has no workers.dev subdomain, and none is needed.
+# Served only at the custom domain. (The account's workers.dev subdomain exists since 2026-11-23, made because
+# Durable Objects cannot deploy without one; this Worker is not served there.)
 workers_dev = false
 preview_urls = false
 routes = [{ pattern = "api.zugzwangapp.com", custom_domain = true }]
@@ -15,6 +16,20 @@ binding = "DB"
 database_name = "zugzwang-friends"
 database_id = "21546d72-4bfe-4b51-b247-14d608674d38"
 migrations_dir = "migrations"
+
+# FRIENDS-2: the lobby (challenges and the apps' live connections) and one object per live game, both
+# SQLite-backed (the only kind the Workers Free plan has), WebSockets through the Hibernation API.
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
+[[durable_objects.bindings]]
+name = "GAME"
+class_name = "Game"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lobby", "Game"]
 
 [vars]
 LICHESS_API = "https://lichess.org"

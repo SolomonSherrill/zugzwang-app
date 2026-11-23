@@ -16,12 +16,18 @@ def test_the_app_ships_the_published_texts():
         assert (app / name).read_bytes() == (ROOT / "legal" / name).read_bytes(), name
 
 
-def test_both_are_version_1_and_not_drafts():
-    """L7 (owner, 2026-11-22): approved as draft 2; version 1, effective the day beta.5 is published."""
+def test_the_versions_and_no_drafts():
+    """L7 (owner, 2026-11-22): approved as draft 2; version 1, effective the day beta.5 is published. FRIENDS-2 B
+    (2026-11-22): the policy's version 2 adds what games against friends store, effective with beta.6 (decided,
+    for the owner to confirm: review/reports/FRIENDS-2.md); the Terms stay version 1."""
     for name in ("PRIVACY.md", "TERMS.md"):
         text = (ROOT / "legal" / name).read_text()
         assert "DRAFT" not in text and "draft 2" not in text
-        assert "Version 1, effective the day Zugzwang 0.1.0-beta.5 is published" in text
+    assert "Version 2, effective the day Zugzwang 0.1.0-beta.6 is published" in (ROOT / "legal/PRIVACY.md").read_text()
+    # BETA-6 ruling L10 (owner, 2026-11-23): Terms version 2, "(when they arrive)" removed in both places
+    terms = (ROOT / "legal/TERMS.md").read_text()
+    assert "Version 2, effective the day Zugzwang 0.1.0-beta.6 is published" in terms
+    assert "when they arrive" not in terms
 
 
 def test_the_terms_name_the_venue():
@@ -40,13 +46,24 @@ def test_the_blanks_are_filled_in():
 
 
 def test_the_policy_covers_every_server_table():
-    sql = (ROOT / "server/migrations/0001_init.sql").read_text()
     import re
-    tables = re.findall(r"CREATE TABLE (\w+)", sql)
+    sql = "".join(p.read_text() for p in sorted((ROOT / "server/migrations").glob("*.sql")))
+    dropped = re.findall(r"DROP TABLE (\w+)", sql)
+    tables = [t for t in re.findall(r"CREATE TABLE (\w+)", sql) if t not in dropped]
     assert tables == ["accounts", "linked_accounts", "friend_requests", "friendships", "blocks", "presence"]
-    policy = (ROOT / "legal/PRIVACY.md").read_text().lower()
+    columns = [c for c in re.findall(r"ADD COLUMN (\w+)", sql) if c not in re.findall(r"DROP COLUMN (\w+)", sql)]
+    assert columns == ["chat_on"]
+    policy = " ".join((ROOT / "legal/PRIVACY.md").read_text().lower().split())
     for words in ("handle", "public key", "signed up", "linked accounts", "friend requests", "friendships",
-                  "blocks", "presence"):
+                  "blocks", "presence", "chat in friend games", "challenges", "live games"):
         assert words in policy, words
+    # BETA-6 ruling SG1: the server keeps no shared games, and the policy names none
+    assert dropped == ["shared_games"]
+    for words in ("shared games", "share the games you play in zugzwang", "games you share"):
+        assert words not in policy, words
+    # the Durable Objects' own storage (FRIENDS-2): each table they create is named in the policy
+    for src, names in (("lobby.ts", ["challenges", "games"]),):
+        made = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", (ROOT / "server/src" / src).read_text())
+        assert made == names, src
     for never in ("email", "password", "ip address", "chat messages"):
         assert never in policy

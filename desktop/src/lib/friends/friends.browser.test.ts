@@ -101,6 +101,9 @@ describe.skipIf(!ready)(`Friends screens (FRIENDS-1) [${harnessBrowserName}]`, (
     await page.locator('label.cb').nth(1).locator('input').check()
     expect(await create.isDisabled()).toBe(false)
     expect(await page.getByText('No email and no password').count()).toBe(1)
+    // BETA-6 ruling SG1: sign-up no longer draws the sharing switch
+    expect(await page.getByRole('switch').count()).toBe(0)
+    expect(await page.getByText(/Share the games/).count()).toBe(0)
     await page.context().close()
   }, 60_000)
 
@@ -237,7 +240,7 @@ describe.skipIf(!ready)(`Friends screens (FRIENDS-1) [${harnessBrowserName}]`, (
     await page.context().close()
   }, 60_000)
 
-  it('the friends list: requests (Accept before Decline), online first, no Challenge buttons', async () => {
+  it('the friends list: requests (Accept before Decline), online first, Challenge only for the friends online', async () => {
     const page = await open('/?screen=friends')
     await page.getByRole('heading', { name: /Requests/ }).waitFor()
     const first = page.locator('li.req').first()
@@ -246,7 +249,8 @@ describe.skipIf(!ready)(`Friends screens (FRIENDS-1) [${harnessBrowserName}]`, (
     expect(await page.locator('li.req').count()).toBe(3)
     const names = await page.locator('button.row .names .strong').allTextContents()
     expect(names.slice(0, 2).sort()).toEqual(['benji', 'maxk'])
-    expect(await page.getByRole('button', { name: 'Challenge' }).count()).toBe(0)
+    // FRIENDS-2 (C1 shown, C2): a Challenge button for each friend online, none for the others
+    expect(await page.getByRole('button', { name: 'Challenge' }).count()).toBe(2)
     expect(await page.getByText('≈').count()).toBeGreaterThan(0)
     expect(await page.locator('[title*="ChessGoals"]').count()).toBeGreaterThan(0)
     // Accept and Decline (and every other button here) are never red or green (ruling S4)
@@ -266,7 +270,8 @@ describe.skipIf(!ready)(`Friends screens (FRIENDS-1) [${harnessBrowserName}]`, (
       expect(await page.getByRole('tab', { name: t }).getAttribute('aria-selected')).toBe('true')
     }
     expect(await page.getByText('No engine involved.').count()).toBe(1)
-    expect(await page.getByRole('button', { name: 'Challenge' }).count()).toBe(0)
+    // FRIENDS-2: maxk is online, so the profile has Challenge (friends2.browser.test.ts opens it)
+    expect(await page.getByRole('button', { name: 'Challenge' }).count()).toBe(1)
     await page.getByRole('button', { name: 'Load games older than 12 months' }).waitFor()
     // FRIENDS-1B D: a sparkline in each rating cell with a series, your colour on each game together,
     // a chevron on each recent game
@@ -316,12 +321,14 @@ describe.skipIf(!ready)(`Friends screens (FRIENDS-1) [${harnessBrowserName}]`, (
     expect(await page.getByLabel('Hidden').count()).toBe(1)
     await page.getByRole('button', { name: 'Show', exact: true }).click()
     await page.getByText(/^([0-9A-Z]{4}-){8}[0-9A-Z]{4}$/).waitFor()
-    for (const s of ['Share the games you play in Zugzwang', 'Appear offline', 'Chat in friend games']) {
+    for (const s of ['Appear offline', 'Chat in friend games']) {
       expect(await page.getByRole('switch', { name: new RegExp(s) }).count()).toBe(1)
     }
+    // BETA-6 ruling SG1: the sharing switch is hidden (its stored value kept, unused)
+    expect(await page.getByText(/Share the games/).count()).toBe(0)
     expect(await page.getByRole('switch', { name: /Chat in friend games/ }).getAttribute('aria-checked')).toBe('true')
     await page.getByRole('button', { name: 'Privacy policy' }).click()
-    await page.getByRole('dialog', { name: 'Privacy policy' }).getByText(/Version 1, effective the day Zugzwang 0.1.0-beta.5 is published/).waitFor()
+    await page.getByRole('dialog', { name: 'Privacy policy' }).getByText(/Version 2, effective the day Zugzwang 0.1.0-beta.6 is published/).waitFor()
     await page.getByRole('button', { name: 'Close' }).click()
     // ruling S4: Delete account is red (--loss text on the --danger-border outline), and so is its confirmation
     const red = (b: Element) => [getComputedStyle(b).color, getComputedStyle(b).borderTopColor].join(' ')

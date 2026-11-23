@@ -49,6 +49,21 @@ class FriendsClient:
         self.identity = identity
         self.timeout = timeout
 
+    def signed_headers(self, method: str, path: str, body: bytes = b"") -> dict[str, str]:
+        """The four X-Zz headers for one request (also a WebSocket's GET, FRIENDS-2)."""
+        if self.identity is None:
+            raise FriendsError("no_identity", "There is no Friends account on this computer.")
+        t = str(int(time.time() * 1000))
+        nonce = b64url(os.urandom(16))
+        sig = self.identity.sign(canonical(method, path, t, nonce, body))
+        return {"X-Zz-Key": self.identity.public_key_b64, "X-Zz-Time": t, "X-Zz-Nonce": nonce,
+                "X-Zz-Sig": b64url(sig)}
+
+    def ws_url(self, path: str) -> str:
+        if not self.base:
+            raise FriendsError("not_configured", "No Friends server is set up for this app yet.")
+        return ("wss" + self.base[5:] if self.base.startswith("https") else "ws" + self.base[4:]) + path
+
     def request(self, method: str, path: str, body: dict | None = None, *,
                 signed: bool = True) -> dict:
         if not self.base:
@@ -58,13 +73,7 @@ class FriendsClient:
         if data:
             headers["Content-Type"] = "application/json"
         if signed:
-            if self.identity is None:
-                raise FriendsError("no_identity", "There is no Friends account on this computer.")
-            t = str(int(time.time() * 1000))
-            nonce = b64url(os.urandom(16))
-            sig = self.identity.sign(canonical(method, path, t, nonce, data))
-            headers.update({"X-Zz-Key": self.identity.public_key_b64, "X-Zz-Time": t,
-                            "X-Zz-Nonce": nonce, "X-Zz-Sig": b64url(sig)})
+            headers.update(self.signed_headers(method, path, data))
         req = urllib.request.Request(self.base + path, data=data or None, headers=headers,
                                      method=method.upper())
         from zugzwang.core.platform_sync import _tls_context
@@ -142,3 +151,27 @@ class FriendsClient:
 
     def delete_account(self) -> dict:
         return self.request("DELETE", "/v1/account")
+
+    # FRIENDS-2: the switches, challenges, games (server/README.md "Live games")
+    def set_settings(self, *, chat_on: bool) -> dict:
+        """ "Chat in friend games" (H3). BETA-6 (ruling SG1): the server keeps no shared games and no sharing switch."""
+        return self.request("PUT", "/v1/settings", {"chat_on": bool(chat_on)})
+
+    def challenge(self, handle: str, tc: str, colour: str) -> dict:
+        return self.request("POST", "/v1/challenges", {"handle": handle, "tc": tc, "colour": colour})
+
+    def challenge_answer(self, challenge_id: str, accept: bool) -> dict:
+        return self.request("POST", f"/v1/challenges/{urllib.parse.quote(challenge_id, safe='')}/"
+                            + ("accept" if accept else "decline"))
+
+    def challenge_cancel(self, challenge_id: str) -> dict:
+        return self.request("DELETE", f"/v1/challenges/{urllib.parse.quote(challenge_id, safe='')}")
+
+    def game(self, game_id: str) -> dict:
+        return self.request("GET", f"/v1/games/{urllib.parse.quote(game_id, safe='')}")
+
+    def game_ack(self, game_id: str) -> dict:
+        return self.request("POST", f"/v1/games/{urllib.parse.quote(game_id, safe='')}/ack")
+
+    def rematch(self, game_id: str) -> dict:
+        return self.request("POST", f"/v1/games/{urllib.parse.quote(game_id, safe='')}/rematch")

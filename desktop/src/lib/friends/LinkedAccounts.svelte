@@ -88,6 +88,15 @@
       error = errorText(e)
     }
   }
+  // Z4 (owner, 2026-11-22): Check now at most once every 30 s; the button says when it can be pressed again
+  let nowMs = $state(Date.now())
+  $effect(() => {
+    const t = setInterval(() => (nowMs = Date.now()), 500)
+    return () => clearInterval(t)
+  })
+  function checkNowWait(l: { checkNowAt?: number | null }, n: number): number {
+    return l.checkNowAt ? Math.max(0, Math.ceil((l.checkNowAt - n) / 1000)) : 0
+  }
 </script>
 
 <section class="panel" aria-labelledby="lk-h">
@@ -106,12 +115,16 @@
       <Button disabled={busy === 'chesscom'} onclick={checkChesscom}>{busy === 'chesscom' ? 'Checking…' : 'Check'}</Button>
       <Button variant="quiet" onclick={cancelChesscom}>Cancel</Button>
     {:else if link.state === 'waiting'}
+      {@const wait = checkNowWait(link, nowMs)}
       <span class="grow"
         ><span class="title">Waiting for Chess.com</span> <strong class="code">{link.code}</strong>
         <span class="sub">Chess.com's public profile can take up to 12 hours to update. Leave the code in your Location; Zugzwang checks every 15 minutes while it's open.</span>
         {#if link.error}<span class="sub warn">Last check: {link.error}</span>{/if}</span
       >
-      <Button disabled={busy === 'chesscom'} onclick={checkChesscom}>{busy === 'chesscom' ? 'Checking…' : 'Check now'}</Button>
+      <!-- FRIENDS.md ruling Z4: at most once every 30 s (the sidecar holds it too) -->
+      <Button disabled={busy === 'chesscom' || wait > 0} title={wait > 0 ? 'Check now can be pressed once every 30 seconds' : undefined} onclick={checkChesscom}
+        >{busy === 'chesscom' ? 'Checking…' : wait > 0 ? `Check again in 0:${String(wait).padStart(2, '0')}` : 'Check now'}</Button
+      >
       <Button variant="quiet" onclick={cancelChesscom}>Cancel</Button>
     {:else if link.state === 'expired'}
       <span class="grow"

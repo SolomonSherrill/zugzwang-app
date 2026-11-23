@@ -1371,6 +1371,15 @@ def _game_names(pgn: str | None) -> tuple[str | None, str | None, int | None, in
     return white, black, white_elo, black_elo
 
 
+#: the server's game endings (server/src/gamecore.ts) in the app's termination words (core/game.py)
+_FRIEND_TERMINATION = {
+    "checkmate": "checkmate", "resign": "resignation", "timeout": "timeout",
+    "timeout_vs_insufficient": "timeout", "agreed": "draw_agreed", "stalemate": "stalemate",
+    "repetition": "threefold_repetition", "fifty_moves": "fifty_moves",
+    "insufficient": "insufficient_material", "abandoned": "abandoned", "abandoned_draw": "abandoned",
+}
+
+
 def _game_dict(rec: GameRecord) -> dict:
     white, black, white_elo, black_elo = _game_names(rec.pgn)
     return {
@@ -1392,6 +1401,9 @@ def _game_dict(rec: GameRecord) -> dict:
         "black": black,
         "whiteElo": white_elo,
         "blackElo": black_elo,
+        # FRIENDS-2 (R1-R3): a friend game's ratings at its start, apart from the real ones
+        "startRatings": GL.start_ratings(rec.start_white_rating, rec.start_white_est,
+                                         rec.start_black_rating, rec.start_black_est),
     }
 
 
@@ -1404,7 +1416,10 @@ _DEFERRED_METHODS = {"insights", "check_usernames",
                      "friends_remove", "friends_block", "friends_unblock", "friends_appear_offline",
                      "friends_link_lichess", "friends_chesscom_start", "friends_chesscom_verify",
                      "friends_chesscom_cancel", "friends_save_recovery",
-                     "friends_unlink", "friends_delete_account", "friends_profile"}
+                     "friends_unlink", "friends_delete_account", "friends_profile",
+                     # FRIENDS-2: challenges, rematches
+                     "friends_challenge", "friends_challenge_answer", "friends_challenge_cancel",
+                     "friends_rematch", "friends_ratings"}
 
 
 class RelabelRunner:
@@ -1608,6 +1623,7 @@ class Server:
         # Friends (FRIENDS-1 C): created here, its threads start at the first friends_ call
         self._friends = FriendsRunner(self.post_call, _emit, lambda: self._db_path)
         self._friends._app_db = lambda: self._db
+        self._friends._save_friend_game = self._save_friend_game
         self._facts_refill_running = False
         # Runs a book switch relabelled while a refill was in flight: their facts are deleted
         # again and recomputed when that refill ends (it may have read the old labels).
@@ -2899,10 +2915,9 @@ class Server:
         self._friends_call(req_id, lambda: self._friends.service.check_handle(handle))
 
     def rpc_friends_signup(self, req_id, handle: str = "", ageConfirmed: bool = False,
-                           termsAccepted: bool = False, shareGames: bool = False) -> None:
+                           termsAccepted: bool = False) -> None:
         self._friends_call(req_id, lambda: self._friends.service.signup(
-            handle, age_confirmed=bool(ageConfirmed), terms_accepted=bool(termsAccepted),
-            share_games=bool(shareGames)))
+            handle, age_confirmed=bool(ageConfirmed), terms_accepted=bool(termsAccepted)))
 
     def rpc_friends_recovery_code(self) -> dict:
         return {"code": self._friends.service.recovery_code()}
@@ -2948,16 +2963,29 @@ class Server:
     def rpc_friends_appear_offline(self, req_id, on: bool = False) -> None:
         self._friends_call(req_id, lambda: self._friends.service.set_appear_offline(bool(on)))
 
-    def rpc_friends_set_settings(self, shareGames: bool | None = None,
-                                 chatEnabled: bool | None = None) -> dict:
+    def rpc_friends_set_settings(self, chatEnabled: bool | None = None) -> dict:
+        """"Chat in friend games", kept locally and (FRIENDS-2) sent to the server, which honours it: chat
+        off means no messages either way and friends see it is off (H3). A failure to reach the server is
+        the `friends_settings` event; the heartbeat sends it again. BETA-6 (ruling SG1): the sharing switch
+        is hidden and not set here; its stored value is kept, unused."""
         from zugzwang.core.friends import settings as fsettings
         ch = {}
-        if shareGames is not None:
-            ch["share_games"] = bool(shareGames)
         if chatEnabled is not None:
             ch["chat_enabled"] = bool(chatEnabled)
         fsettings.save(**ch)
-        return self._friends.service.state()
+        state = self._friends.service.state()
+        if ch and state["signedIn"]:
+            self._friends._settings_pushed = False
+
+            def push():
+                try:
+                    self._friends.push_settings()
+                    _emit("friends_settings", {"saved": True})
+                except FriendsError as exc:
+                    _emit("friends_settings", {"saved": False, "error": exc.as_dict()})
+                return None
+            self._friends.submit(push, lambda _o: None, lambda _m: None)
+        return state
 
     def rpc_friends_link_lichess(self, req_id) -> None:
         self._friends_call(req_id, lambda: self._friends.service.link_lichess())
@@ -2998,7 +3026,110 @@ class Server:
             if "error" not in out and self._db is not None:
                 out["friendGamesDeleted"] = self._db.delete_friend_data(None)
             return out
-        self._friends_then_app(req_id, lambda: self._friends.service.delete_account(), then)
+        def delete():
+            self._friends.live.stop()
+            return self._friends.service.delete_account()
+        self._friends_then_app(req_id, delete, then)
+
+    # ── Friends, FRIENDS-2: challenges and live games (core/friends/live.py) ────────
+    def rpc_friends_live(self) -> dict:
+        """Local only: the live connection (connected, the pending challenges, the games)."""
+        if self._friends.service.state()["signedIn"]:
+            self._friends.start()
+            self._friends.live.ensure()
+        return self._friends.live.snapshot()
+
+    def rpc_friends_challenge(self, req_id, handle: str = "", tc: str = "", colour: str = "random") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().challenge(handle, tc, colour))
+
+    def rpc_friends_challenge_answer(self, req_id, id: str = "", accept: bool = False) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().challenge_answer(id, bool(accept)))
+
+    def rpc_friends_challenge_cancel(self, req_id, id: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().challenge_cancel(id))
+
+    def rpc_friends_rematch(self, req_id, id: str = "") -> None:
+        """P3: the same time control, the colours swapped (the server decides both)."""
+        self._friends_call(req_id, lambda: self._friends.service.client().rematch(id))
+
+    def rpc_friends_ratings(self, req_id, handle: str = "", tc: str = "5+0") -> None:
+        """The ratings line of a challenge (the banner, the popover): yours and the friend's for the time
+        control, as the game will take them at its start (R1-R3): {"you", "them"}, each {rating, estimated}."""
+        def run():
+            svc = self._friends.service
+            mine = [l for l in svc.me().get("linked", []) if l.get("verified")]
+            entry = svc.friend_entry(handle) or {}
+            return self._friends.live.preview_ratings(mine, entry.get("linked") or [], tc)
+        self._friends_call(req_id, run)
+
+    def rpc_friends_opening(self, id: str = "") -> dict:
+        """Local only: the opening of a live friend game so far, by the app's book ({"eco", "name"} or nulls)."""
+        st = self._friends.live.states.get(id) or {}
+        board = chess.Board()
+        found = None
+        for uci in st.get("moves") or []:
+            try:
+                board.push_uci(uci)
+            except ValueError:
+                break
+            if self._openings is not None:
+                f = self._openings.name_after(board)
+                if f is not None:
+                    found = f
+        return {"eco": found[0] if found else None, "name": found[1] if found else None}
+
+    def rpc_friends_live_game(self, id: str = "") -> dict:
+        """Local only: a live game's last state, its chat (this process's memory), the ratings at its
+        start; opens its connection if it is not open."""
+        self._friends.live.open_game(id)
+        return self._friends.live.game_view(id)
+
+    def rpc_friends_game_send(self, id: str = "", msg: dict | None = None) -> dict:
+        """One message to a live game: move {uci, ply}, resign, draw_offer, draw_accept, draw_decline,
+        claim_win, call_draw, chat {text}, mute {on}, sync. The answer is the next `friend_game` event."""
+        try:
+            return self._friends.live.send(id, dict(msg or {}))
+        except FriendsError as exc:
+            return {"error": exc.as_dict()}
+
+    def rpc_friends_game_close(self, id: str = "") -> dict:
+        """The game's screen was left: a finished game is acknowledged to the server (in the background)."""
+        threading.Thread(target=self._friends.live.close_game, args=(id,), daemon=True).start()
+        return {"ok": True}
+
+    def _save_friend_game(self, gid: str, st: dict, ratings: dict | None) -> int | None:
+        """A finished friend game into the library (G2: the "friends" source), with its ratings at the
+        start (R1-R3), then analysed at the standard depth (14) like any synced game. App thread."""
+        existing = self._db.friend_game_saved(gid)
+        if existing is not None:
+            return existing
+        pgn_text = st["pgn"]
+        game = chess.pgn.read_game(io.StringIO(pgn_text))
+        if game is None:
+            raise RuntimeError("the friend game's PGN could not be read")
+        board = game.board()
+        opening = None
+        for mv in game.mainline_moves():
+            board.push(mv)
+            if self._openings is not None:
+                found = self._openings.name_after(board)
+                if found is not None:
+                    opening = found
+        created = st.get("created")
+        played_at = (datetime.fromtimestamp(created / 1000, timezone.utc).isoformat()
+                     if isinstance(created, (int, float)) else datetime.now(timezone.utc).isoformat())
+        lib_id = self._db.save_game(
+            played_at=played_at, player_color=st["you"], skill_level=0, result=st["result"],
+            termination=_FRIEND_TERMINATION.get(st.get("termination") or "", st.get("termination") or ""),
+            move_count=len(st.get("moves") or []), pgn=pgn_text, final_fen=board.fen(),
+            opening_eco=opening[0] if opening else None, opening_name=opening[1] if opening else None,
+            source="friends", external_id=gid, start_ratings=ratings)
+        try:
+            self.rpc_analyze_pending(game_ids=[lib_id], depth=C.ANALYSIS_STANDARD_DEPTH)
+        except RuntimeError as exc:
+            # a sync or a relabel is running: the game waits in the Games list's unanalysed games
+            logger.info("friends: a saved friend game was not queued for analysis: %s", exc)
+        return lib_id
 
     def rpc_friends_profile(self, req_id, handle: str = "", mine: dict | None = None,
                             recentLimit: int = 10, recentOffset: int = 0, refresh: bool = True) -> None:

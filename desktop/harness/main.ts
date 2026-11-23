@@ -27,6 +27,8 @@ import { puzzleHandlers, type PuzzleFixtures } from './puzzlesHarness'
 import { gamesHandlers, type GamesFixtures } from './gamesHarness'
 import { PROMO_GAME_ID, promotionHandlers } from './promotionHarness'
 import { friendsHandlers, type FriendsFixtures } from './friendsHarness'
+import { longNamer } from './longNames'
+import type { SidecarTransport } from '../src/lib/sidecar'
 
 const q = new URLSearchParams(location.search)
 const fx = (await (await fetch('/fixtures.json')).json()) as Fixtures
@@ -62,15 +64,29 @@ const gfx = (await fetch('/games_fixtures.json')
 const ffx = (await fetch('/friends_fixtures.json')
   .then((r) => (r.ok ? r.json() : null))
   .catch(() => null)) as FriendsFixtures | null
-sidecar.useTransport(
-  fakeTransport(fx, {
+// BETA-6 (ruling S7): ?names=long gives every name the longest allowed (longNames.ts)
+function withLongNames(t: SidecarTransport): SidecarTransport {
+  const n = longNamer()
+  const back = (v: unknown): unknown =>
+    typeof v === 'string' ? n.original(v) : Array.isArray(v) ? v.map(back) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, back(x)])) : v
+  ;(window as unknown as { __longNames: Map<string, string> }).__longNames = n.map
+  return {
+    async spawn(onLine, onClose) {
+      const p = await t.spawn((line) => {
+        for (const l of line.split('\n')) if (l.trim()) onLine(JSON.stringify(n.message(JSON.parse(l))) + '\n')
+      }, onClose)
+      return { write: (line: string) => p.write(JSON.stringify(back(JSON.parse(line))) + '\n'), kill: () => p.kill() }
+    },
+  }
+}
+const transport = fakeTransport(fx, {
     scenario,
     latencyMs: Number(q.get('latency') ?? 0),
     handlers: { ...puzzleHandlers(pfx, scenario), ...gamesHandlers(gfx, scenario, fx.meta.mainGameId), ...scenarioHandlers(fx, scenario), ...promotionHandlers(fx, scenario, gameParam), ...friendsHandlers(ffx, scenario) },
     ready: scenarioReady(scenario),
     spawnDelayMs: Number(q.get('spawnMs') ?? 0),
-  }),
-)
+  })
+sidecar.useTransport(q.get('names') === 'long' ? withLongNames(transport) : transport)
 ;(window as unknown as { __harness: unknown }).__harness = { requestLog, flagLog, fixtures: fx.meta }
 // By default started before mounting, so a screen's first request never meets a sidecar that is
 // still starting. That hid FIX-STARTUP: the real app mounts first and App's onMount starts the

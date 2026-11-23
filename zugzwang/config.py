@@ -467,7 +467,8 @@ SYNC_AUTO_ANALYSE_RECENT = 100
 
 # Game sources that count as the player's own games for Insights aggregation
 # (excludes local games played against Stockfish, which would skew accuracy).
-INSIGHTS_SOURCES = ("lichess", "chesscom", "imported")
+# FRIENDS-2 (ruling G2): games against friends count, with the "friends" source.
+INSIGHTS_SOURCES = ("lichess", "chesscom", "imported", "friends")
 # An opening must have at least this many games before it appears in the
 # opening-performance breakdown.
 INSIGHTS_MIN_OPENING_GAMES = 5

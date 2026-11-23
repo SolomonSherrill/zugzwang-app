@@ -8,6 +8,8 @@ declare global {
       CHESSCOM_API: string
       ADMIN_PUBLIC_KEY?: string
       LINK_SECRET?: string
+      LOBBY: DurableObjectNamespace<import('../src/lobby').Lobby>
+      GAME: DurableObjectNamespace<import('../src/game').Game>
       TEST_MIGRATIONS: import('cloudflare:test').D1Migration[]
     }
   }

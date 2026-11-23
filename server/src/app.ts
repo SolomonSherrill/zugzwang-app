@@ -1,6 +1,8 @@
 /**
  * The Zugzwang Friends server's logic (FRIENDS.md, FRIENDS-1 B); src/index.ts is the Worker entry: accounts, friend requests, friendships, blocks,
- * presence and linked accounts, over the six D1 tables of migrations/0001_init.sql and nothing else.
+ * presence and linked accounts, over the D1 tables of migrations/ (six from 0001_init.sql, presence's chat switch
+ * from 0002_friends2.sql; 0003 dropped FRIENDS-2's shared games, BETA-6 ruling SG1) and nothing else; and (FRIENDS-2) the routes
+ * of challenges and live games, which lobby.ts and game.ts (Durable Objects) serve.
  *
  * Every route but /v1/health and /v1/handles/:handle is signed with the account's Ed25519 key (auth.ts).
  * Logging: nothing here logs a request or response body, and no IP address is written anywhere (V4);
@@ -10,6 +12,9 @@ import { NonceCache, verifySigned } from './auth'
 import { base32, sha256Hex } from './encoding'
 import { handleProblem } from './handles'
 import { MemoryLimiter, allowed, type RateLimitBinding } from './ratelimit'
+import type { Game } from './game'
+import type { Lobby } from './lobby'
+import { isTimeControl, type Player } from './gamecore'
 
 export interface Env {
   DB: D1Database
@@ -19,6 +24,17 @@ export interface Env {
   LINK_SECRET?: string
   ACCOUNT_LIMITER?: RateLimitBinding
   ANON_LIMITER?: RateLimitBinding
+  /** FRIENDS-2: the lobby (challenges, the apps' live connections) and one object per live game */
+  LOBBY: DurableObjectNamespace<Lobby>
+  GAME: DurableObjectNamespace<Game>
+  /** the rules' times, overridable for the tests and the local end-to-end run (milliseconds) */
+  FIRST_MOVE_MS?: string
+  DISCONNECT_MS?: string
+  CHALLENGE_MS?: string
+  RESULT_KEEP_MS?: string
+  STALE_MS?: string
+  /** local end-to-end runs only, never set in production: a 1+0 game's clocks, in ms (the flag check) */
+  FLAG_TEST_MS?: string
 }
 
 export const VERSION = '1'
@@ -138,13 +154,14 @@ async function me(ctx: Ctx): Promise<Response> {
   const links = await ctx.env.DB.prepare('SELECT site, username, verified FROM linked_accounts WHERE account_id = ? ORDER BY site')
     .bind(a.id)
     .all<{ site: string; username: string; verified: number }>()
-  const p = await ctx.env.DB.prepare('SELECT appear_offline FROM presence WHERE account_id = ?')
+  const p = await ctx.env.DB.prepare('SELECT appear_offline, chat_on FROM presence WHERE account_id = ?')
     .bind(a.id)
-    .first<{ appear_offline: number }>()
+    .first<{ appear_offline: number; chat_on: number }>()
   return json(200, {
     handle: a.handle,
     created: a.created,
     appear_offline: !!p?.appear_offline,
+    chat_on: p ? !!p.chat_on : true,
     linked: links.results.map((l) => ({ site: l.site, username: l.username, verified: !!l.verified })),
   })
 }
@@ -154,7 +171,7 @@ async function friendsList(ctx: Ctx): Promise<Response> {
   const db = ctx.env.DB
   const [friends, links, incoming, outgoing, blocks] = await db.batch([
     db.prepare(
-      `SELECT acc.id, acc.handle, f.created AS since, p.last_seen, p.appear_offline
+      `SELECT acc.id, acc.handle, f.created AS since, p.last_seen, p.appear_offline, p.chat_on
          FROM friendships f
          JOIN accounts acc ON acc.id = CASE WHEN f.a_id = ?1 THEN f.b_id ELSE f.a_id END
          LEFT JOIN presence p ON p.account_id = acc.id
@@ -182,7 +199,7 @@ async function friendsList(ctx: Ctx): Promise<Response> {
         WHERE b.blocker_id = ? ORDER BY acc.handle COLLATE NOCASE`,
     ).bind(id),
   ])
-  type F = { id: number; handle: string; since: number; last_seen: number | null; appear_offline: number | null }
+  type F = { id: number; handle: string; since: number; last_seen: number | null; appear_offline: number | null; chat_on: number | null }
   type Link = { account_id: number; site: string; username: string }
   const linkRows = links.results as Link[]
   return json(200, {
@@ -194,6 +211,8 @@ async function friendsList(ctx: Ctx): Promise<Response> {
         since: f.since,
         online: !hidden && f.last_seen != null && ctx.now - f.last_seen <= ONLINE_MS,
         last_seen: hidden ? null : f.last_seen,
+        // H3: friends see that your chat in friend games is off
+        chat_on: f.chat_on === null ? true : !!f.chat_on,
         linked: linkRows.filter((l) => l.account_id === f.id).map((l) => ({ site: l.site, username: l.username })),
       }
     }),
@@ -269,6 +288,7 @@ async function removeFriend(ctx: Ctx, handle: string): Promise<Response> {
   const [a, b] = pairOf(ctx.account!.id, other.id)
   const res = await ctx.env.DB.prepare('DELETE FROM friendships WHERE a_id = ? AND b_id = ?').bind(a, b).run()
   if (!res.meta.changes) return err(404, 'not_friends', 'You are not friends.')
+  await lobby(ctx.env).cancelBetween(ctx.account!.id, other.id)
   return json(200, { status: 'removed' })
 }
 
@@ -287,6 +307,10 @@ async function block(ctx: Ctx): Promise<Response> {
     // their requests to you stay (so they see "sent") but are hidden from you; see friendsList
     db.prepare('INSERT OR IGNORE INTO blocks (blocker_id, blocked_id, created) VALUES (?, ?, ?)').bind(me.id, other.id, ctx.now),
   ])
+  // FRIENDS-2: their challenges go, and a game between you goes on without chat (H3)
+  const l = lobby(ctx.env)
+  await l.cancelBetween(me.id, other.id)
+  for (const g of await l.gamesBetween(me.id, other.id)) await game(ctx.env, g).blockChat()
   return json(200, { status: 'blocked', handle: other.handle })
 }
 
@@ -417,6 +441,11 @@ async function unlink(ctx: Ctx, site: string): Promise<Response> {
 /** Every row about the account, in every table (ruling V3). */
 export async function deleteAccountRows(env: Env, id: number): Promise<void> {
   const db = env.DB
+  // FRIENDS-2: its challenges go and its live games are resigned (aborted before the first moves)
+  if (env.LOBBY) {
+    const games = await lobby(env).forgetAccount(id)
+    for (const g of games) await game(env, g).abandon(id)
+  }
   await db.batch([
     db.prepare('DELETE FROM linked_accounts WHERE account_id = ?').bind(id),
     db.prepare('DELETE FROM friend_requests WHERE from_id = ?1 OR to_id = ?1').bind(id),
@@ -444,6 +473,142 @@ async function adminRemove(ctx: Ctx): Promise<Response> {
   return json(200, { status: 'removed', handle: acc.handle })
 }
 
+
+// ── FRIENDS-2: settings, challenges, live games ─────────────────────────────────────
+
+const lobby = (env: Env) => env.LOBBY.get(env.LOBBY.idFromName('lobby'))
+const game = (env: Env, id: string) => env.GAME.get(env.GAME.idFromName(id))
+const GAME_ID = /^[A-Za-z0-9_-]{16}$/
+
+/** Settings → Friends' "Chat in friend games" (H3), sent to the server. BETA-6 (ruling SG1): the server keeps no
+ *  shared games, so "share_games", which apps built before it still send, is checked and ignored. */
+async function setSettings(ctx: Ctx): Promise<Response> {
+  const b = parseBody(ctx)
+  const me = ctx.account!
+  const chat = b.chat_on
+  const share = b.share_games
+  if ((chat !== undefined && typeof chat !== 'boolean') || (share !== undefined && typeof share !== 'boolean') || (chat === undefined && share === undefined)) {
+    return err(400, 'bad_request', 'chat_on and share_games are true or false.')
+  }
+  const db = ctx.env.DB
+  await db.prepare('INSERT OR IGNORE INTO presence (account_id, last_seen, appear_offline) VALUES (?, ?, 0)').bind(me.id, ctx.now).run()
+  if (chat !== undefined) await db.prepare('UPDATE presence SET chat_on = ? WHERE account_id = ?').bind(chat ? 1 : 0, me.id).run()
+  if (chat !== undefined) for (const g of await lobby(ctx.env).liveGames(me.id)) await game(ctx.env, g).setChat(me.id, chat)
+  const p = await db.prepare('SELECT chat_on FROM presence WHERE account_id = ?').bind(me.id).first<{ chat_on: number }>()
+  return json(200, { chat_on: !!p?.chat_on })
+}
+
+/** C2: a friend who appears offline (or has not checked in for ONLINE_MS) cannot be challenged */
+async function isOnline(env: Env, id: number, now: number): Promise<boolean> {
+  const p = await env.DB.prepare('SELECT last_seen, appear_offline FROM presence WHERE account_id = ?').bind(id).first<{ last_seen: number; appear_offline: number }>()
+  return !!p && !p.appear_offline && now - p.last_seen <= ONLINE_MS
+}
+
+/** why `me` may not challenge `other` now, or null */
+async function challengeProblem(env: Env, me: Account, other: Account, now: number): Promise<Response | null> {
+  if (other.id === me.id) return err(400, 'self', 'That is your own handle.')
+  if (!(await areFriends(env, me.id, other.id))) return err(403, 'not_friends', 'You can challenge only your friends.')
+  // a block either way: refused as if offline, so the block is not revealed
+  if ((await blocked(env, other.id, me.id)) || (await blocked(env, me.id, other.id)) || !(await isOnline(env, other.id, now))) {
+    return err(409, 'offline', `${other.handle} is offline.`)
+  }
+  return null
+}
+
+async function playerOf(env: Env, acc: Account): Promise<Player> {
+  const links = await env.DB.prepare('SELECT site, username FROM linked_accounts WHERE account_id = ? AND verified = 1 ORDER BY site')
+    .bind(acc.id).all<{ site: string; username: string }>()
+  const p = await env.DB.prepare('SELECT chat_on FROM presence WHERE account_id = ?').bind(acc.id).first<{ chat_on: number }>()
+  return { id: acc.id, handle: acc.handle, linked: links.results, chat: p ? !!p.chat_on : true }
+}
+
+async function createChallenge(ctx: Ctx): Promise<Response> {
+  const me = ctx.account!
+  const b = parseBody(ctx)
+  const handle = typeof b.handle === 'string' ? b.handle.trim() : ''
+  const other = handle ? await accountByHandle(ctx.env, handle) : null
+  if (!other) return err(404, 'no_such_handle', 'No one has that handle.')
+  if (!isTimeControl(b.tc)) return err(400, 'bad_time_control', 'The time control is one of the ten live ones (C1).')
+  const colour = b.colour ?? 'random'
+  if (colour !== 'white' && colour !== 'black' && colour !== 'random') return err(400, 'bad_colour', 'The colour is white, black or random.')
+  const problem = await challengeProblem(ctx.env, me, other, ctx.now)
+  if (problem) return problem
+  const r = await lobby(ctx.env).createChallenge({ id: me.id, handle: me.handle }, { id: other.id, handle: other.handle }, b.tc, colour)
+  if ('error' in r) return err(409, r.error, r.message)
+  return json(201, { challenge: r.challenge })
+}
+
+async function acceptChallenge(ctx: Ctx, id: string): Promise<Response> {
+  const me = ctx.account!
+  const l = lobby(ctx.env)
+  const c = await l.getChallenge(id)
+  if (!c || c.to_id !== me.id) return err(404, 'no_such_challenge', 'That challenge is no longer open.')
+  const from = await ctx.env.DB.prepare('SELECT id, handle, public_key, created FROM accounts WHERE id = ?').bind(c.from_id).first<Account>()
+  if (!from) return err(404, 'no_such_challenge', 'That challenge is no longer open.')
+  if (!(await areFriends(ctx.env, me.id, from.id)) || (await blocked(ctx.env, from.id, me.id)) || (await blocked(ctx.env, me.id, from.id))) {
+    return err(404, 'no_such_challenge', 'That challenge is no longer open.')
+  }
+  const players = { [me.id]: await playerOf(ctx.env, me), [from.id]: await playerOf(ctx.env, from) }
+  const r = await l.accept(id, me.id, players)
+  if ('error' in r) return err(409, r.error, r.message)
+  return json(200, { game: r.game })
+}
+
+async function declineChallenge(ctx: Ctx, id: string): Promise<Response> {
+  if (!(await lobby(ctx.env).decline(id, ctx.account!.id))) return err(404, 'no_such_challenge', 'That challenge is no longer open.')
+  return json(200, { status: 'declined' })
+}
+
+async function cancelChallenge(ctx: Ctx, id: string): Promise<Response> {
+  if (!(await lobby(ctx.env).cancel(id, ctx.account!.id))) return err(404, 'no_such_challenge', 'That challenge is no longer open.')
+  return json(200, { status: 'cancelled' })
+}
+
+function forward(ctx: Ctx, stub: { fetch(req: Request): Promise<Response> }, path: string): Promise<Response> | Response {
+  if (ctx.req.headers.get('Upgrade') !== 'websocket') return err(426, 'upgrade_required', 'This route is a WebSocket.')
+  return stub.fetch(new Request('https://do' + path, {
+    headers: { Upgrade: 'websocket', 'X-Zz-Account-Id': String(ctx.account!.id), 'X-Zz-Handle': ctx.account!.handle },
+  }))
+}
+
+async function lobbyLive(ctx: Ctx): Promise<Response> {
+  return await forward(ctx, lobby(ctx.env), '/live')
+}
+
+async function gameLive(ctx: Ctx, id: string): Promise<Response> {
+  if (!GAME_ID.test(id)) return err(404, 'no_such_game', 'No such game.')
+  return await forward(ctx, game(ctx.env, id), '/live')
+}
+
+async function gameResult(ctx: Ctx, id: string): Promise<Response> {
+  if (!GAME_ID.test(id)) return err(404, 'no_such_game', 'No such game.')
+  const v = await game(ctx.env, id).result(ctx.account!.id)
+  if (!v) return err(404, 'no_such_game', 'No such game.')
+  return json(200, v)
+}
+
+async function gameAck(ctx: Ctx, id: string): Promise<Response> {
+  if (!GAME_ID.test(id) || !(await game(ctx.env, id).ack(ctx.account!.id))) return err(404, 'no_such_game', 'No finished game of yours has that id.')
+  return json(200, { status: 'saved' })
+}
+
+/** P3: a rematch is a challenge with the colours swapped and the same time control */
+async function rematch(ctx: Ctx, id: string): Promise<Response> {
+  if (!GAME_ID.test(id)) return err(404, 'no_such_game', 'No such game.')
+  const me = ctx.account!
+  const g = game(ctx.env, id)
+  const info = await g.rematchInfo(me.id)
+  if ('error' in info) return err(info.error === 'not_over' ? 409 : 404, info.error, info.error === 'not_over' ? 'The game is not over.' : 'No such game.')
+  const other = await ctx.env.DB.prepare('SELECT id, handle, public_key, created FROM accounts WHERE id = ?').bind(info.opponent).first<Account>()
+  if (!other) return err(404, 'no_such_handle', 'That account is gone.')
+  const problem = await challengeProblem(ctx.env, me, other, ctx.now)
+  if (problem) return problem
+  const r = await lobby(ctx.env).createChallenge({ id: me.id, handle: me.handle }, { id: other.id, handle: other.handle }, info.tc, info.colour, id)
+  if ('error' in r) return err(409, r.error, r.message)
+  await g.markRematch(me.id)
+  return json(201, { challenge: r.challenge })
+}
+
 // ── dispatch ────────────────────────────────────────────────────────────────────
 
 type Route = [method: string, pattern: RegExp, signed: 'none' | 'key' | 'account', fn: (ctx: Ctx, ...m: string[]) => Promise<Response>]
@@ -468,6 +633,16 @@ const ROUTES: Route[] = [
   ['POST', /^\/v1\/link\/chesscom\/verify$/, 'account', chesscomVerify],
   ['DELETE', /^\/v1\/link\/([a-z]+)$/, 'account', (c, s) => unlink(c, s)],
   ['DELETE', /^\/v1\/account$/, 'account', deleteAccount],
+  ['PUT', /^\/v1\/settings$/, 'account', setSettings],
+  ['GET', /^\/v1\/live$/, 'account', lobbyLive],
+  ['POST', /^\/v1\/challenges$/, 'account', createChallenge],
+  ['POST', /^\/v1\/challenges\/([A-Za-z0-9_-]{16})\/accept$/, 'account', acceptChallenge],
+  ['POST', /^\/v1\/challenges\/([A-Za-z0-9_-]{16})\/decline$/, 'account', declineChallenge],
+  ['DELETE', /^\/v1\/challenges\/([A-Za-z0-9_-]{16})$/, 'account', cancelChallenge],
+  ['GET', /^\/v1\/games\/([^/]+)\/live$/, 'account', gameLive],
+  ['GET', /^\/v1\/games\/([^/]+)$/, 'account', gameResult],
+  ['POST', /^\/v1\/games\/([^/]+)\/ack$/, 'account', gameAck],
+  ['POST', /^\/v1\/games\/([^/]+)\/rematch$/, 'account', rematch],
 ]
 
 export async function handle(req: Request, env: Env, now = Date.now()): Promise<Response> {

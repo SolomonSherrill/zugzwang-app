@@ -1,10 +1,10 @@
 # Zugzwang Friends — Terms of use
 
-Version 1, effective the day Zugzwang 0.1.0-beta.5 is published
+Version 2, effective the day Zugzwang 0.1.0-beta.6 is published
 (https://github.com/SolomonSherrill/zugzwang-app/releases).
 
 These terms cover **Friends**: the Zugzwang account, handles, friends, presence, linked accounts and
-(when they arrive) games and chat against friends. The Zugzwang app itself is free software under the
+games and chat against friends. The Zugzwang app itself is free software under the
 GNU General Public License, version 3 or later; that licence, not these terms, covers the software.
 
 **Who runs it.** The developer of Zugzwang (https://github.com/SolomonSherrill/zugzwang-app). Contact:
@@ -33,7 +33,7 @@ terms and to the Privacy policy.
 - Pretend to be someone else, or link an account that is not yours.
 - Try to get into another person's account, overload the server, get around its limits, or use it with
   automated tools other than the Zugzwang app.
-- In games against friends (when they arrive): use an engine or any outside help unless both players
+- In games against friends: use an engine or any outside help unless both players
   agreed before the game, or send images, files or links in chat (chat is text only).
 
 ## 4. Child sexual abuse material

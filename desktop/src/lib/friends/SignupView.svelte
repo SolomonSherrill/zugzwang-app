@@ -1,9 +1,8 @@
 <script lang="ts">
   /** Friends before an account (MinimalFriends-signup.html; rulings A1, A3, L1): a handle checked as
-   *  you type, the linked accounts, the sharing switch, what the server keeps, and the two required
-   *  boxes. Or the recovery code of an existing account (A2). */
+   *  you type, the linked accounts, what the server keeps, and the two required boxes (the sharing
+   *  switch hidden, BETA-6 ruling SG1). Or the recovery code of an existing account (A2). */
   import Button from '../ui/Button.svelte'
-  import Switch from './Switch.svelte'
   import LegalDialog from './LegalDialog.svelte'
   import { friendsApi } from './friendsApi'
   import { HANDLE_RULE, handleShape } from './friendsModel'
@@ -13,7 +12,6 @@
   let handle = $state('')
   let check = $state<{ handle: string; text: string; ok: boolean } | null>(null)
   let checking = $state(false)
-  let share = $state(false)
   let age = $state(false)
   let terms = $state(false)
   let busy = $state(false)
@@ -53,7 +51,7 @@
     busy = true
     error = null
     try {
-      const r = await friendsApi.signup({ handle: handle.trim(), ageConfirmed: age, termsAccepted: terms, shareGames: share })
+      const r = await friendsApi.signup({ handle: handle.trim(), ageConfirmed: age, termsAccepted: terms })
       friendsState.recoveryCode = r.recoveryCode
       await refreshStatus()
     } catch (e) {
@@ -108,12 +106,6 @@
         </div>
         <div class="boxfoot">You prove they are yours on the Friends screen once the account exists: Lichess by its sign-in, Chess.com by a short code in your profile.</div>
       </div>
-      <Switch
-        checked={share}
-        label="Share the games you play in Zugzwang with friends"
-        sub="Your Chess.com and Lichess games are public already. This adds games against friends and Stockfish."
-        onchange={(v) => (share = v)}
-      />
       <div class="keeps">
         The Zugzwang server keeps your handle, a public key, the date you joined, your linked usernames, your friends and requests, and when you were
         last online. No email and no password: this computer holds your key. Chat messages are never saved. You can delete your account in Settings at

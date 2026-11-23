@@ -24,6 +24,9 @@ class PlatformServer:
     def __init__(self) -> None:
         self.chesscom: dict[str, dict] = {}      # user -> {archive url: {"games": [...]}}
         self.chesscom_profile: dict[str, dict] = {}
+        #: FRIENDS-2: /pub/player/<user>/stats and Lichess's perfs, for the ratings at a game's start
+        self.chesscom_stats: dict[str, dict] = {}
+        self.lichess_perfs: dict[str, dict] = {}
         self.lichess: dict[str, list] = {}       # user -> games (ndjson objects)
         self.lichess_created: dict[str, int] = {}
         self.lichess_tokens: dict[str, str] = {}  # token -> username
@@ -66,6 +69,10 @@ class PlatformServer:
                     user = parts[2].lower()
                     full = outer.base + u.path
                     return self._send(200, outer.chesscom.get(user, {}).get(full, {"games": []}))
+                if parts[:2] == ["pub", "player"] and len(parts) == 4 and parts[3] == "stats":
+                    user = parts[2].lower()
+                    st = outer.chesscom_stats.get(user)
+                    return self._send(200, st) if st is not None else self._send(404, {"message": "not found"})
                 if parts[:2] == ["pub", "player"] and len(parts) == 3:
                     user = parts[2].lower()
                     prof = outer.chesscom_profile.get(user)
@@ -80,10 +87,11 @@ class PlatformServer:
                                       "application/x-ndjson")
                 if parts[:2] == ["api", "user"] and len(parts) == 3:
                     user = parts[2].lower()
-                    if user not in outer.lichess:
+                    if user not in outer.lichess and user not in outer.lichess_perfs:
                         return self._send(404, {"error": "not found"})
                     return self._send(200, {"id": user, "username": user,
-                                            "createdAt": outer.lichess_created.get(user, 1)})
+                                            "createdAt": outer.lichess_created.get(user, 1),
+                                            "perfs": outer.lichess_perfs.get(user, {})})
                 if parts == ["api", "account"]:
                     tok = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
                     name = outer.lichess_tokens.get(tok)

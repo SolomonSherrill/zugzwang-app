@@ -189,13 +189,13 @@
                   <div class="meta">
                     {[dayWord(latest.playedAt), shortTimeControl(latest.timeControl), openingFamily(latest.openingName)].filter(Boolean).join(', ')}
                   </div>
-                  {#if resultSentence(latest)}<div class="res">{resultSentence(latest)}</div>{/if}
+                  {#if resultSentence(latest)}<div class="res" title={resultSentence(latest)}>{resultSentence(latest)}</div>{/if}
                 </div>
                 {#if latest.accuracy !== null}
                   <div class="accs">
                     <div><div class="cap">You</div><div class="acc">{latest.accuracy.toFixed(1)}</div></div>
                     {#if latest.opponentAccuracy !== null}
-                      <div><div class="cap">{latest.opponent}</div><div class="acc opp">{latest.opponentAccuracy.toFixed(1)}</div></div>
+                      <div class="oppacc"><div class="cap name" title={latest.opponent}>{latest.opponent}</div><div class="acc opp">{latest.opponentAccuracy.toFixed(1)}</div></div>
                     {/if}
                   </div>
                 {/if}
@@ -268,7 +268,7 @@
               <li>
                 <button type="button" class="row" onclick={() => onopen(g.id)}>
                   <span class="out"><span class="dot {g.outcome ?? 'none'}" aria-hidden="true"></span>{g.outcome ? OUTCOME[g.outcome] : g.result}</span>
-                  <span class="opp">{g.opponent ?? 'Unknown'}</span>
+                  <span class="opp" title={g.opponent ?? 'Unknown'}>{g.opponent ?? 'Unknown'}</span>
                   <span class="muted ell">{g.openingName ? (g.openingEco ? `${g.openingName} (${g.openingEco})` : g.openingName) : ''}</span>
                   <span class="muted">{shortTimeControl(g.timeControl) ?? ''}</span>
                   <span class="r">{g.accuracy !== null ? g.accuracy.toFixed(1) : ''}</span>
@@ -464,18 +464,33 @@
     color: var(--text-3);
     font: var(--secondary);
   }
+  /* BETA-6 (ruling S7): a long name ends in "…", the whole sentence in a tooltip */
   .res {
     margin-top: 2px;
     font-size: 15px;
     font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .oppacc {
+    min-width: 0;
+    max-width: 160px;
+  }
+  .cap.name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .accs {
     display: flex;
     gap: 24px;
   }
+  /* BETA-6 layout check (WebKit): the figure's line as tall as its glyphs, so it no longer reaches 2 px into "You" */
   .acc {
     font-size: 18px;
     font-weight: 500;
+    line-height: 1.3;
   }
   .acc.opp {
     color: var(--text-2);
