@@ -18,10 +18,12 @@ import type { Browser, Page } from 'playwright'
 import { harnessBrowser, harnessBrowserName } from './browser.ts'
 import { ALL, SIZES, STORAGE, covered, type Case } from './beta6Specs.ts'
 import { names, topmost } from './overlayCheck.ts'
+import { ABOVE_BANNERS, CONTROL_SELECTOR } from '../src/lib/friends/bannerRoom.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = resolve(here, '..', '..')
-const out = resolve(repo, 'review', 'scratch', 'ui', 'beta6', harnessBrowserName)
+// ZUGZWANG_B6_OUT: another folder (FIX-B6 writes review/scratch/ui/fixb6/<browser>/banners)
+const out = process.env.ZUGZWANG_B6_OUT ? resolve(process.env.ZUGZWANG_B6_OUT, harnessBrowserName) : resolve(repo, 'review', 'scratch', 'ui', 'beta6', harnessBrowserName)
 const port = Number(process.env.ZUGZWANG_HARNESS_PORT ?? 5232)
 const only = process.env.ZUGZWANG_B6_ONLY ?? ''
 const shots = process.env.ZUGZWANG_B6_NOSHOTS !== '1'
@@ -92,6 +94,33 @@ export async function bannerCovers(page: Page): Promise<string[]> {
   })
 }
 
+/** S8 (FIX-B6): every control whose box meets a banner's box (the banners' own excepted). A control: a button,
+ *  link, input, select, textarea, an element with a widget role or a tabindex, or a board. */
+export async function controlsUnder(page: Page): Promise<string[]> {
+  return page.evaluate(([SEL, ABOVE]) => {
+    const cards = [...document.querySelectorAll('.banners .banner')].map((b) => b.getBoundingClientRect())
+    if (!cards.length) return ['no banner']
+    const hits: string[] = []
+    for (const el of document.querySelectorAll(SEL)) {
+      if (el.closest('.banners') || el.closest(ABOVE)) continue
+      const r = el.getBoundingClientRect()
+      if (r.width < 1 || r.height < 1) continue
+      const st = getComputedStyle(el)
+      if (st.visibility === 'hidden' || st.display === 'none') continue
+      for (const b of cards) {
+        const w = Math.min(b.right, r.right) - Math.max(b.left, r.left)
+        const h = Math.min(b.bottom, r.bottom) - Math.max(b.top, r.top)
+        if (w > 0 && h > 0) {
+          const label = (el.getAttribute('aria-label') ?? (el as HTMLElement).innerText ?? '').trim().split('\n')[0].slice(0, 30)
+          hits.push(`${el.tagName.toLowerCase()}${label ? ' "' + label + '"' : ''} under a banner by ${Math.round(w)} x ${Math.round(h)} px`)
+          break
+        }
+      }
+    }
+    return hits
+  }, [CONTROL_SELECTOR, ABOVE_BANNERS])
+}
+
 export interface CaseResult {
   case: string
   size: string
@@ -99,6 +128,10 @@ export interface CaseResult {
   overlays?: Awaited<ReturnType<typeof topmost>>[]
   moved?: { compared: number; moved: string[] }
   covers?: string[]
+  /** S8: controls under a banner */
+  under?: string[]
+  /** S8: whether the banners floated or the screen made room for them */
+  mode?: string
   order?: string
   /** where a popover placed by use:floating went: below, above or inside */
   side?: string
@@ -140,6 +173,10 @@ export async function runCase(browser: Browser, base: string, c: Case, size: { w
       r.covers = await bannerCovers(page)
       r.failures.push(...r.covers)
     }
+    r.under = await controlsUnder(page)
+    r.failures.push(...r.under.map((u) => 'S8: ' + u))
+    r.mode = (await page.evaluate(() => (document.querySelector('.banners') as HTMLElement | null)?.dataset.mode)) ?? 'none'
+    if (r.mode === 'measure') r.failures.push('S8: the banners never left the measuring state')
     const withB = await contentBoxes(page)
     const plain = await openCase(browser, base, { ...c, path: c.path.replace(/&challenge=\d/, '') }, size)
     const without = await contentBoxes(plain)
@@ -148,7 +185,8 @@ export async function runCase(browser: Browser, base: string, c: Case, size: { w
     const moved = keys.filter((k) => withB[k].join() !== without[k].join()).map((k) => `${k}: ${without[k].join(',')} -> ${withB[k].join(',')}`)
     r.moved = { compared: keys.length, moved }
     if (!keys.length) r.failures.push('no content boxes to compare')
-    if (moved.length) r.failures.push(`${moved.length} of ${keys.length} content boxes moved with the banner, e.g. ${moved[0]}`)
+    // S6 holds where the banners float; where the screen makes room (S8) its content moves down by the strip
+    if (moved.length && r.mode === 'float') r.failures.push(`${moved.length} of ${keys.length} content boxes moved with the banner, e.g. ${moved[0]}`)
   }
   if (shotPath) {
     mkdirSync(dirname(shotPath), { recursive: true })
@@ -176,7 +214,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
         r = { case: c.name, size: `${size.width}x${size.height}`, failures: ['error: ' + String((e as Error).message ?? e).split('\n')[0]] }
       }
       results.push(r)
-      console.log(`${r.failures.length ? 'FAIL' : 'PASS'}  ${r.size}  ${r.case}${r.side ? ` [popover ${r.side}]` : ''}${r.covered ? ` [covered: ${r.covered.join('; ')}]` : ''}${r.names ? `  (${r.names.texts} texts, ${r.names.names} names, ${r.names.cut} cut)` : ''}${r.failures.length ? '\n      ' + r.failures.slice(0, 12).join('\n      ') + (r.failures.length > 12 ? `\n      … ${r.failures.length - 12} more` : '') : ''}`)
+      console.log(`${r.failures.length ? 'FAIL' : 'PASS'}  ${r.size}  ${r.case}${r.mode ? ` [banners: ${r.mode}]` : ''}${r.side ? ` [popover ${r.side}]` : ''}${r.covered ? ` [covered: ${r.covered.join('; ')}]` : ''}${r.names ? `  (${r.names.texts} texts, ${r.names.names} names, ${r.names.cut} cut)` : ''}${r.failures.length ? '\n      ' + r.failures.slice(0, 12).join('\n      ') + (r.failures.length > 12 ? `\n      … ${r.failures.length - 12} more` : '') : ''}`)
     }
   }
   mkdirSync(out, { recursive: true })

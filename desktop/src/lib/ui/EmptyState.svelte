@@ -10,11 +10,13 @@
     sentence: string
     sub?: string | null
     action?: { label: string; run: () => void; primary?: boolean; kbd?: string } | null
+    /** a second, quieter action beside the first (FIX-B6 B: "Import a file") */
+    secondary?: { label: string; run: () => void } | null
     /** 0..1 for a determinate bar; null for none */
     progress?: number | null
     tone?: 'quiet' | 'error'
   }
-  let { sentence, sub = null, action = null, progress = null, tone = 'quiet' }: Props = $props()
+  let { sentence, sub = null, action = null, secondary = null, progress = null, tone = 'quiet' }: Props = $props()
 </script>
 
 <div class="empty" class:error={tone === 'error'} role={tone === 'error' ? 'alert' : 'status'}>
@@ -25,9 +27,10 @@
       <span style:width="{Math.round(progress * 100)}%"></span>
     </div>
   {/if}
-  {#if action}
+  {#if action || secondary}
     <div class="act">
-      <Button variant={action.primary ? 'primary' : 'ghost'} kbd={action.kbd} onclick={action.run}>{action.label}</Button>
+      {#if action}<Button variant={action.primary ? 'primary' : 'ghost'} kbd={action.kbd} onclick={action.run}>{action.label}</Button>{/if}
+      {#if secondary}<Button variant="ghost" onclick={secondary.run}>{secondary.label}</Button>{/if}
     </div>
   {/if}
 </div>
@@ -72,5 +75,8 @@
   }
   .act {
     margin-top: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 </style>

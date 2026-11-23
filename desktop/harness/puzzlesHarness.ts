@@ -5,10 +5,12 @@
  * each recorded puzzle once; rate_puzzle replays the recorded Glicko-2 answers in order.
  *
  * Scenarios (?state=) for the drafted states:
- *   puzzles-not-imported   the CSV is where the app looks, nothing imported yet
- *   puzzles-no-csv         nothing imported and no CSV found
- *   puzzles-importing      an import running (progress events up to 40 % of the recorded count)
- *   puzzles-import-error   Import puzzles fails (the sidecar's own message for a .zst file)
+ *   puzzles-not-imported   nothing imported yet: "Download puzzles from Lichess" (FIX-B6 B)
+ *   puzzles-no-csv         the same (kept for older shot lists)
+ *   puzzles-importing      a first download running (a progress event at 40 % of the file's MB)
+ *   puzzles-import-error   the download fails (the message a dropped connection gives)
+ *   puzzles-updating       imported, an update downloading beside the lobby
+ *   puzzles-check-newer    imported; "Check for new puzzles" answers that Lichess has newer ones
  *   puzzles-error          puzzle_status fails
  *   puzzles-new            imported, never played (no attempt, no session)
  *   puzzles-slow           next_puzzles answers after 60 s (the cold first search)
@@ -51,36 +53,44 @@ export function puzzleHandlers(pf: PuzzleFixtures | null, scenario: string | und
       case 'puzzles-import-error':
         return { ...pf.status, imported: false, count: 0, csvExists: true }
       case 'puzzles-importing':
-        return { ...pf.status, imported: false, importing: true, count: 0 }
+        return { ...pf.status, imported: false, importing: true, importKind: 'lichess', count: 0 }
+      case 'puzzles-updating':
+        return { ...pf.status, importing: true, importKind: 'lichess' }
       case 'puzzles-error':
         throw new Error('database is locked')
       case 'puzzles-new':
         return { ...pf.status, rating: 800, rd: 350 }
       default:
-        return pf.status
+        // the recorded status predates FIX-B6's source fields: the copy as Lichess's file of 1 Nov 2026
+        return { sourceDate: '2026-11-01T07:57:40+00:00', source: 'lichess', ...pf.status }
     }
   }
   const handlers: Record<string, Handler> = {
     puzzle_status: (_p, emit) => {
       const s = status()
-      if (scenario === 'puzzles-importing') {
-        // a progress event part-way, out of the recorded puzzle count
-        const total = pf.status.count
-        setTimeout(() => emit('puzzle_import_progress', { imported: Math.round(total * 0.4), total }), 50)
+      if (scenario === 'puzzles-importing' || scenario === 'puzzles-updating') {
+        // a progress event part-way: 40 % of the file's bytes (the size Lichess served 2026-11-23)
+        const totalBytes = 309_751_173
+        setTimeout(() => emit('puzzle_import_progress', {
+          kind: 'lichess', bytes: Math.round(totalBytes * 0.4), totalBytes, imported: 2_212_000,
+        }), 50)
       }
       return s
     },
+    download_puzzles: () => {
+      if (scenario === 'puzzles-import-error') throw new Error('The download stopped: [Errno 54] Connection reset by peer.')
+      return { started: true }
+    },
+    puzzle_check_update: () =>
+      scenario === 'puzzles-check-newer'
+        ? { date: '2026-12-01T07:57:40+00:00', bytes: 311_204_118, newer: true }
+        : { date: (pf.status.sourceDate as string | undefined) ?? '2026-11-01T07:57:40+00:00', bytes: 309_751_173, newer: false },
     puzzle_summary: () =>
       scenario === 'puzzles-new'
         ? { rating: null, tries: 0, solved: 0, rushBest: {}, survivalBest: null, sessions: [], sessionGapMin: 30 }
         : pf.summary,
     get_puzzle_rating: () => (scenario === 'puzzles-new' ? { rating: 800, rd: 350, volatility: 0.06 } : pf.rating),
-    import_puzzles: (p) => {
-      if (scenario === 'puzzles-import-error') {
-        throw new Error('lichess_db_puzzle.csv.zst is still compressed. Decompress it first (`zstd -d lichess_db_puzzle.csv.zst`) and pick the .csv.')
-      }
-      return { started: !!p }
-    },
+    import_puzzles: (p) => ({ started: !!p }),
     cancel_puzzle_import: () => ({ ok: true }),
     next_puzzles: async (p) => {
       if (scenario === 'puzzles-slow') await new Promise((r) => setTimeout(r, 60_000))

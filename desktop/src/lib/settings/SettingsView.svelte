@@ -2,7 +2,7 @@
   /**
    * Settings, rebuilt (UI-BUILD-2 E1; DESIGN.md "Settings", rulings 17 and 20; mockup
    * design/mockups/MinimalSettings.html): Accounts, Game sync, Engine, Opening book,
-   * Appearance, then the existing features the mockup leaves out (Maintenance, About) at the
+   * Appearance, then the existing features the mockup leaves out (About; "Fix game colours" left Settings with FIX-B6 CR1: the repair runs by itself when a username is added or changed) at the
    * foot in the same language. Every figure is read from sync_status, engine_status,
    * books_status or the last-sync stamps; a part with no data is not drawn.
    */
@@ -217,21 +217,6 @@
     off?.()
   })
 
-  // ── maintenance: fix game colours (kept from the old screen) ────────────────
-  let repairing = $state(false)
-  let repairMsg = $state<string | null>(null)
-  async function repairColors() {
-    repairing = true
-    repairMsg = null
-    try {
-      const { changed } = await api.repairColors(accounts.lichess, accounts.chesscom)
-      repairMsg = changed > 0 ? `Fixed the side you played in ${changed} ${changed === 1 ? 'game' : 'games'}.` : 'Every game already has the right side.'
-    } catch (e) {
-      repairMsg = e instanceof Error ? e.message : String(e)
-    } finally {
-      repairing = false
-    }
-  }
 </script>
 
 <div class="settings">
@@ -411,25 +396,6 @@
         <p>How the board looks everywhere in the app.</p>
       </div>
       <div class="body"><AppearanceSection /></div>
-    </section>
-
-    <section aria-labelledby="s-maint">
-      <div class="lead">
-        <h2 id="s-maint">Maintenance</h2>
-        <p>Repairs to games already imported.</p>
-      </div>
-      <div class="body">
-        <div class="sync-row">
-          <div>
-            <div class="strong">Fix game colours</div>
-            <div class="sub">Reads which side you played in each synced game again, from its players' names.</div>
-          </div>
-          <Button size="sm" disabled={repairing || phase === 'running' || sources.length === 0} onclick={repairColors}>
-            {repairing ? 'Fixing…' : 'Fix game colours'}
-          </Button>
-        </div>
-        {#if repairMsg}<p class="quiet">{repairMsg}</p>{/if}
-      </div>
     </section>
 
     <section aria-labelledby="s-about" class="last">

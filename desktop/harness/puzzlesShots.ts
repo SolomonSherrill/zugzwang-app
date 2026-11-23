@@ -316,7 +316,19 @@ export const PUZZLE_SHOTS: Shot[] = [
     name: 'state-import-error',
     url: LOBBY + '&state=puzzles-import-error',
     act: async (p) => {
-      await p.getByRole('button', { name: 'Import puzzles' }).click()
+      await p.getByRole('button', { name: 'Download puzzles from Lichess' }).click()
+    },
+  },
+  // FIX-B6 B: an update downloading beside the lobby; "Check for new puzzles" with newer ones
+  { dir: 'puzzles', name: 'state-updating', url: LOBBY + '&state=puzzles-updating', size: { width: 1440, height: 1200 } },
+  {
+    dir: 'puzzles',
+    name: 'state-check-newer',
+    url: LOBBY + '&state=puzzles-check-newer',
+    size: { width: 1440, height: 1200 },
+    act: async (p) => {
+      await p.getByRole('button', { name: 'Check for new puzzles' }).click()
+      await p.getByRole('button', { name: 'Download the new puzzles' }).waitFor()
     },
   },
   { dir: 'puzzles', name: 'state-new-player', url: LOBBY + '&state=puzzles-new', size: { width: 1440, height: 1000 } },

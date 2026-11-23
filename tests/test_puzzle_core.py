@@ -132,10 +132,10 @@ def test_import_dedups_on_puzzle_id(tmp_path, db_path):
 
 def test_import_missing_csv_yields_error(tmp_path, db_path):
     events = _run(tmp_path / "nope.csv", db_path)
-    assert events == [("error", f"CSV not found: {tmp_path / 'nope.csv'}")]
+    assert events == [("error", f"No such file: {tmp_path / 'nope.csv'}")]
 
 
-def test_import_cancel_wipes_and_reports(tmp_path, db_path):
+def test_import_cancel_reports_and_adds_nothing(tmp_path, db_path):
     csv_path = tmp_path / "p.csv"
     _write_csv(csv_path, [_row("aaa"), _row("bbb")])
     events = _run(csv_path, db_path, is_cancelled=lambda: True)

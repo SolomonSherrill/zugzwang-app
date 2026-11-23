@@ -37,11 +37,33 @@ export function validateUsername(raw: string): string | null {
   return null
 }
 
-/** Trim + persist both fields. Caller is responsible for validation first. */
-export function saveAccounts(lichess: string, chesscom: string): void {
+/** CR1 (FIX-B6, owner 2026-11-23): a save that adds or changes a username, not one that only removes one. */
+export function namesAddedOrChanged(before: Accounts, after: Accounts): boolean {
+  return (['lichess', 'chesscom'] as const).some((k) => after[k] !== '' && after[k] !== before[k])
+}
+
+/** The colour repair the app runs by itself (CR1; "Fix game colours" left Settings): re-reads which side the
+ *  user played in each synced game from its players' names, with the names just saved. */
+function repairColors(names: Accounts): void {
+  void import('./api')
+    .then(({ api }) => api.repairColors(names.lichess, names.chesscom))
+    .then((r) => {
+      if (r.changed) console.info(`colour repair after a username change: ${r.changed} games`)
+    })
+    .catch((e) => console.warn('colour repair after a username change failed', e))
+}
+
+/** Trim + persist both fields. Caller is responsible for validation first. When a username was added or changed,
+ *  the colour repair runs once with the saved names (CR1); *repair* is for tests. Returns whether it ran. */
+export function saveAccounts(lichess: string, chesscom: string, repair: (names: Accounts) => void = repairColors): boolean {
+  const before = { ...accounts }
   accounts.lichess = lichess.trim()
   accounts.chesscom = chesscom.trim()
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...accounts }))
+  const after = { ...accounts }
+  if (!namesAddedOrChanged(before, after)) return false
+  repair(after)
+  return true
 }
 
 // ── no sync depth (ruling 17, 2026-11-20) ─────────────────────────────────────

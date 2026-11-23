@@ -5,6 +5,7 @@ import {
   withPly, withSolution, withTry, puzzleThemes, ratingSubLine, rushBest, sessionModeLabel,
   sessionRatingText, sessionSolvedText, shareOfTries, sideOf, signed, tally, themeLabel,
   RATED_THEMES, RATED_THEMES_SHOWN,
+  copyLine, doneLine, longDate, mb, progressLine, progressShare, updateLine,
 } from './puzzlesModel'
 
 const row = (o: Partial<PuzzleSessionRow>): PuzzleSessionRow => ({
@@ -195,5 +196,38 @@ describe('the move list', () => {
     for (const s of [-1, -1, 'start', 1, 'end'] as const) v = stepView(l, v, s)
     expect(JSON.stringify(l)).toBe(before)
     expect(v).toBeNull()
+  })
+})
+
+describe('the puzzle database lines (FIX-B6 B)', () => {
+  it('dates the copy from the file and counts it from the import', () => {
+    expect(longDate('2026-11-01T07:57:40+00:00')).toBe('1 November 2026')
+    expect(longDate('')).toBeNull()
+    expect(copyLine({ count: 5531622, source: 'lichess', sourceDate: '2026-11-01T07:57:40+00:00' }))
+      .toBe("5,531,622 puzzles, from Lichess's puzzle database of 1 November 2026.")
+    expect(copyLine({ count: 2, source: 'file', sourceDate: '', importedAt: '2026-11-23T08:00:00+00:00' }))
+      .toBe('2 puzzles, imported from a file on 23 November 2026.')
+    expect(copyLine({ count: 1 })).toBe('1 puzzle.')
+  })
+  it('shows progress in MB of the file', () => {
+    const p = { kind: 'lichess' as const, bytes: 123_400_000, totalBytes: 309_751_173, imported: 2_100_000 }
+    expect(mb(309_751_173)).toBe('310 MB')
+    expect(progressLine(p, false)).toBe('Downloading from Lichess: 123 MB of 310 MB, 2,100,000 puzzles so far.')
+    expect(progressLine({ ...p, kind: 'file' }, false)).toMatch(/^Reading the file: /)
+    expect(progressLine(null, false)).toBe('Downloading from Lichess…')
+    expect(progressLine(p, true)).toBe('Building the puzzle index…')
+    expect(progressShare(p)).toBeCloseTo(0.398, 2)
+    expect(progressShare({ ...p, totalBytes: null })).toBeNull()
+  })
+  it('says what an update changed, removed puzzles included', () => {
+    expect(doneLine({ count: 4, added: 4, removed: 0, removedAttempted: 0 })).toBe('4 puzzles imported.')
+    expect(doneLine({ count: 5531622, added: 12000, removed: 3000, removedAttempted: 2 }))
+      .toBe('Puzzles updated: 12,000 new, 3,000 removed by Lichess (2 you had tried; your results are kept). 5,531,622 in all.')
+  })
+  it('answers the check', () => {
+    expect(updateLine({ date: '2026-12-01T07:00:00+00:00', bytes: 311_000_000, newer: true }))
+      .toBe('Lichess has puzzles of 1 December 2026 (311 MB to download).')
+    expect(updateLine({ date: '2026-11-01T07:57:40+00:00', bytes: 1, newer: false }))
+      .toBe("You have the newest: Lichess's puzzle database of 1 November 2026.")
   })
 })

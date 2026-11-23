@@ -316,3 +316,75 @@ export function puzzleMoveRows(line: PuzzleLine): PuzzleMoveRow[] {
   }
   return rows
 }
+
+// ── the puzzle database: where it came from, a download's progress (FIX-B6 B, ruling PZ1) ─────────
+
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+/** "1 November 2026" from an ISO date-time, in UTC (Lichess's Last-Modified is UTC). */
+export function longDate(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+}
+
+const n = (x: number) => x.toLocaleString('en-US')
+/** Megabytes as the progress shows them: whole MB, 1 MB = 1,000,000 bytes. */
+export const mb = (bytes: number) => `${n(Math.round(bytes / 1e6))} MB`
+
+/** The copy you have: its count from the import, its date from the file (never hard-coded). */
+export function copyLine(s: { count: number; source?: string | null; sourceDate?: string | null; importedAt?: string | null }): string {
+  const count = `${n(s.count)} ${s.count === 1 ? 'puzzle' : 'puzzles'}`
+  const date = longDate(s.sourceDate)
+  if (s.source === 'lichess' && date) return `${count}, from Lichess's puzzle database of ${date}.`
+  const on = longDate(s.importedAt)
+  return on ? `${count}, imported from a file on ${on}.` : `${count}.`
+}
+
+export interface ImportProgress {
+  kind: 'lichess' | 'file'
+  bytes: number
+  totalBytes: number | null
+  imported: number
+}
+
+/** 0..1 of the file read, or null when its size is unknown. */
+export function progressShare(p: ImportProgress | null): number | null {
+  if (!p || !p.totalBytes) return null
+  return Math.min(0.99, p.bytes / p.totalBytes)
+}
+
+export function progressLine(p: ImportProgress | null, finishing: boolean): string {
+  if (finishing) return 'Building the puzzle index…'
+  const verb = p?.kind === 'file' ? 'Reading the file' : 'Downloading from Lichess'
+  if (!p || p.bytes === 0) return `${verb}…`
+  const of = p.totalBytes ? `${mb(p.bytes)} of ${mb(p.totalBytes)}` : mb(p.bytes)
+  return `${verb}: ${of}, ${n(p.imported)} puzzles so far.`
+}
+
+export interface ImportDone {
+  count: number
+  added: number
+  removed: number
+  removedAttempted: number
+}
+
+/** What an import changed, said once it is done. */
+export function doneLine(d: ImportDone): string {
+  if (d.removed === 0 && d.added === d.count) return `${n(d.count)} puzzles imported.`
+  const parts = [`${n(d.added)} new`]
+  if (d.removed > 0) {
+    const tried = d.removedAttempted > 0 ? ` (${n(d.removedAttempted)} you had tried; your results are kept)` : ''
+    parts.push(`${n(d.removed)} removed by Lichess${tried}`)
+  }
+  return `Puzzles updated: ${parts.join(', ')}. ${n(d.count)} in all.`
+}
+
+/** The answer to "Check for new puzzles". */
+export function updateLine(u: { date: string | null; bytes: number | null; newer: boolean }): string {
+  const date = longDate(u.date)
+  if (!u.newer) return date ? `You have the newest: Lichess's puzzle database of ${date}.` : 'You have the newest puzzles.'
+  const size = u.bytes ? ` (${mb(u.bytes)} to download)` : ''
+  return date ? `Lichess has puzzles of ${date}${size}.` : `Lichess has new puzzles${size}.`
+}

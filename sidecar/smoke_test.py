@@ -361,17 +361,13 @@ def main() -> None:
     ]
     csv_path.write_text(header + "\n" + "\n".join(rows) + "\n")
 
-    # Picker mistakes are rejected on the request, not by an error event minutes
-    # later. The .zst is the likely one: Lichess publishes only the compressed file.
-    zst_path = tmp.parent / "lichess_db_puzzle.csv.zst"
-    zst_path.write_bytes(b"\x28\xb5\x2f\xfd")
-    for bad, want in ((zst_path, "compressed"), (tmp.parent / "absent.csv", "No such file")):
-        try:
-            c.request("import_puzzles", {"csv_path": str(bad)})
-            raise AssertionError(f"{bad.name} should be rejected")
-        except RuntimeError as exc:
-            assert want in str(exc), exc
-    print("✓ compressed and missing puzzle CSVs rejected before the import starts")
+    # A missing file is refused on the request, not by an error event later.
+    try:
+        c.request("import_puzzles", {"csv_path": str(tmp.parent / "absent.csv")})
+        raise AssertionError("a missing file should be refused")
+    except RuntimeError as exc:
+        assert "No such file" in str(exc), exc
+    print("✓ a missing puzzle file refused before the import starts")
 
     c.request("import_puzzles", {"csv_path": str(csv_path)})
     done = c.wait_event("puzzle_import_done", timeout=30)
@@ -407,6 +403,18 @@ def main() -> None:
     lb = c.request("puzzle_leaderboard", {"mode": "rush", "time_limit_s": 180})
     assert lb["entries"][0]["score"] == 7 and lb["newRank"] == 0
     print("✓ rush session saved; leaderboard shows new entry at rank 0")
+
+    # FIX-B6 B: Lichess's .zst, decompressed as it is read (in a frozen sidecar this is the
+    # check that the Zstandard decoder froze), replacing the set and keeping the rating.
+    rating_before = c.request("get_puzzle_rating")["rating"]
+    zst = REPO_ROOT / "tests" / "fixtures" / "puzzles_small.csv.zst"
+    c.request("import_puzzles", {"csv_path": str(zst)})
+    done = c.wait_event("puzzle_import_done", timeout=30)
+    assert done["count"] == 4 and done["removed"] == 2 and done["removedAttempted"] == 1, done
+    status = c.request("puzzle_status")
+    assert status["count"] == 4 and status["source"] == "file", status
+    assert c.request("get_puzzle_rating")["rating"] == rating_before
+    print("✓ puzzle import from a .zst: 4 rows, the 2 old ones replaced, the rating kept")
 
     # ── opening trainer ───────────────────────────────────────────────────────
     # W26: a missing book fails the book checks without hiding the ones after them.

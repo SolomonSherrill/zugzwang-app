@@ -321,17 +321,27 @@ def test_an_unattributable_game_is_refused_per_game_before_the_migration(server,
     assert _games_in(db_path) == 1
 
 
-def test_import_puzzles_rejects_a_still_compressed_csv(server, sent, tmp_path):
-    # Lichess only publishes the .zst. Reaching the import thread with one means
-    # a UnicodeDecodeError arriving as an error *event* long after the click.
+def test_import_puzzles_takes_a_zst_as_downloaded(server, sent, tmp_path):
+    # FIX-B6 B: Lichess's .zst is decompressed as it is read; picking it starts the import.
     zst = tmp_path / "lichess_db_puzzle.csv.zst"
     zst.write_bytes(b"\x28\xb5\x2f\xfd")
+    started: list = []
+    server._importer = type("Fake", (), {"start": lambda self, *a: started.append(a)})()
+    server._db_path = tmp_path / "s.db"
     server._handle_request(
         {"id": 1, "method": "import_puzzles", "params": {"csv_path": str(zst)}}
     )
-    assert "error" in sent[0]
-    msg = sent[0]["error"]["message"]
-    assert "compressed" in msg and "zstd -d" in msg
+    assert sent[0]["result"] == {"started": True}
+    assert started[0][0] == zst
+
+
+def test_download_puzzles_starts_the_download(server, sent, tmp_path):
+    started: list = []
+    server._importer = type("Fake", (), {"start_download": lambda self, *a: started.append(a)})()
+    server._db_path = tmp_path / "s.db"
+    server._handle_request({"id": 1, "method": "download_puzzles", "params": {}})
+    assert sent[0]["result"] == {"started": True}
+    assert started[0][0] == tmp_path / "s.db"
 
 
 def test_import_puzzles_rejects_a_missing_csv(server, sent, tmp_path):

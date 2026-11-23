@@ -3,8 +3,11 @@
 
     python packaging/launch_check.py --exe <app executable> [--timeout 120]
 
-Starts the app as a user would (no environment overrides, so it uses the real per-user
-data folder), then polls until all of these hold, or fails at the timeout:
+Starts the app as a user would, but with its home folder pointed at a new temporary one (HOME on
+macOS and Linux; USERPROFILE, LOCALAPPDATA and APPDATA on Windows), so the app finds its data
+folder through its own path logic and that folder is a temporary one (FIX-B6, ruling DF1: no
+session or check opens or writes a real data folder; CLAUDE.md "Never touch the owner's data").
+The folder is deleted afterwards. Then it polls until all of these hold, or fails at the timeout:
 
   1. a window owned by the app is on screen (Windows: the process's `MainWindowTitle`;
      macOS: CoreGraphics' window list, via a tiny Swift script — no permission needed
@@ -13,16 +16,18 @@ data folder), then polls until all of these hold, or fails at the timeout:
   3. the sidecar's log in the per-user data folder says it started, and Stockfish answered
      (`ready` is logged as "engine ready" by `EngineWorker`), with a `stockfish` process up.
 
-Then it closes the app and prints what it saw, with timings. Used by CI on every target;
-on macOS also by hand (VERIFY in BETA.md).
+Then it closes the app and prints what it saw, with timings. Used by CI on every target. Never run it
+on the owner's Mac: it opens a window (CLAUDE.md "Never touch the owner's screen").
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -33,12 +38,27 @@ for w in list { if let o = w[kCGWindowOwnerName as String] as? String { print(o)
 '''
 
 
-def data_dir() -> Path:
+def temp_home() -> tuple[Path, dict[str, str]]:
+    """A new empty home folder and the app's environment pointing at it (DF1)."""
+    home = Path(tempfile.mkdtemp(prefix="zugzwang-launch-"))
+    env = {k: v for k, v in os.environ.items() if k not in ("ZUGZWANG_DB", "ZUGZWANG_DATA_DIR")}
     if sys.platform == "win32":
-        return Path(os.environ["LOCALAPPDATA"]) / "dev.zugzwang.desktop"
+        (home / "AppData" / "Local").mkdir(parents=True)
+        (home / "AppData" / "Roaming").mkdir(parents=True)
+        env.update(USERPROFILE=str(home), LOCALAPPDATA=str(home / "AppData" / "Local"),
+                   APPDATA=str(home / "AppData" / "Roaming"))
+    else:
+        env["HOME"] = str(home)
+    return home, env
+
+
+def data_dir(home: Path) -> Path:
+    """The data folder the app's path logic (zugzwang/config.py) picks under *home*."""
+    if sys.platform == "win32":
+        return home / "AppData" / "Local" / "dev.zugzwang.desktop"
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Zugzwang"
-    return Path.home() / ".local" / "share" / "zugzwang"
+        return home / "Library" / "Application Support" / "Zugzwang"
+    return home / ".local" / "share" / "zugzwang"
 
 
 def processes() -> str:
@@ -70,10 +90,11 @@ def main() -> None:
     ap.add_argument("--timeout", type=float, default=120)
     a = ap.parse_args()
 
-    log = data_dir() / "logs" / "sidecar.log"
-    start_size = log.stat().st_size if log.exists() else 0
+    home, env = temp_home()
+    log = data_dir(home) / "logs" / "sidecar.log"
+    start_size = 0
     t0 = time.monotonic()
-    proc = subprocess.Popen([a.exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen([a.exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     seen: dict[str, float] = {}
     try:
         while time.monotonic() - t0 < a.timeout and len(seen) < 4:
@@ -102,10 +123,11 @@ def main() -> None:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
-    print(f"data folder: {data_dir()}\nlog: {log}")
+    print(f"data folder: {data_dir(home)} (temporary)\nlog: {log}")
     if log.exists():
         tail = log.read_text(encoding="utf-8", errors="replace")[start_size:].splitlines()[-12:]
         print("log tail:\n  " + "\n  ".join(tail))
+    shutil.rmtree(home, ignore_errors=True)
     missing = [k for k in ("window", "sidecar process", "sidecar log: started", "engine ready")
                if k not in seen]
     if missing:

@@ -28,6 +28,7 @@ certifi — MPL-2.0 — https://github.com/certifi/python-certifi
 Python — PSF License — https://docs.python.org/3/license.html
 PyInstaller bootloader — GPL-2.0-or-later with the bootloader exception — https://pyinstaller.org
 ECO opening names — lichess-org/chess-openings, CC0 — https://github.com/lichess-org/chess-openings
+Puzzles — the Lichess puzzle database, CC0, downloaded in the app from Lichess — https://database.lichess.org/#puzzles
 Rating comparison (Friends' "≈" estimates) — the ChessGoals "Chess Rating Comparison" tables
   (https://chessgoals.com/rating-comparison/), copied 2026-11-21 into zugzwang/assets/ratings/
 The app icon and mark — the ℤ (\mathbb{Z}) glyph of the AMS msbm10 font (AMSFonts), SIL Open Font

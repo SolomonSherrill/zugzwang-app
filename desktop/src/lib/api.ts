@@ -830,10 +830,31 @@ export interface PuzzleStatus {
   imported: boolean
   count: number
   importing: boolean
+  /** what is importing: a download from Lichess or a file (FIX-B6 B); null when idle */
+  importKind?: 'lichess' | 'file' | null
+  /** where the copy you have came from, its file's date (Lichess's Last-Modified), when imported */
+  source?: 'lichess' | 'file' | null
+  sourceDate?: string | null
+  importedAt?: string | null
   rating: number
   rd: number
   csvPath: string
   csvExists: boolean
+}
+
+/** `puzzle_check_update`: what Lichess serves now, and whether it is not the copy you have. */
+export interface PuzzleUpdateInfo {
+  date: string | null
+  bytes: number | null
+  newer: boolean
+}
+
+/** `puzzle_import_progress`: bytes of the file read (compressed, for a download) and rows imported. */
+export interface PuzzleImportProgress {
+  kind: 'lichess' | 'file'
+  bytes: number
+  totalBytes: number | null
+  imported: number
 }
 
 export interface PuzzleRecord {
@@ -1285,6 +1306,8 @@ export const api = {
   importPuzzles: (csvPath?: string) =>
     sidecar.request<{ started: boolean }>('import_puzzles', csvPath ? { csv_path: csvPath } : {}),
   cancelPuzzleImport: () => sidecar.request<{ ok: boolean }>('cancel_puzzle_import'),
+  downloadPuzzles: () => sidecar.request<{ started: boolean }>('download_puzzles'),
+  puzzleCheckUpdate: () => sidecar.request<PuzzleUpdateInfo>('puzzle_check_update'),
   getPuzzleRating: () =>
     sidecar.request<{ rating: number; rd: number; volatility: number }>('get_puzzle_rating'),
   nextPuzzles: (targetRating: number, ratingRange: number, themes?: string[]) =>

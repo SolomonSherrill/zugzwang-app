@@ -50,3 +50,48 @@ describe('accounts', () => {
     expect(validateUsername('alice')).toBeNull()
   })
 })
+
+describe('the colour repair runs by itself when a username is added or changed (CR1)', () => {
+  it('Settings has no "Fix game colours" and no Maintenance section', async () => {
+    const src = (await import('./settings/SettingsView.svelte?raw')).default as string
+    const markup = src.slice(src.indexOf('</script>'))
+    expect(markup).not.toContain('Fix game colours')
+    expect(markup).not.toContain('Maintenance')
+    expect(src).not.toContain('api.repairColors')
+  })
+
+  const load = async (saved: Record<string, string> = {}) => {
+    withStorage({ 'zugzwang-accounts': JSON.stringify(saved) })
+    return await import('./settings.svelte')
+  }
+
+  it('runs once with the saved names when a name is added', async () => {
+    const mod = await load({})
+    const repair = vi.fn()
+    expect(mod.saveAccounts('', ' someone ', repair)).toBe(true)
+    expect(repair).toHaveBeenCalledTimes(1)
+    expect(repair).toHaveBeenCalledWith({ lichess: '', chesscom: 'someone' })
+  })
+
+  it('runs when a name is changed', async () => {
+    const mod = await load({ lichess: 'old', chesscom: 'kept' })
+    const repair = vi.fn()
+    expect(mod.saveAccounts('new', 'kept', repair)).toBe(true)
+    expect(repair).toHaveBeenCalledWith({ lichess: 'new', chesscom: 'kept' })
+  })
+
+  it('does not run when nothing changed, or a name was only removed', async () => {
+    const mod = await load({ lichess: 'a', chesscom: 'b' })
+    const repair = vi.fn()
+    expect(mod.saveAccounts('a', ' b ', repair)).toBe(false)
+    expect(mod.saveAccounts('', 'b', repair)).toBe(false)
+    expect(repair).not.toHaveBeenCalled()
+  })
+
+  it('decides from the names before and after', async () => {
+    const { namesAddedOrChanged } = await load({})
+    expect(namesAddedOrChanged({ lichess: '', chesscom: '' }, { lichess: 'x', chesscom: '' })).toBe(true)
+    expect(namesAddedOrChanged({ lichess: 'x', chesscom: '' }, { lichess: 'X', chesscom: '' })).toBe(true)
+    expect(namesAddedOrChanged({ lichess: 'x', chesscom: 'y' }, { lichess: '', chesscom: '' })).toBe(false)
+  })
+})

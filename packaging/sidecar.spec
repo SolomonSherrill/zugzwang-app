@@ -46,12 +46,27 @@ if sys.platform == "win32":
     print(f"sidecar.spec: bundling {buf.value} (loaded by cryptography's _rust.pyd)")
     binaries.append((buf.value, "."))
 
+# Zstandard for the puzzle download (FIX-B6 B): the standard library's compression.zstd (3.14+, the C
+# extension _zstd) when the build Python has it, else the zstandard package. Named here so the freeze
+# collects it and the build log says which; a Python with neither stops the build rather than ship a
+# sidecar whose puzzle download fails.
+try:
+    import compression.zstd  # noqa: F401
+    zstd_imports = ["compression.zstd", "_zstd"]
+except ImportError:
+    try:
+        import zstandard  # noqa: F401
+        zstd_imports = collect_submodules("zstandard")
+    except ImportError:
+        raise SystemExit("error: no Zstandard decoder (compression.zstd or the zstandard package) in the build Python")
+print(f"sidecar.spec: Zstandard from {zstd_imports[0]}")
+
 a = Analysis(
     [str(ROOT / "sidecar" / "main.py")],
     pathex=[str(ROOT)],
     binaries=binaries,
     datas=datas,
-    hiddenimports=collect_submodules("zugzwang") + collect_submodules("chess"),
+    hiddenimports=collect_submodules("zugzwang") + collect_submodules("chess") + zstd_imports,
     excludes=["tkinter", "test", "unittest", "pydoc_data", "pytest", "mypy"],
     noarchive=False,
 )

@@ -229,8 +229,9 @@
     {#if spawnError}
       <div class="spawn-error">Could not start the engine sidecar: {spawnError}</div>
     {:else}
-      <!-- FRIENDS-2: challenges to you, on any screen (ruling S2); BETA-6 (S6): a floating card, in no screen's flow -->
-      {#if SHOW_FRIENDS}<ChallengeBanners />{/if}
+      <!-- FRIENDS-2: challenges to you, on any screen (ruling S2); BETA-6 (S6): a floating card, in no screen's flow;
+           FIX-B6 (S8): where it would cover a control, a strip at the top of the content instead -->
+      {#if SHOW_FRIENDS}<ChallengeBanners screen={route} />{/if}
       <!-- Play stays mounted so a running game (and its clocks) survives navigation -->
       <div class="screen" style:display={route === 'play' && !live.activeId ? '' : 'none'}>
         <PlayView

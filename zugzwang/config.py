@@ -520,6 +520,17 @@ PUZZLE_RATING_RANGE_DEFAULT  = 1   # index → ±100
 PUZZLE_RUSH_TIMES   = [(180, "3 min"), (300, "5 min")]
 PUZZLE_SETUP_DELAY_MS   = 600    # pause before opponent setup move plays
 PUZZLE_IMPORT_BATCH     = 5_000  # rows per executemany commit
+# Lichess's puzzle database, CC0, downloaded in the app (FIX-B6 PZ1; never hosted by us).
+PUZZLE_LICHESS_URL        = "https://database.lichess.org/lichess_db_puzzle.csv.zst"
+PUZZLE_DOWNLOAD_TIMEOUT_S = 60       # per network read, not for the whole download
+# Free disk an import needs, per byte of the file: the new set is built beside the old one, plus
+# the write-ahead log. Measured 2026-11-23 (FIX-B6 B) on Lichess's file of 2026-11-01 (309,751,173
+# bytes, 1,177,486,537 decompressed, 5,531,622 puzzles kept): the database's peak growth (file + WAL)
+# was 1,583,996,232 bytes on a first download and 1,583,081,488 on an update over that set, so
+# 5.11 bytes per .zst byte and 1.35 per CSV byte; the factors below add about a quarter.
+PUZZLE_DISK_PER_ZST_BYTE  = 6.5
+PUZZLE_DISK_PER_CSV_BYTE  = 1.7
+PUZZLE_ZST_BYTES_FALLBACK = 400_000_000   # when the server gives no length
 
 # ── Opening Trainer ───────────────────────────────────────────────────────────
 

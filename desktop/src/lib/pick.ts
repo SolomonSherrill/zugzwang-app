@@ -15,11 +15,9 @@ export const pickPgn = () =>
   pick('Import PGN', [{ name: 'PGN', extensions: ['pgn'] }])
 
 export const pickPuzzleCsv = () =>
-  pick('Locate the Lichess puzzle CSV', [
-    // `.zst` is offered because that is how Lichess ships the file; the importer
-    // cannot read it, so picking one must fail with a readable message rather
-    // than be silently unselectable in the dialog.
-    { name: 'Puzzle database', extensions: ['csv', 'zst'] },
+  pick('Choose the Lichess puzzle file', [
+    // the .zst as Lichess ships it (decompressed as it is read, FIX-B6 B) or the CSV
+    { name: 'Puzzle database', extensions: ['zst', 'csv'] },
   ])
 
 /** The save dialog (BETA-5 B): a path, or null when cancelled. The webview cannot write files (a

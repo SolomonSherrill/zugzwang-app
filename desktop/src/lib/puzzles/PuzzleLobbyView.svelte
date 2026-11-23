@@ -4,6 +4,11 @@
    * with its trend and a new-peak line only on the day, solved with the share of tries, Rush
    * bests, Survival best), the Rated, Rush and Survival cards, recent sessions. Figures come
    * from puzzle_status and puzzle_summary; a figure with no data is not drawn.
+   *
+   * The puzzle database (FIX-B6 B, ruling PZ1): "Download puzzles from Lichess" when there are none;
+   * afterwards a line with the copy's date and count and "Check for new puzzles"; "Import a file"
+   * for offline use. A download or an update shows its progress in MB with Cancel; the previous
+   * set stays usable until the new one is in, so an update runs beside the lobby.
    */
   import { onDestroy, onMount } from 'svelte'
   import Button from '../ui/Button.svelte'
@@ -19,14 +24,15 @@
     type PuzzleMode,
     type PuzzleStatus,
     type PuzzleSummary,
+    type PuzzleUpdateInfo,
   } from '../api'
   import { pickPuzzleCsv } from '../pick'
-  import { BETA } from '../build'
   import { registerCommands } from '../shell/commands.svelte'
   import { dayWord, sparkline } from '../home/homeModel'
   import {
     RATED_THEMES, RATED_THEMES_SHOWN, ratingSubLine, rushBest, sessionModeLabel, sessionRatingText,
     sessionSolvedText, shareOfTries, themeLabel,
+    copyLine, doneLine, progressLine, progressShare, updateLine, type ImportDone, type ImportProgress,
   } from './puzzlesModel'
 
   interface Props {
@@ -38,9 +44,15 @@
   let summary = $state<PuzzleSummary | null>(null)
   let error = $state<string | null>(null)
   let importing = $state(false)
-  let importProgress = $state<{ imported: number; total: number } | null>(null)
+  let importProgress = $state<ImportProgress | null>(null)
+  let finishing = $state(false)
   let importError = $state('')
-  let importPath = $state<string | undefined>(undefined)
+  /** what to retry after a failure: the download, or the file picked */
+  let lastImport = $state<{ kind: 'lichess' } | { kind: 'file'; path: string } | null>(null)
+  let importDone = $state<ImportDone | null>(null)
+  let checking = $state(false)
+  let update = $state<PuzzleUpdateInfo | null>(null)
+  let checkError = $state('')
 
   let range = $state(String(PUZZLE_RATING_RANGES[PUZZLE_RATING_RANGE_DEFAULT]))
   let rush = $state(String(PUZZLE_RUSH_TIMES[0][0]))
@@ -60,24 +72,54 @@
     }
   }
 
-  async function startImport(csvPath?: string) {
+  function begin(kind: 'lichess' | 'file') {
     importError = ''
-    importPath = csvPath
-    // Set before the call: the first progress event only comes after 5 000 rows.
+    importDone = null
+    update = null
+    finishing = false
+    // Set before the call: the first progress event comes after the first batch.
     importing = true
-    importProgress = { imported: 0, total: 1 }
+    importProgress = { kind, bytes: 0, totalBytes: null, imported: 0 }
+  }
+  async function run(start: () => Promise<unknown>) {
     try {
-      await api.importPuzzles(csvPath)
+      await start()
     } catch (e) {
       importError = e instanceof Error ? e.message : String(e)
       importing = false
       importProgress = null
     }
   }
-  async function chooseCsv() {
+  async function startDownload() {
+    lastImport = { kind: 'lichess' }
+    begin('lichess')
+    await run(() => api.downloadPuzzles())
+  }
+  async function startImport(csvPath: string) {
+    lastImport = { kind: 'file', path: csvPath }
+    begin('file')
+    await run(() => api.importPuzzles(csvPath))
+  }
+  async function chooseFile() {
     const path = await pickPuzzleCsv()
     if (path === null) return
     await startImport(path)
+  }
+  function retry() {
+    if (lastImport?.kind === 'file') void startImport(lastImport.path)
+    else void startDownload()
+  }
+  async function checkForNew() {
+    checking = true
+    checkError = ''
+    update = null
+    try {
+      update = await api.puzzleCheckUpdate()
+    } catch (e) {
+      checkError = e instanceof Error ? e.message : String(e)
+    } finally {
+      checking = false
+    }
   }
 
   function toggleTheme(tag: string) {
@@ -106,7 +148,7 @@
   const startRush = (secs = Number(rush)) => onstart({ mode: 'rush', themes: [], rushSeconds: secs, ratingRange: 100 })
   const startSurvival = () => onstart({ mode: 'survival', themes: [], rushSeconds: 180, ratingRange: 50 })
 
-  const ready = $derived(!!status && status.imported && !importing && !!summary)
+  const ready = $derived(!!status && status.imported && !!summary)
   const sub = $derived(summary ? ratingSubLine(summary) : null)
   const series = $derived((summary?.rating?.series ?? []).map((p) => p.rating))
   const spark = $derived(sparkline(series, 194, 36))
@@ -121,21 +163,33 @@
   )
   const hiddenCount = $derived(RATED_THEMES.length - shownThemes.length)
   const anyInferred = $derived(!!summary?.sessions.some((s) => s.inferred))
-  const pct = $derived(importProgress ? Math.min(0.99, importProgress.imported / Math.max(1, importProgress.total)) : 0)
+  const share = $derived(finishing ? null : progressShare(importProgress))
   const fmt = (n: number) => n.toLocaleString('en-US')
 
   const onProgress = (d: Record<string, unknown>) => {
-    importProgress = { imported: d.imported as number, total: d.total as number }
+    importing = true
+    importProgress = d as unknown as ImportProgress
   }
-  const onDone = () => {
+  const onFinishing = () => {
+    finishing = true
+  }
+  const onDone = (d: Record<string, unknown>) => {
     importing = false
+    finishing = false
+    importProgress = null
+    importDone = d as unknown as ImportDone
+    void refresh()
+  }
+  const onCancelled = () => {
+    importing = false
+    finishing = false
     importProgress = null
     void refresh()
   }
-  const onCancelled = onDone
   const onError = (d: Record<string, unknown>) => {
     importError = String(d.message)
     importing = false
+    finishing = false
     importProgress = null
   }
 
@@ -150,6 +204,7 @@
   let off: (() => void) | null = null
   onMount(() => {
     sidecar.on('puzzle_import_progress', onProgress)
+    sidecar.on('puzzle_import_finishing', onFinishing)
     sidecar.on('puzzle_import_done', onDone)
     sidecar.on('puzzle_import_cancelled', onCancelled)
     sidecar.on('puzzle_import_error', onError)
@@ -166,6 +221,7 @@
   })
   onDestroy(() => {
     sidecar.off('puzzle_import_progress', onProgress)
+    sidecar.off('puzzle_import_finishing', onFinishing)
     sidecar.off('puzzle_import_done', onDone)
     sidecar.off('puzzle_import_cancelled', onCancelled)
     sidecar.off('puzzle_import_error', onError)
@@ -186,38 +242,28 @@
       <EmptyState tone="error" sentence="Puzzles could not load." sub={error} action={{ label: 'Try again', run: refresh }} />
     {:else if !status}
       <EmptyState sentence="Opening the puzzle database…" />
-    {:else if importing}
+    {:else if !status.imported && importing}
       <EmptyState
-        sentence={importProgress && importProgress.imported > 0
-          ? `Importing the Lichess puzzles: ${fmt(importProgress.imported)} so far, about ${Math.round(pct * 100)}%.`
-          : 'Reading the puzzle file…'}
-        sub="The import runs once. You can use the rest of the app while it runs."
-        progress={pct}
-        action={{ label: 'Cancel', run: () => void api.cancelPuzzleImport() }}
+        sentence={progressLine(importProgress, finishing)}
+        sub="You can use the rest of the app while it runs."
+        progress={share}
+        action={finishing ? null : { label: 'Cancel', run: () => void api.cancelPuzzleImport() }}
       />
     {:else if !status.imported}
       {#if importError}
         <EmptyState
           tone="error"
-          sentence="The puzzle import stopped."
+          sentence={lastImport?.kind === 'file' ? 'The puzzle import stopped. No puzzles were added.' : 'The download stopped. No puzzles were added.'}
           sub={importError}
-          action={status.csvExists || importPath
-            ? { label: 'Try again', run: () => void startImport(importPath), primary: true }
-            : { label: 'Choose the CSV…', run: () => void chooseCsv(), primary: true }}
-        />
-      {:else if status.csvExists}
-        <EmptyState
-          sentence="The puzzle database is not imported yet."
-          sub={`Zugzwang imports the Lichess puzzle file once (about 1.1 GB): ${status.csvPath}`}
-          action={{ label: 'Import puzzles', run: () => void startImport(), primary: true }}
+          action={{ label: 'Try again', run: retry, primary: true }}
+          secondary={{ label: 'Import a file…', run: () => void chooseFile() }}
         />
       {:else}
         <EmptyState
-          sentence="The puzzle database is not imported yet."
-          sub={BETA
-            ? 'Puzzles are optional. Download lichess_db_puzzle.csv.zst from database.lichess.org (Puzzles), decompress it to lichess_db_puzzle.csv (about 1.1 GB), then choose it. The import runs once; the CSV can be deleted afterwards.'
-            : `Download lichess_db_puzzle.csv from database.lichess.org, decompress it, and choose it, or put it at ${status.csvPath}.`}
-          action={{ label: 'Choose the CSV…', run: () => void chooseCsv(), primary: true }}
+          sentence="No puzzles yet."
+          sub="Zugzwang downloads Lichess's puzzle database (free, CC0) and imports it as it arrives. Without a connection, import the file (lichess_db_puzzle.csv.zst or the .csv) instead."
+          action={{ label: 'Download puzzles from Lichess', run: () => void startDownload(), primary: true }}
+          secondary={{ label: 'Import a file…', run: () => void chooseFile() }}
         />
       {/if}
     {:else if !summary}
@@ -339,6 +385,38 @@
           {/if}
         </section>
       {/if}
+
+      <section class="db" aria-labelledby="db-h">
+        <div class="rh"><h2 id="db-h">Puzzle database</h2></div>
+        <div class="dbbox">
+          {#if importing}
+            <p class="dbline">{progressLine(importProgress, finishing)}</p>
+            <p class="dbsub">Your puzzles stay as they are until the new ones are in.</p>
+            {#if share !== null}
+              <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(share * 100)}>
+                <span style:width="{Math.round(share * 100)}%"></span>
+              </div>
+            {/if}
+            {#if !finishing}
+              <div class="dbact"><Button size="sm" onclick={() => void api.cancelPuzzleImport()}>Cancel</Button></div>
+            {/if}
+          {:else}
+            <p class="dbline">{copyLine(status)}</p>
+            {#if importDone}<p class="dbsub">{doneLine(importDone)}</p>{/if}
+            {#if importError}<p class="dbsub loss" role="alert">{lastImport?.kind === 'file' ? 'The import stopped' : 'The download stopped'}; your puzzles are as they were. {importError}</p>{/if}
+            {#if checkError}<p class="dbsub loss" role="alert">{checkError}</p>{/if}
+            {#if update}<p class="dbsub">{updateLine(update)}</p>{/if}
+            <div class="dbact">
+              {#if update?.newer}
+                <Button size="sm" variant="primary" onclick={() => void startDownload()}>Download the new puzzles</Button>
+              {:else}
+                <Button size="sm" disabled={checking} onclick={() => void checkForNew()}>{checking ? 'Checking…' : 'Check for new puzzles'}</Button>
+              {/if}
+              <Button size="sm" variant="ghost" onclick={() => void chooseFile()}>Import a file…</Button>
+            </div>
+          {/if}
+        </div>
+      </section>
     {/if}
   </main>
 </div>
@@ -560,6 +638,43 @@
   }
   .r {
     text-align: right;
+  }
+  .dbbox {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-panel);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .dbline {
+    margin: 0;
+  }
+  .dbsub {
+    margin: 0;
+    color: var(--text-2);
+    font: var(--secondary);
+  }
+  .dbsub.loss {
+    color: var(--loss);
+  }
+  .dbact {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .bar {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--raised);
+    overflow: hidden;
+  }
+  .bar span {
+    display: block;
+    height: 100%;
+    background: var(--text);
+    transition: width 120ms linear;
   }
   .foot {
     margin: 8px 0 0;

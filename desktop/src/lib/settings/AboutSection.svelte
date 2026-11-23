@@ -77,6 +77,10 @@
     Zugzwang is free software under the GNU General Public License, version 3 or later. It bundles Stockfish 18 (GPLv3),
     unmodified from the official release.
   </p>
+  <p class="quiet">
+    Puzzles come from the Lichess puzzle database (database.lichess.org), downloaded from Lichess and released by
+    Lichess under CC0. Thank you, Lichess.
+  </p>
   {#if SHOW_FRIENDS}
     <p class="quiet">
       Friends' "≈" ratings convert Lichess ratings to Chess.com's scale with the ChessGoals rating comparison

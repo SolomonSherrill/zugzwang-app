@@ -94,9 +94,12 @@ from zugzwang.core.openings import OpeningsBook
 from zugzwang.core.friends.client import FriendsError
 from zugzwang.core.friends.runner import FriendsRunner, linked_players, list_payload, profile_payload
 from zugzwang.core.puzzle_core import (
+    PuzzleFileError,
     alternate_final_mates,
+    download_lichess_puzzles,
     glicko2_update,
-    import_puzzles_csv,
+    import_puzzles_file,
+    lichess_file_info,
 )
 from zugzwang.core.trainer import (
     accepted_book_moves,
@@ -698,49 +701,66 @@ class FenAnalysisRunner:
 
 
 class PuzzleImportRunner:
-    """PuzzleImporter's contract on a plain thread: one-shot CSV import with
-    its own SQLite connection (via import_puzzles_csv). Progress events go
-    straight to stdout; completion is marshalled to the app thread so the
-    meta flags are written on the DB-owning thread."""
+    """A puzzle import on a plain thread, with its own SQLite connection: a download from Lichess
+    (FIX-B6 B, PZ1) or a file the user picked (.csv or Lichess's .zst). Progress events go straight
+    to stdout; the end is marshalled to the app thread. The new set is swapped in only at the end,
+    so a cancelled or failed import leaves the previous one usable."""
 
     def __init__(self, post_call) -> None:
         self._post = post_call
         self._cancel = False
         self._thread: threading.Thread | None = None
+        self.kind: str | None = None
 
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self, csv_path: Path, db_path: Path, on_done) -> None:
+        self._start("file", lambda cancelled: import_puzzles_file(csv_path, db_path, cancelled), on_done)
+
+    def start_download(self, db_path: Path, on_done, url: str | None = None, open_fn=None) -> None:
+        self._start("lichess", lambda cancelled: download_lichess_puzzles(
+            db_path, cancelled, open_fn=open_fn, url=url), on_done)
+
+    def _start(self, kind: str, events, on_done) -> None:
         if self.running():
-            raise RuntimeError("an import is already running")
+            raise RuntimeError("A puzzle import is already running.")
         self._cancel = False
+        self.kind = kind
         self._thread = threading.Thread(
-            target=self._run, args=(csv_path, db_path, on_done),
-            name="puzzle-import", daemon=True,
+            target=self._run, args=(kind, events, on_done), name="puzzle-import", daemon=True,
         )
         self._thread.start()
 
     def cancel(self) -> None:
         self._cancel = True
 
-    def _run(self, csv_path: Path, db_path: Path, on_done) -> None:
+    def _run(self, kind: str, events, on_done) -> None:
+        last = 0.0
         try:
-            for event in import_puzzles_csv(
-                csv_path, db_path, is_cancelled=lambda: self._cancel,
-            ):
-                kind = event[0]
-                if kind == "progress":
-                    _emit("puzzle_import_progress", {"imported": event[1], "total": event[2]})
-                elif kind == "done":
-                    self._post(lambda count=event[1]: on_done(count))
-                elif kind == "cancelled":
-                    _emit("puzzle_import_cancelled", {})
-                elif kind == "error":
-                    _emit("puzzle_import_error", {"message": event[1]})
+            for event in events(lambda: self._cancel):
+                what = event[0]
+                if what == "progress":
+                    now = time.monotonic()
+                    if now - last >= 0.25:  # at most four a second: a batch can take 10 ms
+                        last = now
+                        _emit("puzzle_import_progress", {"kind": kind, "bytes": event[1],
+                                                         "totalBytes": event[2], "imported": event[3]})
+                elif what == "finishing":
+                    _emit("puzzle_import_finishing", {"kind": kind, "imported": event[1]})
+                elif what == "done":
+                    self._post(lambda stats=event[1]: on_done(stats))
+                elif what == "cancelled":
+                    _emit("puzzle_import_cancelled", {"kind": kind})
+                elif what == "error":
+                    _emit("puzzle_import_error", {"kind": kind, "message": event[1]})
+        except PuzzleFileError as exc:
+            _emit("puzzle_import_error", {"kind": kind, "message": str(exc)})
         except Exception as exc:
             logger.exception("puzzle import failed")
-            _emit("puzzle_import_error", {"message": str(exc)})
+            reason = getattr(exc, "reason", None) or exc
+            what = "The download stopped" if kind == "lichess" else "The import stopped"
+            _emit("puzzle_import_error", {"kind": kind, "message": f"{what}: {reason}."})
 
 
 class CoverageRunner:
@@ -1409,7 +1429,7 @@ def _game_dict(rec: GameRecord) -> dict:
 
 # Methods that reply from a worker thread instead of returning a result.
 # _handle_request passes req_id through and does not reply on their behalf.
-_DEFERRED_METHODS = {"insights", "check_usernames",
+_DEFERRED_METHODS = {"insights", "check_usernames", "puzzle_check_update",
                      # Friends (FRIENDS-1): the server's answers come on the Friends thread
                      "friends_check_handle", "friends_signup", "friends_recover", "friends_me",
                      "friends_list", "friends_request", "friends_answer", "friends_cancel",
@@ -2699,12 +2719,23 @@ class Server:
     # ── puzzles ───────────────────────────────────────────────────────────────
 
     def rpc_puzzle_status(self) -> dict:
+        """The lobby's state, and the copy you have (FIX-B6 B): its count from the import, its
+        date from Lichess's file (the Last-Modified it was served with); a file import has no
+        publication date, only the day it was imported."""
         rating, rd, _vol = self._db.get_puzzle_rating()
-        count_row = self._db._conn.execute("SELECT count(*) FROM puzzles").fetchone()
+        conn = self._db._conn
+        count_row = conn.execute("SELECT count(*) FROM puzzles").fetchone()
+        meta = dict(conn.execute(
+            "SELECT key, value FROM meta WHERE key IN ('puzzles_source', 'puzzles_source_date',"
+            " 'puzzles_imported_at', 'puzzles_source_bytes')").fetchall())
         return {
             "imported": self._db.puzzles_imported(),
             "count": count_row[0] if count_row else 0,
             "importing": self._importer.running(),
+            "importKind": self._importer.kind if self._importer.running() else None,
+            "source": meta.get("puzzles_source") or None,
+            "sourceDate": meta.get("puzzles_source_date") or None,
+            "importedAt": meta.get("puzzles_imported_at") or None,
             "rating": rating,
             "rd": rd,
             "csvPath": str(C.PUZZLE_CSV_PATH),
@@ -2712,29 +2743,56 @@ class Server:
         }
 
     def rpc_import_puzzles(self, csv_path: str | None = None) -> dict:
+        """Import a puzzle file the user picked, for offline use: the CSV, or Lichess's .zst as
+        downloaded (decompressed as it is read). Checked here, on the request, so a missing file
+        is an answer to the click rather than an error event later."""
         path = Path(csv_path).expanduser() if csv_path else C.PUZZLE_CSV_PATH
-        # Checked here, on the request, rather than in the import thread: those
-        # failures arrive as an error *event* well after the click, and this one
-        # is the likeliest first-run mistake — Lichess only publishes the file
-        # compressed, so the thing a user has just downloaded is the .zst.
-        if path.suffix == ".zst":
-            raise RuntimeError(
-                f"{path.name} is still compressed. Decompress it first "
-                f"(`zstd -d {path.name}`) and pick the .csv."
-            )
         if not path.exists():
             raise RuntimeError(f"No such file: {path}")
         self._importer.start(path, self._db_path, self._on_import_done)
         return {"started": True}
 
+    def rpc_download_puzzles(self) -> dict:
+        """Download Lichess's puzzle file and import it as it arrives (FIX-B6 B, PZ1)."""
+        self._importer.start_download(self._db_path, self._on_import_done)
+        return {"started": True}
+
+    def rpc_puzzle_check_update(self, req_id) -> None:
+        """"Check for new puzzles": what Lichess serves now (a HEAD request), against the copy you
+        have. Deferred (a thread), so the dispatch loop never waits on the network. Replies
+        {date, bytes, newer}: newer is true when the copy came from a file, or Lichess's file is
+        not the one imported (its ETag or date differs)."""
+        conn = self._db._conn
+        meta = dict(conn.execute(
+            "SELECT key, value FROM meta WHERE key IN ('puzzles_source', 'puzzles_source_date',"
+            " 'puzzles_source_etag')").fetchall())
+
+        def run() -> None:
+            try:
+                info = lichess_file_info()
+            except Exception as exc:
+                logger.warning("puzzle update check failed: %s", exc)
+                _reply_error(req_id, f"Lichess could not be reached: {getattr(exc, 'reason', None) or exc}.")
+                return
+            have_etag = meta.get("puzzles_source_etag") or ""
+            have_date = meta.get("puzzles_source_date") or ""
+            newer = (meta.get("puzzles_source") != "lichess"
+                     or (bool(info["etag"]) and info["etag"] != have_etag)
+                     or (bool(info["date"]) and info["date"] > have_date))
+            _reply(req_id, {"date": info["date"] or None, "bytes": info["bytes"], "newer": newer})
+
+        threading.Thread(target=run, name="puzzle-check", daemon=True).start()
+
     def rpc_cancel_puzzle_import(self) -> dict:
         self._importer.cancel()
         return {"ok": True}
 
-    def _on_import_done(self, count: int) -> None:
-        """App thread: write meta flags on the DB-owning connection."""
-        self._db.mark_puzzles_imported(count)
-        _emit("puzzle_import_done", {"count": count})
+    def _on_import_done(self, stats: dict) -> None:
+        """App thread: the import wrote its meta inside the swap; tell the webview."""
+        logger.info("puzzle import done: %s", stats)
+        _emit("puzzle_import_done", {"count": stats["count"], "added": stats["added"],
+                                     "removed": stats["removed"],
+                                     "removedAttempted": stats["removed_attempted"]})
 
     def rpc_get_puzzle_rating(self) -> dict:
         rating, rd, volatility = self._db.get_puzzle_rating()
