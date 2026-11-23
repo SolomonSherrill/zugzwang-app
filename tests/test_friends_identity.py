@@ -1,6 +1,7 @@
 """FRIENDS-1 C: the account key, its recovery code, and where it is kept (rulings A1, A2)."""
 import os
 import stat
+import sys
 
 import pytest
 
@@ -98,7 +99,8 @@ def test_file_keystore_is_private_and_deletable(tmp_path):
     assert ks.get() is None
     ks.set("ab" * 20)
     assert ks.get() == "ab" * 20
-    assert stat.S_IMODE(os.stat(tmp_path / "k.json").st_mode) == 0o600
+    if sys.platform != "win32":     # Windows has no POSIX modes (its CI found 0o666; BETA-5 D)
+        assert stat.S_IMODE(os.stat(tmp_path / "k.json").st_mode) == 0o600
     ks.delete()
     assert ks.get() is None
 

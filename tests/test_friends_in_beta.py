@@ -23,8 +23,8 @@ def test_the_packaged_sidecar_bundles_every_asset_folder():
     assets = ROOT / "zugzwang/assets"
     # not shipped on purpose: the Polyglot book; packaged builds download theirs (BOOK-DL)
     not_shipped = {"zugzwang/assets/openings/Perfect2023.bin"}
-    leaves = sorted({str(p.parent.relative_to(ROOT)) for p in assets.rglob("*") if p.is_file()
-                     and "__pycache__" not in p.parts and str(p.relative_to(ROOT)) not in not_shipped})
+    leaves = sorted({p.parent.relative_to(ROOT).as_posix() for p in assets.rglob("*") if p.is_file()
+                     and "__pycache__" not in p.parts and p.relative_to(ROOT).as_posix() not in not_shipped})
     assert "zugzwang/assets/ratings" in leaves
     for leaf in leaves:
         assert f'"{leaf}"' in spec or any(f'"{leaf.rsplit("/", n)[0]}"' in spec for n in range(1, leaf.count("/"))), leaf
