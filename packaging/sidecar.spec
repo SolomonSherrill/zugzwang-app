@@ -8,7 +8,10 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = Path(SPECPATH).resolve().parent
 ONEFILE = os.environ.get("ZUGZWANG_ONEFILE") == "1"
 
-datas = [(str(ROOT / "zugzwang/assets/openings/eco"), "zugzwang/assets/openings/eco")]
+datas = [(str(ROOT / "zugzwang/assets/openings/eco"), "zugzwang/assets/openings/eco"),
+         # the ChessGoals rating table Friends reads (FRIENDS-1 R2); missing until BETA-5 C, when Friends
+         # first ran in a packaged build (friends_status failed without it)
+         (str(ROOT / "zugzwang/assets/ratings"), "zugzwang/assets/ratings")]
 version_file = ROOT / "build" / "build_info.json"
 if version_file.exists():
     datas.append((str(version_file), "zugzwang"))

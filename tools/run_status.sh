@@ -49,6 +49,16 @@ if [ -f "$MAIN/tools/claude-root-settings.json" ]; then
     echo "  instruction-file exclusions: NOT installed (cp tools/claude-root-settings.json .claude/settings.json)"
   fi
 fi
+# TOKENS-2 C: the language-server plugins (enabled in the main checkout's settings.local.json, which worktree
+# sessions share) and their binaries on PATH (review/TOKENS.md "Results, TOKENS-2", C)
+LSP=""
+for p in pyright-lsp typescript-lsp; do
+  grep -q "\"$p@claude-plugins-official\": true" "$MAIN/.claude/settings.local.json" 2>/dev/null && LSP="$LSP $p:enabled" || LSP="$LSP $p:NOT-enabled"
+done
+for b in pyright-langserver typescript-language-server; do
+  command -v "$b" >/dev/null 2>&1 && LSP="$LSP $b:on-PATH" || LSP="$LSP $b:MISSING"
+done
+echo "  language servers:$LSP"
 
 echo "== worktrees (merged = its HEAD is in main)"
 g worktree list --porcelain | awk '/^worktree /{p=substr($0,10)} /^HEAD /{h=$2} /^branch /{b=substr($0,19)} /^detached/{b="(detached)"} /^$/{print p"\t"h"\t"b; p=h=b=""} END{if(p!="")print p"\t"h"\t"b}' |

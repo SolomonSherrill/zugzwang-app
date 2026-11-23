@@ -5,10 +5,12 @@
   /**
    * primary: the one filled action per screen. ghost: 1px border-control, text-2 (the
    * default). quiet: no border, text-3, for low-weight actions. pressed: a ghost held on
-   * (raised fill, border-strong). Every variant keeps the 2px focus ring.
+   * (raised fill, border-strong). danger: a destructive action (Delete account, Remove friend,
+   * Block; FRIENDS.md ruling S4): --loss text on the --danger-border outline; never Accept / Decline.
+   * Every variant keeps the 2px focus ring.
    */
   interface Props {
-    variant?: 'primary' | 'ghost' | 'quiet'
+    variant?: 'primary' | 'ghost' | 'quiet' | 'danger'
     pressed?: boolean
     disabled?: boolean
     kbd?: string
@@ -109,6 +111,15 @@
   }
   .quiet:hover:not(:disabled) {
     color: var(--text);
+  }
+  .danger {
+    background: transparent;
+    color: var(--loss);
+    border: 1px solid var(--danger-border);
+  }
+  .danger:hover:not(:disabled) {
+    background: var(--surface);
+    border-color: var(--loss);
   }
   .btn:disabled {
     cursor: default;

@@ -151,7 +151,9 @@ try {
   await server.close()
 }
 if (checks.length) {
-  const out = resolve(outRoot, 'sizes', 'layout_check.out')
+  // the sizes/ run's file, or the filtered area's own (friends/ writes friends/layout_check.out)
+  const area = filter && !filter.startsWith('sizes') ? filter.split('/')[0] : 'sizes'
+  const out = resolve(outRoot, area, 'layout_check.out')
   mkdirSync(dirname(out), { recursive: true })
   const head =
     `# The small-windows layout check (harness/layoutCheck.ts), ${checks.length} shots, filter "${filter}", ${harnessBrowserName}.\n` +

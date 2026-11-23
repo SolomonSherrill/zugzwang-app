@@ -37,8 +37,14 @@
     /** "Play it vs Stockfish": a new game from the position on the board */
     onplayfen: (fen: string) => void
     onsettings: () => void
+    /** a game's moves (UCI) from the FEN, laid out as the line: a friend's game analysed on
+     *  request (FRIENDS.md G1), never stored */
+    initialMoves?: string[] | null
+    /** the screen's title, "Analyse a position" by default (a friend's game names itself) */
+    title?: string
   }
-  let { fen, backLabel = 'Games', onback, onplayfen, onsettings }: Props = $props()
+  let { fen, backLabel = 'Games', onback, onplayfen, onsettings, initialMoves = null, title = 'Analyse a position' }: Props =
+    $props()
 
   // ── the position ─────────────────────────────────────────────────────────────
   /** chess.js's reading of the FEN; the sidecar's stricter legality (VAL-FEN) answers
@@ -285,6 +291,7 @@
   let cleanups: (() => void)[] = []
   onMount(() => {
     cleanups.push(live.attach(), registerCommands('analyse', provide))
+    if (initialMoves?.length) void playUcis(initialMoves).then(() => setPlace(onMain(0)))
     api
       .engineStatus()
       .then((s) => (engineOk = s.ok))
@@ -300,7 +307,7 @@
     <div class="crumb">
       <button type="button" class="back" onclick={onback}>{backLabel}</button>
       <span class="sep" aria-hidden="true">/</span>
-      <span class="title">Analyse a position</span>
+      <span class="title">{title}</span>
     </div>
     {#if !illegal}
       <div class="actions">

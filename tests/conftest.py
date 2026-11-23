@@ -23,3 +23,8 @@ def _isolated_user_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("zugzwang.config.USER_DIR", tmp_path)
     monkeypatch.setenv("ZUGZWANG_DB", str(tmp_path / "zugzwang.db"))
     monkeypatch.setenv("ZUGZWANG_DATA_DIR", str(tmp_path))
+    # Friends (FRIENDS-1): never the real keychain, never a real server
+    monkeypatch.setenv("ZUGZWANG_KEYSTORE", "file:" + str(tmp_path / "keystore.json"))
+    monkeypatch.delenv("ZUGZWANG_FRIENDS_URL", raising=False)
+    # FRIENDS-1B C: config now names the deployed server; a test that wants one starts its own
+    monkeypatch.setattr("zugzwang.config.FRIENDS_SERVER_URL", "")

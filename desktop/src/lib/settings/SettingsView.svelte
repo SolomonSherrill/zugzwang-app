@@ -46,6 +46,8 @@
   import BookSection from './BookSection.svelte'
   import AppearanceSection from './AppearanceSection.svelte'
   import AboutSection from './AboutSection.svelte'
+  import FriendsSection from './FriendsSection.svelte'
+  import { SHOW_FRIENDS } from '../build'
 
   interface Props {
     onnav?: (route: 'games') => void
@@ -283,6 +285,16 @@
         </div>
       </div>
     </section>
+
+    {#if SHOW_FRIENDS}
+      <section aria-labelledby="s-friends">
+        <div class="lead">
+          <h2 id="s-friends">Friends</h2>
+          <p>Your handle, what friends can see, and chat.</p>
+        </div>
+        <div class="body"><FriendsSection /></div>
+      </section>
+    {/if}
 
     <section aria-labelledby="s-sync">
       <div class="lead">

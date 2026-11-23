@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * The left sidebar (DESIGN.md "Shell"): app mark and name, "Search or jump to" with ⌘K,
+   * The left sidebar (DESIGN.md "Shell"): app mark (the ℤ tile, LOGO-1) and name, "Search or jump to" with ⌘K,
    * then Home, Play, Puzzles, Openings, Games, Insights (no Coach item, ruling 16); on Review
    * a "Recent games" list; Settings at the foot. A dot on Play while a game runs, on every
    * screen (UI-BUILD-2, Play).
@@ -13,19 +13,25 @@
   import { onMount } from 'svelte'
   import type { GameSummary } from '../api'
   import { playState } from '../play/playState.svelte'
+  // the app mark (LOGO-1): the TeX \mathbb{Z} on the light tile, design/logo/
+  import logoMark from '../../assets/logo/zugzwang-mark.png'
 
-  export type NavRoute = 'home' | 'play' | 'puzzles' | 'trainer' | 'games' | 'insights' | 'settings'
+  export type NavRoute = 'home' | 'play' | 'puzzles' | 'trainer' | 'games' | 'insights' | 'friends' | 'settings'
   interface Props {
     active: NavRoute | null
     /** the Openings item (the trainer until OPEN-1); hidden in beta builds */
     showOpenings: boolean
+    /** Friends, near Settings at the foot (FRIENDS.md ruling S1); hidden in beta builds (L4) */
+    showFriends?: boolean
+    /** incoming friend requests, shown on the Friends item */
+    friendsCount?: number
     recent?: GameSummary[] | null
     currentGameId?: number | null
     onnav: (r: NavRoute) => void
     onopengame?: (id: number) => void
     onsearch: () => void
   }
-  let { active, showOpenings, recent = null, currentGameId = null, onnav, onopengame, onsearch }: Props =
+  let { active, showOpenings, showFriends = false, friendsCount = 0, recent = null, currentGameId = null, onnav, onopengame, onsearch }: Props =
     $props()
 
   const ICONS: Record<NavRoute, string> = {
@@ -35,6 +41,7 @@
     trainer: '<path d="M2 5h6a4 4 0 0 1 4 4v11a3 3 0 0 0-3-3H2zM22 5h-6a4 4 0 0 0-4 4v11a3 3 0 0 1 3-3h7z"/>',
     games: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
     insights: '<path d="M4 20V11M10 20V5M16 20v-8M22 20H2"/>',
+    friends: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.8"/><path d="M16.5 14.6c2.6.2 4.4 1.9 5 5.4"/>',
     settings:
       '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
   }
@@ -88,22 +95,7 @@
 
 <nav class="sidebar" class:rail aria-label="Sidebar">
   <div class="mark">
-    <span class="logo" aria-hidden="true"
-      ><svg viewBox="0 0 45 45" width="16" height="16"
-        ><path
-          d="M22 10c10.5 1 16.5 8 16 29H15c0-9 10-6.5 8-21"
-          fill="currentColor"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linejoin="round"
-        /><path
-          d="M24 18c.38 2.91-5.55 7.37-8 9-3 2-2.82 4.34-5 4-1.04-.94 1.41-3.04 0-3-1 0 .19 1.23-1 2-1 0-4 1-4-4 0-2 6-12 6-12s1.89-1.9 2-3.5c-.73-1-.5-2-.5-3 1-1 3 2.5 3 2.5h2s.78-1.99 2.5-3c1 0 1 3 1 3"
-          fill="currentColor"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linejoin="round"
-        /></svg
-      ></span>
+    <img class="logo" src={logoMark} alt="" width="20" height="20" aria-hidden="true" />
     <span class="name">Zugzwang</span>
   </div>
   <button type="button" class="search" onclick={onsearch} aria-label={rail ? 'Search or jump to' : undefined} aria-keyshortcuts="Meta+K">
@@ -148,6 +140,23 @@
     {/each}
   {/if}
   <div class="spacer"></div>
+  {#if showFriends}
+    <button
+      type="button"
+      class="item"
+      class:active={active === 'friends'}
+      aria-current={active === 'friends' ? 'page' : undefined}
+      aria-label={rail ? (friendsCount ? `Friends, ${friendsCount} requests` : 'Friends') : undefined}
+      onclick={() => onnav('friends')}
+    >
+      <svg width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"
+        >{@html ICONS.friends}</svg
+      >{#if rail}<span class="tip" aria-hidden="true">Friends</span>{:else}Friends{/if}{#if friendsCount}<span
+          class="count"
+          aria-label="{friendsCount} friend requests">{friendsCount}</span
+        >{/if}
+    </button>
+  {/if}
   <button
     type="button"
     class="item"
@@ -181,15 +190,12 @@
     gap: 8px;
     padding: 4px 8px 12px;
   }
+  /* the PNG is the whole tile (light, rounded corners, transparent outside them) */
   .logo {
     width: 20px;
     height: 20px;
-    border-radius: 5px;
-    background: var(--text);
-    color: var(--primary-ink);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    flex: none;
+    display: block;
   }
   .name {
     font-weight: 600;
@@ -298,6 +304,31 @@
   .spacer {
     flex: 1;
     min-height: 24px;
+  }
+  /* the request count on Friends (ruling S1), as MinimalFriends.html draws it */
+  .count {
+    margin-left: auto;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    box-sizing: border-box;
+    border-radius: 9px;
+    background: var(--selected);
+    color: var(--text);
+    font: var(--secondary);
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .rail .count {
+    position: absolute;
+    top: 2px;
+    right: 0;
+    min-width: 16px;
+    height: 16px;
+    font-size: 10px;
+    padding: 0 4px;
   }
 
   /* ── the icon rail, below 1440 wide (fifth rulings, 2) ── */

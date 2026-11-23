@@ -21,24 +21,39 @@
   import SettingsView from './lib/settings/SettingsView.svelte'
   import PuzzlesView from './lib/puzzles/PuzzlesView.svelte'
   import type { GameSummary } from './lib/api'
-  import { SHOW_TRAINER } from './lib/build'
+  import { SHOW_FRIENDS, SHOW_TRAINER } from './lib/build'
+  import FriendsView from './lib/friends/FriendsView.svelte'
+  import FriendProfile from './lib/friends/FriendProfile.svelte'
+  import { friendsApi } from './lib/friends/friendsApi'
+  import { incomingCount, startFriends } from './lib/friends/friendsState.svelte'
   import UpdateCheck from './lib/UpdateCheck.svelte'
 
-  type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'insights' | 'settings'
+  type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'insights' | 'friends' | 'friend' | 'settings'
 
 
   /** Where the app opens: always Home in the app; the browser harness passes a screen. */
   interface Props {
-    initial?: { route: Route; gameId?: number; ply?: number; fen?: string }
+    initial?: { route: Route; gameId?: number; ply?: number; fen?: string; friend?: string; now?: number }
   }
   let { initial }: Props = $props()
 
   // svelte-ignore state_referenced_locally
   let route = $state<Route>(initial?.route ?? 'home')
   // svelte-ignore state_referenced_locally
-  let reviewTarget = $state<{ gameId?: number; fen?: string; ply?: number; action?: 'try' | 'best' | 'analyse' } | null>(
+  let reviewTarget = $state<{
+    gameId?: number
+    fen?: string
+    ply?: number
+    action?: 'try' | 'best' | 'analyse'
+    /** a friend's game analysed on request (FRIENDS.md G1): its moves from the FEN, and a title */
+    moves?: string[]
+    title?: string
+  } | null>(
     initial?.gameId != null ? { gameId: initial.gameId, ply: initial.ply } : initial?.fen ? { fen: initial.fen } : null,
   )
+  // Friends (FRIENDS-1): the profile on view
+  // svelte-ignore state_referenced_locally
+  let friendHandle = $state<string | null>(initial?.friend ?? null)
   // where a Back from the review/analysis screen should return to
   let reviewOrigin = $state<Route>('games')
   let spawnError = $state('')
@@ -84,10 +99,21 @@
   /** The breadcrumb's first word on Analyse a position: where Back returns. */
   const ORIGIN_LABEL: Partial<Record<Route, string>> = {
     home: 'Home', games: 'Games', play: 'Play', puzzles: 'Puzzles', trainer: 'Openings', insights: 'Insights', settings: 'Settings',
+    friends: 'Friends', friend: 'Friends',
   }
   function openFenReview(fen: string, origin: Route = 'games') {
     reviewOrigin = origin
     reviewTarget = { fen }
+    route = 'review'
+  }
+  function openFriend(handle: string) {
+    friendHandle = handle
+    route = 'friend'
+  }
+  async function analyseFriendGame(id: number, label: string) {
+    const g = await friendsApi.game(id)
+    reviewOrigin = 'friend'
+    reviewTarget = { fen: g.startFen, moves: g.moves, title: label }
     route = 'review'
   }
   function playFromFen(fen: string) {
@@ -102,7 +128,12 @@
 
 
   // ── shell (UI-BUILD B1): the sidebar's active item, recent games on Review, ⌘K ──
-  const sidebarActive = $derived<NavRoute | null>(route === 'review' ? 'games' : (route as NavRoute))
+  const sidebarActive = $derived<NavRoute | null>(
+    route === 'review' ? (reviewOrigin === 'friend' ? 'friends' : 'games') : route === 'friend' ? 'friends' : (route as NavRoute),
+  )
+  onMount(() => {
+    if (SHOW_FRIENDS) startFriends()
+  })
   let recent = $state<GameSummary[] | null>(null)
   $effect(() => {
     if (backend !== 'up' || route !== 'review') return
@@ -118,6 +149,7 @@
     ...(SHOW_TRAINER ? [{ route: 'trainer' as Route, label: 'Openings' }] : []),
     { route: 'games', label: 'Games' },
     { route: 'insights', label: 'Insights' },
+    ...(SHOW_FRIENDS ? [{ route: 'friends' as Route, label: 'Friends' }] : []),
     { route: 'settings', label: 'Settings' },
   ]
   onMount(() =>
@@ -170,6 +202,8 @@
   <Sidebar
     active={sidebarActive}
     showOpenings={SHOW_TRAINER}
+    showFriends={SHOW_FRIENDS}
+    friendsCount={SHOW_FRIENDS ? incomingCount() : 0}
     recent={route === 'review' ? recent : null}
     currentGameId={reviewTarget?.gameId ?? null}
     onnav={(r) => navTo(r as Route)}
@@ -210,6 +244,8 @@
         {#key reviewTarget.fen}
           <PositionAnalysis
             fen={reviewTarget.fen}
+            initialMoves={reviewTarget.moves ?? null}
+            title={reviewTarget.title ?? 'Analyse a position'}
             backLabel={ORIGIN_LABEL[reviewOrigin] ?? 'Games'}
             onback={() => navTo(reviewOrigin)}
             onplayfen={playFromFen}
@@ -227,6 +263,12 @@
         />
       {:else if route === 'insights'}
         <InsightsView onconnect={() => navTo('settings')} onopen={openReviewAt} />
+      {:else if route === 'friends' && SHOW_FRIENDS}
+        <FriendsView onopen={openFriend} now={initial?.now} />
+      {:else if route === 'friend' && SHOW_FRIENDS && friendHandle}
+        {#key friendHandle}
+          <FriendProfile handle={friendHandle} onback={() => navTo('friends')} onanalyse={analyseFriendGame} now={initial?.now} />
+        {/key}
       {:else if route === 'settings'}
         <SettingsView onnav={(r) => navTo(r)} />
       {/if}

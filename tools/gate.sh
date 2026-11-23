@@ -9,6 +9,12 @@
 #   cargo    (desktop/src-tauri) cargo test --lib
 #   scan     release/export_public.py, then release/scan_public.py over the published files that
 #            changed since base-ref (every published file when no base-ref is given)
+#   rpcmap   tools/rpc_map.py --check: RPC_MAP.md is what the script writes (TOKENS-2 B)
+#   server   (server) npm test and npm run check: the Friends Worker's tests in the local Workers
+#            runtime, and tsc (FRIENDS-1 B); npm ci there first when it has no node_modules
+#   e2e      .venv/bin/python sidecar/friends_e2e.py: two app identities (real sidecars) against the
+#            Worker under `wrangler dev --local` and a local Chess.com/Lichess stand-in, no network
+#            (FRIENDS-1 E; in the gate since FRIENDS-1B E, 14 s measured 2026-11-22)
 # Full logs go to <main checkout>/.work/gates/<sha>/<check>.log; the summary goes to
 # <main checkout>/.work/gates/<sha>.txt and stdout: one line per check (PASS/FAIL, measured counts,
 # seconds) and, for a failure, the failing tests with at most 40 lines each. Exit 1 on any failure.
@@ -29,7 +35,7 @@ GATES="$MAIN/.work/gates"
 LOGS="$GATES/$SHA"
 SUMMARY="$GATES/$SHA.txt"
 PY="$MAIN/.venv/bin/python"
-ALL="python smoke vitest check cargo scan"
+ALL="python smoke vitest check cargo scan rpcmap server e2e"
 ONLY=${GATE_ONLY:-$ALL}
 mkdir -p "$LOGS"
 : > "$SUMMARY"
@@ -188,6 +194,49 @@ if wanted scan; then
     grep -vE '^( |$|scanned |exported |[^ ].*: [0-9]+$)' "$L" | head -20 | sed 's/^/    /' | tee -a "$SUMMARY"
   fi
   rm -rf "$EXP" "$EXP.changed" "$EXP.manifest"
+fi
+
+if wanted rpcmap; then
+  run rpcmap "$ROOT" "$PY" tools/rpc_map.py --check
+  L=$LOGS/rpcmap.log
+  if [ $RC -eq 0 ]; then line PASS rpcmap "$(tail -1 "$L")" "$SECS"; else
+    FAILED=1; line FAIL rpcmap "$(tail -1 "$L")" "$SECS"
+    tail -40 "$L" | sed 's/^/    /' | tee -a "$SUMMARY"
+  fi
+fi
+
+server_deps() { # server/node_modules for the server and e2e checks (gitignored: a worktree has none)
+  if [ ! -d "$ROOT/server/node_modules" ]; then
+    if (cd "$ROOT/server" && npm ci --no-audit --no-fund) > "$LOGS/npm-ci-server.log" 2>&1; then
+      say "  setup: ran npm ci in server/ (log $LOGS/npm-ci-server.log)"
+    else
+      say "  setup: npm ci in server/ FAILED (log $LOGS/npm-ci-server.log)"
+    fi
+  fi
+}
+
+if wanted server && [ -d "$ROOT/server" ]; then
+  server_deps
+  run server "$ROOT/server" sh -c 'npm test && npm run check'
+  L=$LOGS/server.log
+  F=$(grep -E '^ *Test Files ' "$L" | tail -1 | strip)
+  T=$(grep -E '^ *Tests ' "$L" | tail -1 | strip)
+  if [ $RC -eq 0 ]; then line PASS server "${F:-?}; ${T:-?}; tsc: ok" "$SECS"; else
+    FAILED=1; line FAIL server "${F:-exit $RC}; ${T:-}" "$SECS"
+    tail -40 "$L" | strip | sed 's/^/    /' | tee -a "$SUMMARY"
+  fi
+fi
+
+if wanted e2e && [ -d "$ROOT/server" ]; then
+  server_deps
+  run e2e "$ROOT" "$PY" sidecar/friends_e2e.py
+  L=$LOGS/e2e.log
+  OK=$(grep -c '^✓' "$L"); BAD=$(grep -c '^✗' "$L")
+  if [ $RC -eq 0 ]; then line PASS e2e "$OK checks passed, $BAD failed" "$SECS"; else
+    FAILED=1; line FAIL e2e "$OK checks passed, $BAD failed (exit $RC)" "$SECS"
+    grep '^✗' "$L" | head -40 | sed 's/^/    /' | tee -a "$SUMMARY"
+    [ "$BAD" = "0" ] && tail -40 "$L" | sed 's/^/    /' | tee -a "$SUMMARY"
+  fi
 fi
 
 if [ $FAILED -eq 0 ]; then say "gate $SHA: GREEN (full logs: $LOGS/)"; else say "gate $SHA: RED (full logs: $LOGS/)"; fi

@@ -1,4 +1,4 @@
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
 
 /** Normalise the dialog's three outcomes to two.
  *
@@ -21,6 +21,13 @@ export const pickPuzzleCsv = () =>
     // than be silently unselectable in the dialog.
     { name: 'Puzzle database', extensions: ['csv', 'zst'] },
   ])
+
+/** The save dialog (BETA-5 B): a path, or null when cancelled. The webview cannot write files (a
+ *  download link does nothing in Tauri's macOS webview), so the sidecar writes to the path. */
+export async function pickSavePath(title: string, defaultPath: string, filters: { name: string; extensions: string[] }[]) {
+  const picked = await save({ title, defaultPath, filters })
+  return typeof picked === 'string' && picked ? picked : null
+}
 
 /** No extension filter: a Unix executable has none, and on macOS the binary may
  *  sit inside a `.app` bundle the user has to navigate into. */

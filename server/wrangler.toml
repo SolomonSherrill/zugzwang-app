@@ -1,0 +1,38 @@
+# The Zugzwang Friends server (FRIENDS.md, FRIENDS-1 B): a Cloudflare Worker over one D1 database.
+# Deploy steps: server/README.md. Deployed 2026-11-22 (FRIENDS-1B C) at https://api.zugzwangapp.com, a Workers
+# custom domain (FRIENDS.md ruling V8); the database_id is the one `wrangler d1 create zugzwang-friends`
+# printed. The local runs (tests, `wrangler dev --local`) do not use it.
+name = "zugzwang-friends"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+# Served only at the custom domain: the account has no workers.dev subdomain, and none is needed.
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "api.zugzwangapp.com", custom_domain = true }]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "zugzwang-friends"
+database_id = "21546d72-4bfe-4b51-b247-14d608674d38"
+migrations_dir = "migrations"
+
+[vars]
+LICHESS_API = "https://lichess.org"
+CHESSCOM_API = "https://api.chess.com"
+# The owner's admin public key (base64url, 32 bytes) for scripts/admin.mjs (its private half:
+# ~/.config/zugzwang/friends-admin-key.json, made 2026-11-22); empty: no admin requests.
+ADMIN_PUBLIC_KEY = "O3IpPw4Y3w45k78MEm-fNPkGfr2NCZiU3RTt4fIrAs8"
+
+# LINK_SECRET (the key the Chess.com codes are derived from) is a secret, never here:
+#   npx wrangler secret put LINK_SECRET
+
+# Per-account and per-address request limits, counted by Cloudflare (never stored by this code).
+[[ratelimits]]
+name = "ACCOUNT_LIMITER"
+namespace_id = "41001"
+simple = { limit = 120, period = 60 }
+
+[[ratelimits]]
+name = "ANON_LIMITER"
+namespace_id = "41002"
+simple = { limit = 20, period = 60 }

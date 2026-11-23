@@ -4,6 +4,7 @@ import { PUZZLE_SHOTS } from './puzzlesShots.ts'
 import { GAMES_SHOTS } from './gamesShots.ts'
 import { PROMOTION_SHOTS } from './promotionShots.ts'
 import { FLAG_SHOTS } from './flagShots.ts'
+import { FRIENDS_SHOTS } from './friendsShots.ts'
 
 export interface Shot {
   dir: string
@@ -611,4 +612,6 @@ export const SHOTS: Shot[] = [
   ...PROMOTION_SHOTS,
   // the Flag this shots only in a beta harness (ZUGZWANG_HARNESS_BETA=1, harness/flagShots.ts)
   ...(process.env.ZUGZWANG_HARNESS_BETA === '1' ? FLAG_SHOTS : []),
+  // Friends (FRIENDS-1 E): not in beta builds (ruling L4)
+  ...(process.env.ZUGZWANG_HARNESS_BETA === '1' ? [] : FRIENDS_SHOTS),
 ]

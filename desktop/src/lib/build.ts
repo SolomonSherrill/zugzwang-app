@@ -12,6 +12,11 @@ export const BETA: boolean = typeof __BETA__ === 'boolean' ? __BETA__ : false
  *  hide it again in one place. */
 export const SHOW_TRAINER: boolean = true
 
+/** Whether Friends is shown (the sidebar item, its screens, Settings → Friends, ⌘K): in every build
+ *  since the owner approved the Privacy policy and the Terms of use (FRIENDS.md ruling L9, 2026-11-22;
+ *  ruling L4 kept it out of beta builds until then). The sidecar's switch is config.FRIENDS_ENABLED. */
+export const SHOW_FRIENDS: boolean = true
+
 /** Only for the local end-to-end updater proof (BETA item 8): a build made with
  *  `ZUGZWANG_UPDATE_AUTOCONFIRM=1` installs an offered update without the click. Never
  *  set in CI or for testers. */

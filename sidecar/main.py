@@ -91,6 +91,8 @@ from zugzwang.core.platform_sync import (
     fetch_lichess_games,
 )
 from zugzwang.core.openings import OpeningsBook
+from zugzwang.core.friends.client import FriendsError
+from zugzwang.core.friends.runner import FriendsRunner, linked_players, list_payload, profile_payload
 from zugzwang.core.puzzle_core import (
     alternate_final_mates,
     glicko2_update,
@@ -1395,7 +1397,14 @@ def _game_dict(rec: GameRecord) -> dict:
 
 # Methods that reply from a worker thread instead of returning a result.
 # _handle_request passes req_id through and does not reply on their behalf.
-_DEFERRED_METHODS = {"insights", "check_usernames"}
+_DEFERRED_METHODS = {"insights", "check_usernames",
+                     # Friends (FRIENDS-1): the server's answers come on the Friends thread
+                     "friends_check_handle", "friends_signup", "friends_recover", "friends_me",
+                     "friends_list", "friends_request", "friends_answer", "friends_cancel",
+                     "friends_remove", "friends_block", "friends_unblock", "friends_appear_offline",
+                     "friends_link_lichess", "friends_chesscom_start", "friends_chesscom_verify",
+                     "friends_chesscom_cancel", "friends_save_recovery",
+                     "friends_unlink", "friends_delete_account", "friends_profile"}
 
 
 class RelabelRunner:
@@ -1596,6 +1605,9 @@ class Server:
         self._relabel = RelabelRunner(
             on_done=lambda: self.post_call(self._start_facts_refill))
         self._books = BookRunner(self.post_call)
+        # Friends (FRIENDS-1 C): created here, its threads start at the first friends_ call
+        self._friends = FriendsRunner(self.post_call, _emit, lambda: self._db_path)
+        self._friends._app_db = lambda: self._db
         self._facts_refill_running = False
         # Runs a book switch relabelled while a refill was in flight: their facts are deleted
         # again and recomputed when that refill ends (it may have read the old labels).
@@ -1628,6 +1640,7 @@ class Server:
         self._sync.shutdown()
         self._relabel.shutdown()
         self._books.shutdown()
+        self._friends.shutdown()
         if self._insights:
             self._insights.shutdown()
         if self._openings:
@@ -1782,6 +1795,10 @@ class Server:
         handler = getattr(self, f"rpc_{method}", None)
         if handler is None:
             _reply_error(req_id, f"unknown method: {method}")
+            return
+        if method.startswith("friends_") and not C.FRIENDS_ENABLED:
+            # ruling L4: kept out of packaged builds until the owner approves the legal texts
+            _reply_error(req_id, "Friends is not in this build of Zugzwang.")
             return
         try:
             if method in _DEFERRED_METHODS:
@@ -2848,6 +2865,183 @@ class Server:
             drilled += int(done)
             mastered += int(done_master)
         return drilled, mastered
+
+    # ── Friends (FRIENDS.md, FRIENDS-1 C) ─────────────────────────────────────
+    # The deferred ones run on the Friends thread (core/friends/runner.py) and reply from it; a
+    # refusal by the server replies {"error": {code, message, status}} (api.ts raises FriendsError).
+
+    def _friends_call(self, req_id, fn) -> None:
+        self._friends.submit(fn, lambda out: _reply(req_id, out),
+                             lambda msg: _reply_error(req_id, msg))
+
+    def _friends_then_app(self, req_id, fn, then) -> None:
+        """*fn* on the Friends thread, then *then(result)* on the app thread (the database)."""
+        def run():
+            out = fn()
+
+            def on_app():
+                try:
+                    _reply(req_id, then(out))
+                except Exception as exc:
+                    logger.exception("friends: app-thread step failed")
+                    _reply_error(req_id, str(exc))
+            self.post_call(on_app)
+            return None
+        self._friends.submit(run, lambda out: _reply(req_id, out),
+                             lambda msg: _reply_error(req_id, msg))
+
+    def rpc_friends_status(self) -> dict:
+        """Local only: is Friends set up, signed in, which keychain, the switches."""
+        from zugzwang.core.friends import rating_compare
+        return {**self._friends.service.state(), "ratingSource": rating_compare.credit()}
+
+    def rpc_friends_check_handle(self, req_id, handle: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.check_handle(handle))
+
+    def rpc_friends_signup(self, req_id, handle: str = "", ageConfirmed: bool = False,
+                           termsAccepted: bool = False, shareGames: bool = False) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.signup(
+            handle, age_confirmed=bool(ageConfirmed), terms_accepted=bool(termsAccepted),
+            share_games=bool(shareGames)))
+
+    def rpc_friends_recovery_code(self) -> dict:
+        return {"code": self._friends.service.recovery_code()}
+
+    def rpc_friends_recover(self, req_id, code: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.recover(code))
+
+    def rpc_friends_me(self, req_id) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.me())
+
+    def rpc_friends_list(self, req_id, mine: dict | None = None) -> None:
+        """The friends list with presence and requests (server), each friend with their ratings,
+        your record and last game from stored games (app thread). Friends with no stored games are
+        fetched in the background, one at a time."""
+        mine = {k: v for k, v in (mine or {}).items() if isinstance(v, str) and v.strip()}
+
+        def then(lst: dict) -> dict:
+            out = list_payload(self._db, lst, mine)
+            for f in out["friends"]:
+                if not f["hasData"] and linked_players(f):
+                    self._friends.refresh(f["handle"], linked_players(f))
+            return out
+        self._friends_then_app(req_id, lambda: self._friends.service.friends(), then)
+
+    def rpc_friends_request(self, req_id, handle: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().send_request(handle))
+
+    def rpc_friends_answer(self, req_id, id: int = 0, accept: bool = False) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().answer(id, bool(accept)))
+
+    def rpc_friends_cancel(self, req_id, id: int = 0) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().cancel(id))
+
+    def rpc_friends_remove(self, req_id, handle: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().remove_friend(handle))
+
+    def rpc_friends_block(self, req_id, handle: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().block(handle))
+
+    def rpc_friends_unblock(self, req_id, handle: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().unblock(handle))
+
+    def rpc_friends_appear_offline(self, req_id, on: bool = False) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.set_appear_offline(bool(on)))
+
+    def rpc_friends_set_settings(self, shareGames: bool | None = None,
+                                 chatEnabled: bool | None = None) -> dict:
+        from zugzwang.core.friends import settings as fsettings
+        ch = {}
+        if shareGames is not None:
+            ch["share_games"] = bool(shareGames)
+        if chatEnabled is not None:
+            ch["chat_enabled"] = bool(chatEnabled)
+        fsettings.save(**ch)
+        return self._friends.service.state()
+
+    def rpc_friends_link_lichess(self, req_id) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.link_lichess())
+
+    # Chess.com waits for Chess.com (BETA-5 ruling K3; core/friends/chesscom_link.py): the pending link is
+    # kept in Friends' settings, checked by the heartbeat at most every 15 minutes (`friends_link` event).
+    def rpc_friends_chesscom_start(self, req_id, username: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.chesscom.start(username))
+
+    def rpc_friends_chesscom_verify(self, req_id, username: str = "") -> None:
+        """Check now: the pending link's state after one check ({"state": "linked", "verified": true} when
+        found); with no pending link, the server's answer for *username*."""
+        def run():
+            link = self._friends.service.chesscom
+            if link.record() is None:
+                return self._friends.service.client().chesscom_verify(username)
+            return link.check(force=True)
+        self._friends_call(req_id, run)
+
+    def rpc_friends_chesscom_link(self) -> dict:
+        """Local only: the pending Chess.com link ({"state": "none"} without one)."""
+        return self._friends.service.chesscom.state()
+
+    def rpc_friends_chesscom_cancel(self, req_id) -> None:
+        self._friends_call(req_id, lambda: self._friends.service.chesscom.cancel())
+
+    def rpc_friends_save_recovery(self, req_id, path: str = "") -> None:
+        """Write the recovery code to the file the save dialog chose (BETA-5 B)."""
+        self._friends_call(req_id, lambda: self._friends.service.save_recovery_code(path))
+
+    def rpc_friends_unlink(self, req_id, site: str = "") -> None:
+        self._friends_call(req_id, lambda: self._friends.service.client().unlink(site))
+
+    def rpc_friends_delete_account(self, req_id) -> None:
+        """Delete the account on the server (every row), then the key, the local switches and every
+        friend's stored games; your own games stay."""
+        def then(out: dict) -> dict:
+            if "error" not in out and self._db is not None:
+                out["friendGamesDeleted"] = self._db.delete_friend_data(None)
+            return out
+        self._friends_then_app(req_id, lambda: self._friends.service.delete_account(), then)
+
+    def rpc_friends_profile(self, req_id, handle: str = "", mine: dict | None = None,
+                            recentLimit: int = 10, recentOffset: int = 0, refresh: bool = True) -> None:
+        """A friend's profile from stored games (engine-free, S3). With *refresh*, data over an hour
+        old (or never fetched) is fetched again in the background (G4): `friend_data` says when."""
+        mine = {k: v for k, v in (mine or {}).items() if isinstance(v, str) and v.strip()}
+
+        def fetch_entry() -> dict:
+            # fresh: a friend may have linked an account since the list was read
+            entry = self._friends.service.friend_entry(handle, fresh=True)
+            if entry is None:
+                raise FriendsError("not_friends", "You are not friends with that handle.")
+            return entry
+
+        def then(entry: dict) -> dict:
+            if "error" in entry:
+                return entry
+            out = profile_payload(self._db, entry, mine, recent_limit=int(recentLimit),
+                                  recent_offset=int(recentOffset),
+                                  fetching=self._friends.fetching(handle))
+            if refresh and out["data"]["stale"] and not out["data"]["fetching"]:
+                out["data"]["fetching"] = self._friends.refresh(handle, linked_players(entry))
+            return out
+        self._friends_then_app(req_id, fetch_entry, then)
+
+    def rpc_friends_refresh(self, handle: str = "", older: bool = False) -> dict:
+        """The profile's Refresh (G4), or "Load games older than 12 months" (G3, *older*)."""
+        entry = self._friends.service.friend_entry(handle) if self._friends.service.last_list else None
+        if entry is None:
+            raise RuntimeError("Open the friends list first.")
+        return {"started": self._friends.refresh(handle, linked_players(entry), older=bool(older))}
+
+    def rpc_friends_game(self, id: int) -> dict:
+        """A friend's game for Analyse (G1: on request, nothing stored, never in your Games)."""
+        row = self._db.friend_game(int(id)) if self._db else None
+        if row is None:
+            raise RuntimeError("No such game.")
+        game = chess.pgn.read_game(io.StringIO(row["pgn"]))
+        moves = [m.uci() for m in game.mainline_moves()] if game else []
+        return {"id": row["id"], "site": row["site"], "white": row["white"], "black": row["black"],
+                "whiteElo": row["white_elo"], "blackElo": row["black_elo"], "result": row["result"],
+                "opening": row["opening"], "eco": row["eco"], "endedAt": row["ended_at"],
+                "timeControl": row["time_control"], "startFen": chess.STARTING_FEN, "moves": moves}
 
     def rpc_trainer_lobby(self) -> dict:
         from zugzwang.core import books

@@ -434,6 +434,20 @@ EXPLAIN_MIN_MOTIF_MATERIAL = 2.0
 
 SYNC_MAX_GAMES: int | None = None  # cap on games fetched per platform; None = entire history
 SYNC_USER_AGENT = "Zugzwang/1.0 (local chess analysis app)"
+
+# ── Friends (FRIENDS.md, FRIENDS-1) ──────────────────────────────────────────
+#: The Friends server (server/, a Cloudflare Worker), deployed 2026-11-22 at its custom domain
+#: (FRIENDS.md ruling V8; server/README.md "Deploy"), for dev and beta builds alike;
+#: ZUGZWANG_FRIENDS_URL overrides it (the tests, the end-to-end run).
+FRIENDS_SERVER_URL = "https://api.zugzwangapp.com"
+#: Friends is on in every build (BETA-5 ruling L9, 2026-11-22: the Privacy policy and the Terms of use
+#: are approved, version 1; until then ruling L4 kept it out of packaged builds). The sidecar refuses
+#: every friends_ method when this is False; one switch, so a build can turn Friends off in one place.
+FRIENDS_ENABLED = True
+#: how often the app tells the server it is online, and reads the friends list again
+FRIENDS_HEARTBEAT_S = 60
+#: a profile older than this refreshes when it is opened (ruling G4)
+FRIENDS_STALE_S = 3600
 # Settings' username check on Save (UI-BUILD-3 G, ruling 5): seconds each site gets to answer, and
 # the check as a whole never runs past this plus a second (a DNS lookup is not covered by the
 # socket timeout). Saving does not wait on it: the usernames are saved first.

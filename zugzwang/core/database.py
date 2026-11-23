@@ -243,7 +243,7 @@ class GameRecord:
 #: itself by probing `PRAGMA table_info`, which is what lets them run
 #: unconditionally on every open and stay correct on a database whose stored
 #: version says nothing useful. Bump this when adding a migration.
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -511,6 +511,7 @@ class Database:
         self._migrate_v17()
         self._migrate_v18()
         self._migrate_v19()
+        self._migrate_v20()
         # Stamped last, and overwritten rather than inserted-if-absent: the old
         # `INSERT OR IGNORE` meant the first value a database ever received was
         # the only one it ever had. On the live database that value was '1',
@@ -838,6 +839,120 @@ class Database:
                 facts_json         TEXT NOT NULL,
                 PRIMARY KEY (run_id, facts_version)
             )""")
+
+    def _migrate_v20(self) -> None:
+        # FRIENDS-1 (FRIENDS.md rulings G1, G5): friends' public games, stored apart from the
+        # user's own (`games`), never read by Games or Insights. Additive: two new tables.
+        # `friend_players`: one row per (site, username) fetched, with how far back and when.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS friend_players (
+                site        TEXT NOT NULL,
+                username    TEXT NOT NULL COLLATE NOCASE,
+                fetched_at  TEXT,
+                oldest      TEXT,
+                complete    INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (site, username)
+            )""")
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS friend_games (
+                id          INTEGER PRIMARY KEY,
+                site        TEXT NOT NULL,
+                platform_id TEXT NOT NULL,
+                player      TEXT NOT NULL COLLATE NOCASE,
+                white       TEXT,
+                black       TEXT,
+                white_elo   INTEGER,
+                black_elo   INTEGER,
+                result      TEXT,
+                time_control TEXT,
+                base_s      INTEGER,
+                inc_s       INTEGER,
+                speed       TEXT,
+                rated       INTEGER,
+                termination TEXT,
+                ended_at    TEXT,
+                eco         TEXT,
+                opening     TEXT,
+                first_move  TEXT,
+                pgn         TEXT NOT NULL,
+                UNIQUE (site, platform_id, player)
+            )""")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS friend_games_player ON friend_games(site, player, ended_at)")
+
+    # ── friends' games (FRIENDS-1; never read by Games or Insights) ───────────
+
+    _FRIEND_COLS = ("site", "platform_id", "player", "white", "black", "white_elo", "black_elo",
+                    "result", "time_control", "base_s", "inc_s", "speed", "rated", "termination",
+                    "ended_at", "eco", "opening", "first_move", "pgn")
+
+    def save_friend_games(self, rows: list[dict]) -> int:
+        """Store a friend's fetched games; a game already stored for that player is kept as it is.
+        Returns how many were new."""
+        cols = self._FRIEND_COLS
+        before = self._conn.total_changes
+        try:
+            self._conn.executemany(
+                f"INSERT OR IGNORE INTO friend_games ({', '.join(cols)}) VALUES "
+                f"({', '.join('?' for _ in cols)})",
+                [tuple(r.get(c) for c in cols) for r in rows])
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return self._conn.total_changes - before
+
+    def friend_player(self, site: str, username: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT site, username, fetched_at, oldest, complete FROM friend_players "
+            "WHERE site = ? AND username = ?", (site, username)).fetchone()
+        return dict(row) if row else None
+
+    def set_friend_player(self, site: str, username: str, *, fetched_at: str | None = None,
+                          oldest: str | None = None, complete: bool | None = None) -> None:
+        cur = self.friend_player(site, username) or {}
+        self._conn.execute(
+            "INSERT OR REPLACE INTO friend_players (site, username, fetched_at, oldest, complete) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (site, username, fetched_at or cur.get("fetched_at"), oldest or cur.get("oldest"),
+             int(complete if complete is not None else bool(cur.get("complete")))))
+        self._conn.commit()
+
+    def friend_games_of(self, players: list[tuple[str, str]]) -> list[dict]:
+        """Every stored game of these (site, username) players, without the PGN, newest first."""
+        if not players:
+            return []
+        cols = [c for c in self._FRIEND_COLS if c != "pgn"]
+        where = " OR ".join("(site = ? AND player = ?)" for _ in players)
+        rows = self._conn.execute(
+            f"SELECT id, {', '.join(cols)} FROM friend_games WHERE {where} "
+            "ORDER BY ended_at DESC", [v for p in players for v in p]).fetchall()
+        return [dict(r) for r in rows]
+
+    def friend_game(self, game_id: int) -> dict | None:
+        row = self._conn.execute("SELECT * FROM friend_games WHERE id = ?", (game_id,)).fetchone()
+        return dict(row) if row else None
+
+    def latest_friend_game(self, site: str, username: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT MAX(ended_at) FROM friend_games WHERE site = ? AND player = ?",
+            (site, username)).fetchone()
+        return row[0] if row else None
+
+    def delete_friend_data(self, players: list[tuple[str, str]] | None = None) -> int:
+        """Forget friends' games: these players', or every friend's (None)."""
+        if players is None:
+            n = self._conn.execute("DELETE FROM friend_games").rowcount
+            self._conn.execute("DELETE FROM friend_players")
+        else:
+            n = 0
+            for site, user in players:
+                n += self._conn.execute("DELETE FROM friend_games WHERE site = ? AND player = ?",
+                                        (site, user)).rowcount
+                self._conn.execute("DELETE FROM friend_players WHERE site = ? AND username = ?",
+                                   (site, user))
+        self._conn.commit()
+        return n
 
     # ── pattern facts (R6, PATTERNS.md §6a) ───────────────────────────────────
 

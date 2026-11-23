@@ -1,0 +1,21 @@
+{
+  "name": "zugzwang-friends",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The Zugzwang Friends server: a Cloudflare Worker over D1 (FRIENDS.md, FRIENDS-1 B)",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "test": "vitest run",
+    "check": "tsc --noEmit",
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.9.0",
+    "@cloudflare/workers-types": "^5.20261121.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.166.0"
+  }
+}

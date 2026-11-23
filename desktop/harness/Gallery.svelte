@@ -8,6 +8,7 @@
   import StatStrip from '../src/lib/ui/StatStrip.svelte'
   import PlayerStrip from '../src/lib/ui/PlayerStrip.svelte'
   import { QUALITIES } from '../src/lib/ui/moveQuality'
+  import ChallengeBanner from '../src/lib/friends/ChallengeBanner.svelte'
 
   let chart = $state<'eval' | 'material' | 'time'>('eval')
   let colour = $state<'both' | 'white' | 'black'>('both')
@@ -82,6 +83,18 @@
       <PlayerStrip name="Stockfish" rating="Level 10" />
       <PlayerStrip name="No rating" rating={null} />
     </div>
+  </Panel>
+
+  <Panel title="ChallengeBanner (FRIENDS-2; built in FRIENDS-1)">
+    <ChallengeBanner
+      from="maxk"
+      timeControl="5+0"
+      youPlay="Black"
+      note="Unrated. Ratings shown in the game: you 1438, maxk 1446 (Chess.com blitz)."
+      expiresIn={52}
+      onaccept={() => {}}
+      ondecline={() => {}}
+    />
   </Panel>
 </main>
 

@@ -1,0 +1,360 @@
+{
+ "source": "ChessGoals, \"Chess Rating Comparison\"",
+ "url": "https://chessgoals.com/rating-comparison/",
+ "retrieved": "2026-11-21",
+ "retrieved_note": "Copied 2026-11-22T01:10Z (2026-11-21, US time) for FRIENDS-1 (FRIENDS.md ruling R2): the page said \"Updated July 2026\"; its article:modified_time was 2026-09-01T16:17:16+00:00.",
+ "how": "Tables 1 and 2 of the page, both keyed by the Chess.com Blitz rating: each row gives the ratings ChessGoals's survey found equivalent. Its other columns (USCF, FIDE) are not copied. Zugzwang converts a Lichess rating to the Chess.com rating of the same mode by linear interpolation between adjacent rows (zugzwang/core/friends/rating_compare.py); Lichess Classical maps to Chess.com Rapid. Outside the table's range there is no estimate.",
+ "columns": {
+  "chesscom_blitz": {
+   "label": "Chess.com Blitz",
+   "note": "the key column of both tables"
+  },
+  "chesscom_bullet": {
+   "label": "Chess.com Bullet",
+   "plus_minus": 135,
+   "n": 9345
+  },
+  "chesscom_rapid": {
+   "label": "Chess.com Rapid",
+   "plus_minus": 115,
+   "n": 10156
+  },
+  "lichess_blitz": {
+   "label": "Lichess Blitz",
+   "plus_minus": 70,
+   "n": 1935
+  },
+  "lichess_bullet": {
+   "label": "Lichess Bullet",
+   "plus_minus": 115,
+   "n": 1455
+  },
+  "lichess_rapid": {
+   "label": "Lichess Rapid",
+   "plus_minus": 90,
+   "n": 1066
+  },
+  "lichess_classical": {
+   "label": "Lichess Classical",
+   "plus_minus": 90,
+   "n": 240
+  }
+ },
+ "rows": [
+  {
+   "chesscom_blitz": 500,
+   "chesscom_bullet": 550,
+   "chesscom_rapid": 815,
+   "lichess_blitz": 1090,
+   "lichess_bullet": 1060,
+   "lichess_rapid": 1290,
+   "lichess_classical": 1505
+  },
+  {
+   "chesscom_blitz": 600,
+   "chesscom_bullet": 615,
+   "chesscom_rapid": 905,
+   "lichess_blitz": 1160,
+   "lichess_bullet": 1120,
+   "lichess_rapid": 1360,
+   "lichess_classical": 1540
+  },
+  {
+   "chesscom_blitz": 700,
+   "chesscom_bullet": 685,
+   "chesscom_rapid": 995,
+   "lichess_blitz": 1225,
+   "lichess_bullet": 1180,
+   "lichess_rapid": 1425,
+   "lichess_classical": 1575
+  },
+  {
+   "chesscom_blitz": 800,
+   "chesscom_bullet": 760,
+   "chesscom_rapid": 1085,
+   "lichess_blitz": 1290,
+   "lichess_bullet": 1240,
+   "lichess_rapid": 1490,
+   "lichess_classical": 1610
+  },
+  {
+   "chesscom_blitz": 900,
+   "chesscom_bullet": 840,
+   "chesscom_rapid": 1170,
+   "lichess_blitz": 1360,
+   "lichess_bullet": 1305,
+   "lichess_rapid": 1555,
+   "lichess_classical": 1650
+  },
+  {
+   "chesscom_blitz": 1000,
+   "chesscom_bullet": 920,
+   "chesscom_rapid": 1255,
+   "lichess_blitz": 1425,
+   "lichess_bullet": 1375,
+   "lichess_rapid": 1615,
+   "lichess_classical": 1690
+  },
+  {
+   "chesscom_blitz": 1100,
+   "chesscom_bullet": 1010,
+   "chesscom_rapid": 1340,
+   "lichess_blitz": 1490,
+   "lichess_bullet": 1445,
+   "lichess_rapid": 1680,
+   "lichess_classical": 1730
+  },
+  {
+   "chesscom_blitz": 1150,
+   "chesscom_bullet": 1055,
+   "chesscom_rapid": 1380,
+   "lichess_blitz": 1525,
+   "lichess_bullet": 1480,
+   "lichess_rapid": 1710,
+   "lichess_classical": 1750
+  },
+  {
+   "chesscom_blitz": 1200,
+   "chesscom_bullet": 1100,
+   "chesscom_rapid": 1420,
+   "lichess_blitz": 1555,
+   "lichess_bullet": 1515,
+   "lichess_rapid": 1740,
+   "lichess_classical": 1770
+  },
+  {
+   "chesscom_blitz": 1250,
+   "chesscom_bullet": 1145,
+   "chesscom_rapid": 1460,
+   "lichess_blitz": 1590,
+   "lichess_bullet": 1550,
+   "lichess_rapid": 1765,
+   "lichess_classical": 1795
+  },
+  {
+   "chesscom_blitz": 1300,
+   "chesscom_bullet": 1195,
+   "chesscom_rapid": 1500,
+   "lichess_blitz": 1620,
+   "lichess_bullet": 1585,
+   "lichess_rapid": 1795,
+   "lichess_classical": 1815
+  },
+  {
+   "chesscom_blitz": 1350,
+   "chesscom_bullet": 1240,
+   "chesscom_rapid": 1540,
+   "lichess_blitz": 1655,
+   "lichess_bullet": 1625,
+   "lichess_rapid": 1825,
+   "lichess_classical": 1835
+  },
+  {
+   "chesscom_blitz": 1400,
+   "chesscom_bullet": 1290,
+   "chesscom_rapid": 1580,
+   "lichess_blitz": 1685,
+   "lichess_bullet": 1660,
+   "lichess_rapid": 1850,
+   "lichess_classical": 1860
+  },
+  {
+   "chesscom_blitz": 1450,
+   "chesscom_bullet": 1340,
+   "chesscom_rapid": 1620,
+   "lichess_blitz": 1720,
+   "lichess_bullet": 1700,
+   "lichess_rapid": 1880,
+   "lichess_classical": 1880
+  },
+  {
+   "chesscom_blitz": 1500,
+   "chesscom_bullet": 1385,
+   "chesscom_rapid": 1655,
+   "lichess_blitz": 1755,
+   "lichess_bullet": 1735,
+   "lichess_rapid": 1905,
+   "lichess_classical": 1900
+  },
+  {
+   "chesscom_blitz": 1550,
+   "chesscom_bullet": 1435,
+   "chesscom_rapid": 1690,
+   "lichess_blitz": 1785,
+   "lichess_bullet": 1775,
+   "lichess_rapid": 1935,
+   "lichess_classical": 1925
+  },
+  {
+   "chesscom_blitz": 1600,
+   "chesscom_bullet": 1485,
+   "chesscom_rapid": 1730,
+   "lichess_blitz": 1820,
+   "lichess_bullet": 1815,
+   "lichess_rapid": 1960,
+   "lichess_classical": 1945
+  },
+  {
+   "chesscom_blitz": 1650,
+   "chesscom_bullet": 1540,
+   "chesscom_rapid": 1765,
+   "lichess_blitz": 1850,
+   "lichess_bullet": 1855,
+   "lichess_rapid": 1990,
+   "lichess_classical": 1970
+  },
+  {
+   "chesscom_blitz": 1700,
+   "chesscom_bullet": 1590,
+   "chesscom_rapid": 1800,
+   "lichess_blitz": 1885,
+   "lichess_bullet": 1890,
+   "lichess_rapid": 2015,
+   "lichess_classical": 1990
+  },
+  {
+   "chesscom_blitz": 1750,
+   "chesscom_bullet": 1640,
+   "chesscom_rapid": 1835,
+   "lichess_blitz": 1915,
+   "lichess_bullet": 1930,
+   "lichess_rapid": 2040,
+   "lichess_classical": 2015
+  },
+  {
+   "chesscom_blitz": 1800,
+   "chesscom_bullet": 1690,
+   "chesscom_rapid": 1870,
+   "lichess_blitz": 1950,
+   "lichess_bullet": 1970,
+   "lichess_rapid": 2065,
+   "lichess_classical": 2035
+  },
+  {
+   "chesscom_blitz": 1850,
+   "chesscom_bullet": 1745,
+   "chesscom_rapid": 1900,
+   "lichess_blitz": 1980,
+   "lichess_bullet": 2010,
+   "lichess_rapid": 2090,
+   "lichess_classical": 2055
+  },
+  {
+   "chesscom_blitz": 1900,
+   "chesscom_bullet": 1795,
+   "chesscom_rapid": 1935,
+   "lichess_blitz": 2015,
+   "lichess_bullet": 2050,
+   "lichess_rapid": 2115,
+   "lichess_classical": 2080
+  },
+  {
+   "chesscom_blitz": 1950,
+   "chesscom_bullet": 1850,
+   "chesscom_rapid": 1965,
+   "lichess_blitz": 2045,
+   "lichess_bullet": 2095,
+   "lichess_rapid": 2140,
+   "lichess_classical": 2100
+  },
+  {
+   "chesscom_blitz": 2000,
+   "chesscom_bullet": 1900,
+   "chesscom_rapid": 1995,
+   "lichess_blitz": 2080,
+   "lichess_bullet": 2135,
+   "lichess_rapid": 2165,
+   "lichess_classical": 2120
+  },
+  {
+   "chesscom_blitz": 2100,
+   "chesscom_bullet": 2005,
+   "chesscom_rapid": 2055,
+   "lichess_blitz": 2145,
+   "lichess_bullet": 2215,
+   "lichess_rapid": 2215,
+   "lichess_classical": 2165
+  },
+  {
+   "chesscom_blitz": 2200,
+   "chesscom_bullet": 2110,
+   "chesscom_rapid": 2110,
+   "lichess_blitz": 2210,
+   "lichess_bullet": 2300,
+   "lichess_rapid": 2260,
+   "lichess_classical": 2205
+  },
+  {
+   "chesscom_blitz": 2300,
+   "chesscom_bullet": 2215,
+   "chesscom_rapid": 2165,
+   "lichess_blitz": 2275,
+   "lichess_bullet": 2380,
+   "lichess_rapid": 2310,
+   "lichess_classical": 2245
+  },
+  {
+   "chesscom_blitz": 2400,
+   "chesscom_bullet": 2320,
+   "chesscom_rapid": 2215,
+   "lichess_blitz": 2340,
+   "lichess_bullet": 2465,
+   "lichess_rapid": 2355,
+   "lichess_classical": 2280
+  },
+  {
+   "chesscom_blitz": 2500,
+   "chesscom_bullet": 2425,
+   "chesscom_rapid": 2260,
+   "lichess_blitz": 2410,
+   "lichess_bullet": 2550,
+   "lichess_rapid": 2400,
+   "lichess_classical": 2320
+  },
+  {
+   "chesscom_blitz": 2600,
+   "chesscom_bullet": 2530,
+   "chesscom_rapid": 2300,
+   "lichess_blitz": 2475,
+   "lichess_bullet": 2635,
+   "lichess_rapid": 2445,
+   "lichess_classical": 2350
+  },
+  {
+   "chesscom_blitz": 2700,
+   "chesscom_bullet": 2630,
+   "chesscom_rapid": 2340,
+   "lichess_blitz": 2540,
+   "lichess_bullet": 2715,
+   "lichess_rapid": 2490,
+   "lichess_classical": 2385
+  },
+  {
+   "chesscom_blitz": 2800,
+   "chesscom_bullet": 2725,
+   "chesscom_rapid": 2375,
+   "lichess_blitz": 2610,
+   "lichess_bullet": 2800,
+   "lichess_rapid": 2530,
+   "lichess_classical": 2415
+  },
+  {
+   "chesscom_blitz": 2900,
+   "chesscom_bullet": 2825,
+   "chesscom_rapid": 2405,
+   "lichess_blitz": 2675,
+   "lichess_bullet": 2885,
+   "lichess_rapid": 2575,
+   "lichess_classical": 2440
+  },
+  {
+   "chesscom_blitz": 3000,
+   "chesscom_bullet": 2915,
+   "chesscom_rapid": 2430,
+   "lichess_blitz": 2745,
+   "lichess_bullet": 2970,
+   "lichess_rapid": 2615,
+   "lichess_classical": 2465
+  }
+ ]
+}

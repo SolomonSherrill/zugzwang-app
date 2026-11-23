@@ -6,7 +6,7 @@
   import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener'
   import Button from '../ui/Button.svelte'
   import { api, type AppInfo } from '../api'
-  import { BETA } from '../build'
+  import { BETA, SHOW_FRIENDS } from '../build'
   import { updateState } from '../updateState.svelte'
 
   let info = $state<AppInfo | null>(null)
@@ -77,6 +77,13 @@
     Zugzwang is free software under the GNU General Public License, version 3 or later. It bundles Stockfish 18 (GPLv3),
     unmodified from the official release.
   </p>
+  {#if SHOW_FRIENDS}
+    <p class="quiet">
+      Friends' "≈" ratings convert Lichess ratings to Chess.com's scale with the ChessGoals rating comparison
+      (chessgoals.com/rating-comparison), a copy taken on 21 November 2026. The app's ℤ mark is the msbm10 font of the
+      American Mathematical Society (SIL Open Font License 1.1).
+    </p>
+  {/if}
   <div class="acts">
     <Button size="sm" onclick={() => showLicence('own', 'zugzwang-LICENSE.txt')}>Zugzwang licence</Button>
     <Button size="sm" onclick={() => showLicence('gpl', 'stockfish-COPYING.txt')}>Stockfish licence</Button>

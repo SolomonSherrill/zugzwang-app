@@ -224,15 +224,19 @@ def main(argv=None):
     ap.add_argument("--project-dir", default=DEFAULT_PROJECT)
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--now", help="ISO time the window ends (default: now, UTC)")
+    ap.add_argument("--since", help="ISO time the window starts (overrides --days; TOKENS-2 F)")
+    ap.add_argument("--track", action="append", default=[],
+                    help="a repo-relative path whose Read count and bytes are printed even outside the top 25 (repeatable)")
     ap.add_argument("--out", help="also write the report to this file")
     a = ap.parse_args(argv)
     now = parse_ts(a.now) if a.now else dt.datetime.now(dt.timezone.utc)
-    since = now - dt.timedelta(days=a.days)
+    since = parse_ts(a.since) if a.since else now - dt.timedelta(days=a.days)
     sessions, reads, bash_out, bash_kinds, sub_gaps, sub_n, nested = load(a.project_dir, since, now)
     lines = []
     p = lines.append
     p(f"# token_audit.py — {a.project_dir}")
-    p(f"# window: {since.isoformat(timespec='seconds')} .. {now.isoformat(timespec='seconds')} ({a.days} days); "
+    span = f"since {a.since}" if a.since else f"{a.days} days"
+    p(f"# window: {since.isoformat(timespec='seconds')} .. {now.isoformat(timespec='seconds')} ({span}); "
       f"generated {dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')}")
     p("# aggregates only: no conversation text. Tokens are the API's usage fields; a request is one response (requestId).")
     p("")
@@ -292,6 +296,14 @@ def main(argv=None):
     tb = sum(v[1] for v in reads.values())
     p(f"(all Read calls: {tr:,}, {tb:,} bytes over {len(reads):,} distinct paths)")
     p("")
+    if a.track:
+        p("## Tracked files (--track): Read calls and bytes in the window")
+        p("| reads | bytes | path |")
+        p("|---|---|---|")
+        for fp in a.track:
+            n, b = reads.get(fp, (0, 0))
+            p(f"| {n} | {b:,} | {fp} |")
+        p("")
     p("## The 25 files with the most bytes read")
     p("| bytes | reads | path |")
     p("|---|---|---|")

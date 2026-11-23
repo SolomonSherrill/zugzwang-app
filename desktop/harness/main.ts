@@ -26,6 +26,7 @@ import { scenarioHandlers, scenarioReady } from './scenarios'
 import { puzzleHandlers, type PuzzleFixtures } from './puzzlesHarness'
 import { gamesHandlers, type GamesFixtures } from './gamesHarness'
 import { PROMO_GAME_ID, promotionHandlers } from './promotionHarness'
+import { friendsHandlers, type FriendsFixtures } from './friendsHarness'
 
 const q = new URLSearchParams(location.search)
 const fx = (await (await fetch('/fixtures.json')).json()) as Fixtures
@@ -57,11 +58,15 @@ const pfx = (await fetch('/puzzles_fixtures.json')
 const gfx = (await fetch('/games_fixtures.json')
   .then((r) => (r.ok ? r.json() : null))
   .catch(() => null)) as GamesFixtures | null
+// Friends (FRIENDS-1 E): synthetic, committed (desktop/harness/friends_fixtures.json).
+const ffx = (await fetch('/friends_fixtures.json')
+  .then((r) => (r.ok ? r.json() : null))
+  .catch(() => null)) as FriendsFixtures | null
 sidecar.useTransport(
   fakeTransport(fx, {
     scenario,
     latencyMs: Number(q.get('latency') ?? 0),
-    handlers: { ...puzzleHandlers(pfx, scenario), ...gamesHandlers(gfx, scenario, fx.meta.mainGameId), ...scenarioHandlers(fx, scenario), ...promotionHandlers(fx, scenario, gameParam) },
+    handlers: { ...puzzleHandlers(pfx, scenario), ...gamesHandlers(gfx, scenario, fx.meta.mainGameId), ...scenarioHandlers(fx, scenario), ...promotionHandlers(fx, scenario, gameParam), ...friendsHandlers(ffx, scenario) },
     ready: scenarioReady(scenario),
     spawnDelayMs: Number(q.get('spawnMs') ?? 0),
   }),
@@ -73,7 +78,7 @@ sidecar.useTransport(
 const cold = q.get('cold') === '1'
 if (!cold) await sidecar.start()
 
-type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'insights' | 'settings'
+type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'insights' | 'friends' | 'friend' | 'settings'
 mount(App, {
   target: document.getElementById('app')!,
   props: {
@@ -83,6 +88,9 @@ mount(App, {
       ply: q.get('ply') != null ? Number(q.get('ply')) : undefined,
       // Analyse a position (UI-BUILD-3 D): ?screen=review&fen=<FEN>
       fen: q.get('fen') ?? undefined,
+      // Friends (FRIENDS-1 E): ?screen=friend&friend=<handle>; the fixtures' clock
+      friend: q.get('friend') ?? undefined,
+      now: ffx?.now,
     },
   },
 })
