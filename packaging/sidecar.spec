@@ -23,14 +23,28 @@ except ImportError:
     pass
 
 # Windows: cryptography's Rust extension (_rust.pyd, an abi3t wheel on Python 3.15) imports
-# python3t.dll, the stable-ABI DLL beside python.exe, which PyInstaller 6.22.3 does not collect; without it
-# the frozen sidecar dies at import ("DLL load failed while importing _rust", BETA-5 D, the third beta.5 CI run).
+# python3t.dll, which PyInstaller 6.22.3 does not collect; without it the frozen sidecar dies at import
+# ("DLL load failed while importing _rust", BETA-5 D, the third beta.5 CI run). The DLL is not always beside
+# python.exe (setup-python's install has none at sys.base_prefix: the fourth run), so load the extension
+# here and ask Windows which python3t.dll it loaded, and bundle that one.
 binaries = []
 if sys.platform == "win32":
-    py3t = Path(sys.base_prefix) / "python3t.dll"
-    if not py3t.exists():
-        raise SystemExit(f"error: {py3t} not found; the frozen sidecar could not load cryptography")
-    binaries.append((str(py3t), "."))
+    import ctypes
+    from ctypes import wintypes
+    import cryptography.hazmat.bindings._rust  # noqa: F401  (loads python3t.dll)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    k32.GetModuleHandleW.restype = wintypes.HMODULE
+    k32.GetModuleFileNameW.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+    k32.GetModuleFileNameW.restype = wintypes.DWORD
+    handle = k32.GetModuleHandleW("python3t.dll")
+    if not handle:
+        raise SystemExit("error: python3t.dll is not loaded after importing cryptography's _rust")
+    buf = ctypes.create_unicode_buffer(32768)
+    if not k32.GetModuleFileNameW(handle, buf, len(buf)):
+        raise SystemExit(f"error: GetModuleFileNameW failed ({ctypes.get_last_error()})")
+    print(f"sidecar.spec: bundling {buf.value} (loaded by cryptography's _rust.pyd)")
+    binaries.append((buf.value, "."))
 
 a = Analysis(
     [str(ROOT / "sidecar" / "main.py")],

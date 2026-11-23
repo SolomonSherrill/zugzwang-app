@@ -34,7 +34,8 @@ def test_the_windows_sidecar_bundles_python3t_dll():
     """BETA-5 D: cryptography's _rust.pyd (abi3t, Python 3.15) imports python3t.dll, which PyInstaller does
     not collect; the frozen Windows sidecar failed at import without it (the third beta.5 CI run)."""
     spec = (ROOT / "packaging/sidecar.spec").read_text()
-    assert 'Path(sys.base_prefix) / "python3t.dll"' in spec and "binaries=binaries" in spec
+    assert 'GetModuleHandleW("python3t.dll")' in spec and "binaries.append((buf.value" in spec
+    assert "binaries=binaries" in spec
 
 
 def test_a_packaged_build_has_its_own_keychain_entry():
