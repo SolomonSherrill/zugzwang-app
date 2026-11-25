@@ -89,6 +89,8 @@
   let errorText = $state('')
   let errorKind = $state<'start' | 'engine'>('engine')
   let confirmAction = $state<'resign' | 'draw' | null>(null)
+  // a declined draw offer's message (COACH.md ruling 8), shown until the next move
+  let drawNote = $state<string | null>(null)
   let confirmTimer: ReturnType<typeof setTimeout> | undefined
   let flipped = $state(false)
   let lostAt = $state<number | null>(null)
@@ -246,6 +248,7 @@
   /** Back to the new-game panel: the board returns to the start. */
   function newGame() {
     phase = 'setup'
+    drawNote = null
     endInfo = null
     errorText = ''
     sans = []
@@ -324,6 +327,7 @@
   }
   async function onEngineMove(d: EngineMoveEvent) {
     if (!inGame) return
+    drawNote = null
     lastMove = [d.uci.slice(0, 2) as Key, d.uci.slice(2, 4) as Key]
     sans = [...sans, d.san]
     positions = [...positions, d.fen]
@@ -349,12 +353,21 @@
     if (confirmAction === action) {
       confirmAction = null
       clearTimeout(confirmTimer)
-      void (action === 'resign' ? doEnd(api.resign) : doEnd(api.draw))
+      void (action === 'resign' ? doEnd(api.resign) : offerDraw())
       return
     }
     confirmAction = action
     clearTimeout(confirmTimer)
     confirmTimer = setTimeout(() => (confirmAction = null), 3000)
+  }
+  async function offerDraw() {
+    try {
+      const res = await api.draw()
+      if (res.end) finishGame(res.end)
+      else drawNote = res.declined ?? null
+    } catch (e) {
+      fail(e)
+    }
   }
   async function doEnd(call: () => Promise<{ end: GameEndInfo }>) {
     try {
@@ -619,6 +632,7 @@
                   >{confirmAction === 'resign' ? 'Confirm resign' : 'Resign'}</Button
                 >
               </div>
+              {#if drawNote}<p class="note declined" role="status">{drawNote}</p>{/if}
               <p class="note">No engine help while you play. Review opens when the game ends.</p>
             {/if}
           </div>

@@ -68,7 +68,10 @@ def test_schema_tables(db):
     }
     assert "games" in tables
     assert "analysis_runs" in tables
-    assert "puzzles" in tables
+    assert "puzzles" not in tables          # COACH-1 F: the set is its own file, attached as pz
+    pz = {r[0] for r in db._conn.execute("SELECT name FROM pz.sqlite_master WHERE type='table'")}
+    assert {"puzzles", "puzzle_themes_fts"} <= pz
+    assert "puzzle_rating" in tables and "puzzle_attempts" in tables and "puzzle_sessions" in tables
     assert "meta" in tables
 
 

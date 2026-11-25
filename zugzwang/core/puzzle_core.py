@@ -16,7 +16,9 @@ import csv
 import io
 import logging
 import math
+import os
 import sqlite3
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator
@@ -24,6 +26,7 @@ from typing import BinaryIO, Callable, Iterator
 import chess
 
 import zugzwang.config as C
+from zugzwang.core.database import PUZZLE_DDL, puzzles_path
 
 logger = logging.getLogger(__name__)
 
@@ -130,28 +133,27 @@ ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 # The new set is built beside the old one and swapped in at the end, so a cancelled or failed
 # import leaves the previous set as it was.
-_STAGING = "puzzles_new"
-_STAGING_DDL = f"""
-    CREATE TABLE {_STAGING} (
-        id               TEXT    PRIMARY KEY,
-        fen              TEXT    NOT NULL,
-        moves_uci        TEXT    NOT NULL,
-        rating           INTEGER NOT NULL,
-        rating_deviation INTEGER NOT NULL DEFAULT 80,
-        popularity       INTEGER NOT NULL DEFAULT 0,
-        nb_plays         INTEGER NOT NULL DEFAULT 0,
-        themes           TEXT    NOT NULL DEFAULT '',
-        game_url         TEXT,
-        opening_tags     TEXT,
-        imported_at      TEXT    NOT NULL
-    )
-"""
-_INSERT_SQL = f"""
-    INSERT OR IGNORE INTO {_STAGING}
+_INSERT_SQL = """
+    INSERT OR IGNORE INTO puzzles
         (id, fen, moves_uci, rating, rating_deviation, popularity, nb_plays, themes, game_url,
          opening_tags, imported_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)
 """
+
+
+def staging_path(db_path: Path) -> Path:
+    """Where an import builds the new puzzle file, beside the one it replaces (COACH-1 F)."""
+    target = puzzles_path(db_path)
+    return target.with_name(target.name + ".new")
+
+
+def install_puzzles_file(new_file: Path, target: Path) -> None:
+    """Move a finished puzzle file over the set in use. Nothing may hold *target* open (the app's
+    connection detaches it first, `Database.replace_puzzles_file`); its write-ahead log and index go
+    with it, since they belong to the old file."""
+    os.replace(new_file, target)
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(target) + suffix).unlink(missing_ok=True)
 
 
 class PuzzleFileError(Exception):
@@ -220,21 +222,27 @@ def import_puzzle_stream(
     compressed: bool,
     source: dict,
     is_cancelled: Callable[[], bool] = lambda: False,
+    install: Callable[[Path, Path], None] | None = None,
 ) -> Iterator[tuple]:
     """Import Lichess's puzzle CSV from the byte stream *raw* (a download or a file; Zstandard
-    when *compressed*) into SQLite, on a connection of its own. Yields:
+    when *compressed*) into a new puzzle file beside the database's (COACH-1 F: the set is its own
+    file, `database.puzzles_path`, and an update replaces it instead of growing the main database).
+    Yields:
 
         ("progress", bytes_read, total_bytes, rows)   after each batch (bytes of *raw*)
-        ("finishing", rows)                           the swap and the theme index
+        ("finishing", rows)                           the indexes, the counts, the swap
         ("done", stats)                               stats: count, added, removed,
                                                       removed_attempted, previous
         ("cancelled",)                                the previous set untouched
 
     Raises PuzzleFileError for a file that is not the puzzle CSV, and any network or disk
-    error as it comes; either way the new set is dropped and the previous one kept. *source*
-    is written to meta on success (kind "lichess" or "file", date, etag, bytes).
+    error as it comes; either way the new file is deleted and the previous set kept. *source*
+    is written to the main database's meta on success (kind "lichess" or "file", date, etag,
+    bytes). *install* moves the finished file over the set in use; the app passes one that does it
+    on its own connection's thread (`Database.replace_puzzles_file`); by default the file is moved
+    directly (`install_puzzles_file`), for a database no connection holds open.
 
-    The user's rating, attempts and sessions live in other tables and are not touched.
+    The user's rating, attempts and sessions live in the main database and are not touched.
     Puzzles absent from the new file (Lichess removed them) leave the set; an attempt at one
     keeps its row, so history and ratings are unchanged (FIX-B6, decided item)."""
     counter = CountingReader(raw, is_cancelled)
@@ -242,22 +250,25 @@ def import_puzzle_stream(
     stream: BinaryIO = zstd_reader(buffered) if compressed else buffered  # type: ignore[assignment]
     text = io.TextIOWrapper(stream, encoding="utf-8", newline="")
 
-    conn = sqlite3.connect(str(db_path), timeout=60)
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
+    db_path = Path(db_path)
+    target = puzzles_path(db_path)
+    staging = staging_path(db_path)
+    for p in (staging, Path(str(staging) + "-journal")):
+        p.unlink(missing_ok=True)
+    conn = sqlite3.connect(str(staging), timeout=60)
+    # A file nothing reads until it is complete: no journal, no syncs while it is built; it is
+    # synced once, closed, and only then moved into place.
+    conn.execute("PRAGMA journal_mode = OFF")
+    conn.execute("PRAGMA synchronous = OFF")
 
     def _drop() -> None:
         try:
-            conn.rollback()
-            conn.execute(f"DROP TABLE IF EXISTS {_STAGING}")
-            conn.commit()
-        finally:
             conn.close()
+        finally:
+            staging.unlink(missing_ok=True)
 
     try:
-        conn.execute(f"DROP TABLE IF EXISTS {_STAGING}")
-        conn.execute(_STAGING_DDL)
-        conn.commit()
+        conn.executescript(PUZZLE_DDL.format(schema=""))
         reader = csv.reader(text)
         try:
             header = next(reader)
@@ -305,13 +316,22 @@ def import_puzzle_stream(
             rows += len(batch)
         if is_cancelled():
             raise ImportCancelled()
-        count = conn.execute(f"SELECT count(*) FROM {_STAGING}").fetchone()[0]
+        count = conn.execute("SELECT count(*) FROM puzzles").fetchone()[0]
         if count == 0:
             raise PuzzleFileError("The file held no puzzles Zugzwang can use.")
         yield ("progress", counter.count, total_bytes, count)
         yield ("finishing", count)
-        stats = _swap(conn, count, source)
+        conn.execute("INSERT INTO puzzle_themes_fts(puzzle_themes_fts) VALUES('rebuild')")
+        conn.commit()
+        conn.execute("PRAGMA journal_mode = DELETE")
         conn.close()
+        with open(staging, "rb+") as fh:
+            os.fsync(fh.fileno())
+        if is_cancelled():
+            raise ImportCancelled()
+        stats = _counts(db_path, target, staging, count)
+        (install or install_puzzles_file)(staging, target)
+        _write_meta(db_path, count, source)
         yield ("done", stats)
     except ImportCancelled:
         _drop()
@@ -321,22 +341,45 @@ def import_puzzle_stream(
         raise
 
 
-def _swap(conn: sqlite3.Connection, count: int, source: dict) -> dict:
-    """In one transaction: count what leaves, drop the old set, rename the new one in, index
-    it, rebuild the theme index, write meta. Readers see the old set until the commit."""
-    conn.execute("BEGIN IMMEDIATE")
+def _counts(db_path: Path, target: Path, staging: Path, count: int) -> dict:
+    """What the swap will do: the old set's size, what leaves it, and how many of the puzzles that
+    leave the user has attempted (their attempts stay). Read before the swap, on a connection of its
+    own; the old set is wherever it is now (its file, or the main database before the move)."""
+    conn = sqlite3.connect(f"file:{urllib.parse.quote(str(db_path))}?mode=ro", uri=True, timeout=60)
     try:
-        previous = conn.execute("SELECT count(*) FROM puzzles").fetchone()[0]
+        conn.execute("ATTACH DATABASE ? AS new", (f"file:{urllib.parse.quote(str(staging))}?mode=ro",))
+        old = None
+        if conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='puzzles'").fetchone():
+            old = "main"
+        elif target.exists():
+            conn.execute("ATTACH DATABASE ? AS old", (f"file:{urllib.parse.quote(str(target))}?mode=ro",))
+            if conn.execute("SELECT 1 FROM old.sqlite_master WHERE type='table' AND name='puzzles'").fetchone():
+                old = "old"
+        if old is None:
+            return {"count": count, "previous": 0, "removed": 0, "removed_attempted": 0, "added": count}
+        previous = conn.execute(f"SELECT count(*) FROM {old}.puzzles").fetchone()[0]
         removed = conn.execute(
-            f"SELECT count(*) FROM puzzles WHERE id NOT IN (SELECT id FROM {_STAGING})").fetchone()[0]
+            f"SELECT count(*) FROM {old}.puzzles WHERE id NOT IN (SELECT id FROM new.puzzles)").fetchone()[0]
+        has_attempts = conn.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='puzzle_attempts'").fetchone()
         removed_attempted = conn.execute(
-            f"""SELECT count(DISTINCT a.puzzle_id) FROM puzzle_attempts a
-                WHERE a.puzzle_id IN (SELECT id FROM puzzles)
-                  AND a.puzzle_id NOT IN (SELECT id FROM {_STAGING})""").fetchone()[0]
-        conn.execute("DROP TABLE puzzles")
-        conn.execute(f"ALTER TABLE {_STAGING} RENAME TO puzzles")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_puzzles_rating ON puzzles(rating)")
-        conn.execute("INSERT INTO puzzle_themes_fts(puzzle_themes_fts) VALUES('rebuild')")
+            f"""SELECT count(DISTINCT a.puzzle_id) FROM main.puzzle_attempts a
+                WHERE a.puzzle_id IN (SELECT id FROM {old}.puzzles)
+                  AND a.puzzle_id NOT IN (SELECT id FROM new.puzzles)""").fetchone()[0] if has_attempts else 0
+    finally:
+        conn.close()
+    return {"count": count, "previous": previous, "removed": removed,
+            "removed_attempted": removed_attempted, "added": count - (previous - removed)}
+
+
+def _write_meta(db_path: Path, count: int, source: dict) -> None:
+    """The copy's facts, in the main database's meta (they describe the user's copy, and the
+    Puzzles screen reads them with the rating); and a set left in the main database by a move the
+    disk had no room for (database v22) is dropped, now that the file holds the new one."""
+    conn = sqlite3.connect(str(db_path), timeout=60)
+    try:
+        conn.execute("PRAGMA busy_timeout = 60000")
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         now = datetime.now(timezone.utc).isoformat()
         meta = {
             "puzzles_imported": "1",
@@ -348,16 +391,17 @@ def _swap(conn: sqlite3.Connection, count: int, source: dict) -> dict:
             "puzzles_source_bytes": str(source.get("bytes") or ""),
         }
         conn.executemany("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", list(meta.items()))
+        conn.execute("DROP TABLE IF EXISTS main.puzzle_themes_fts")
+        conn.execute("DROP TABLE IF EXISTS main.puzzles_new")
+        conn.execute("DROP TABLE IF EXISTS main.puzzles")
         conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    return {"count": count, "previous": previous, "removed": removed,
-            "removed_attempted": removed_attempted, "added": count - (previous - removed)}
+    finally:
+        conn.close()
 
 
 def import_puzzles_file(path: Path, db_path: Path,
-                        is_cancelled: Callable[[], bool] = lambda: False) -> Iterator[tuple]:
+                        is_cancelled: Callable[[], bool] = lambda: False,
+                        install: Callable[[Path, Path], None] | None = None) -> Iterator[tuple]:
     """Import a puzzle file the user picked: the CSV, or Lichess's .zst as downloaded (told
     apart by its first bytes, not its name)."""
     if not path.exists():
@@ -373,7 +417,7 @@ def import_puzzles_file(path: Path, db_path: Path,
             return
         yield from import_puzzle_stream(fh, db_path, total_bytes=path.stat().st_size,
                                         compressed=compressed, source=source,
-                                        is_cancelled=is_cancelled)
+                                        is_cancelled=is_cancelled, install=install)
 
 
 def _default_open(url: str, timeout: float, method: str = "GET"):
@@ -433,7 +477,8 @@ def disk_shortfall(db_path: Path, nbytes: int | None, compressed: bool) -> str |
 
 
 def download_lichess_puzzles(db_path: Path, is_cancelled: Callable[[], bool] = lambda: False,
-                             open_fn=None, url: str | None = None) -> Iterator[tuple]:
+                             open_fn=None, url: str | None = None,
+                             install: Callable[[Path, Path], None] | None = None) -> Iterator[tuple]:
     """Download Lichess's puzzle file and import it as it arrives: the bytes go from the
     network through the Zstandard decoder into SQLite, the decompressed CSV never touches the
     disk. Events as import_puzzle_stream's (bytes counted are the compressed bytes received);
@@ -447,7 +492,8 @@ def download_lichess_puzzles(db_path: Path, is_cancelled: Callable[[], bool] = l
             return
         yield ("progress", 0, source["bytes"], 0)
         yield from import_puzzle_stream(resp, db_path, total_bytes=source["bytes"],
-                                        compressed=True, source=source, is_cancelled=is_cancelled)
+                                        compressed=True, source=source, is_cancelled=is_cancelled,
+                                        install=install)
 
 
 def import_puzzles_csv(csv_path: Path, db_path: Path,

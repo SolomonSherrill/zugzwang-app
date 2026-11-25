@@ -267,7 +267,13 @@ export function analysisNote(
   run: { id: number; done: number; total: number } | null,
   queue: number[],
   error: string | undefined,
+  /** COACH-2 D (ruling CB1): the store's running game analysis, wherever it was started (a re-analysis included) */
+  bg: { gameId: number; depth: number; done: number; total: number } | null = null,
 ): { text: string; canAnalyse: boolean } | null {
+  if (bg?.gameId === g.id) {
+    const what = g.analyzed ? `Re-analysing at depth ${bg.depth}` : `Analysing at depth ${bg.depth}`
+    return { text: bg.total ? `${what}: ${bg.done} of ${bg.total}` : `${what}…`, canAnalyse: false }
+  }
   if (run?.id === g.id) return { text: run.total ? `Analysing ${run.done} of ${run.total}` : 'Analysing…', canAnalyse: false }
   if (queue.includes(g.id)) return { text: 'Waiting to analyse', canAnalyse: false }
   if (g.analyzed) return null

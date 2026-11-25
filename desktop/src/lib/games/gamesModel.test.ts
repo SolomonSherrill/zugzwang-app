@@ -165,6 +165,11 @@ describe('stacked rows (UI-BUILD-4 B)', () => {
     expect(analysisNote(g, null, [], 'engine died')).toEqual({ text: 'Analysis stopped', canAnalyse: true })
     expect(analysisNote(g, { id: g.id, done: 0, total: 0 }, [], undefined)).toEqual({ text: 'Analysing…', canAnalyse: false })
     expect(analysisNote(g, { id: g.id, done: 37, total: 90 }, [], undefined)?.text).toBe('Analysing 37 of 90')
+    // COACH-2 D (ruling CB1): a game being analysed from anywhere says so on its row, a re-analysis as one
+    const bg = { gameId: g.id, depth: 24, done: 38, total: 90 }
+    expect(analysisNote({ ...g, analyzed: true }, null, [], undefined, bg)).toEqual({ text: 'Re-analysing at depth 24: 38 of 90', canAnalyse: false })
+    expect(analysisNote({ ...g, analyzed: false }, null, [], undefined, { ...bg, done: 0, total: 0 })?.text).toBe('Analysing at depth 24…')
+    expect(analysisNote({ ...g, analyzed: true }, null, [], undefined, { ...bg, gameId: g.id + 1 })).toBeNull()
     expect(analysisNote(g, { id: 99, done: 1, total: 9 }, [g.id], undefined)).toEqual({ text: 'Waiting to analyse', canAnalyse: false })
     expect(analysisNote(game(), null, [], undefined)).toBeNull()
   })

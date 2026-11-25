@@ -3,6 +3,7 @@
  * shared by screens. Display constants mirror zugzwang/config.py.
  */
 import { Sidecar, type SidecarStatus } from './sidecar'
+import type { JobsSnapshot } from './background/jobsModel'
 
 export type { SidecarStatus }
 
@@ -288,10 +289,124 @@ export interface ReportFound {
   ownMoves?: number
 }
 
+/** COACH-1 C: a moment behind a focus item (core/coach.py build_overview) */
+export interface CoachRow {
+  gameId: number
+  ply: number
+  date: string
+  opponent: string | null
+  /** the user's move, numbered: "21... Nd5" */
+  move: string
+  theme: string
+  kind: 'chance' | 'threat'
+  outcome: 'caught' | 'missed'
+  key: string
+}
+/** One Focus item (COACH-2 ruling CF1: what cost the user most in the window, its place held in the bootstrap) */
+export interface CoachFocusItem {
+  key: string
+  kind: 'chance' | 'threat'
+  theme: string
+  /** "Knight forks against you", "Your own discovered attacks" */
+  title: string
+  name: string
+  /** its missed moments, of all its moments, in the window: "Missed X of Y" */
+  missed: number
+  total: number
+  /** the sum of the win probability lost on its missed moments in the window */
+  cost?: number
+  /** the share of bootstrap resamples it stayed in the top three in */
+  held?: number
+  recentCaught: number
+  recentTotal: number
+  rows: CoachRow[]
+  rowCount: number
+}
+export type CoachOverview =
+  | { status: 'building' }
+  | {
+      status: 'ready'
+      games: number
+      /** the analysed games in Focus's window (the last windowDays days) */
+      windowGames?: number
+      windowStart?: string
+      windowDays?: number
+      pending: number
+      moments: number
+      focus: CoachFocusItem[]
+      behind: CoachRow[]
+    }
+/** COACH-2 C: the Coach page's Practice panel and the sidebar's due count (sidecar practice_status) */
+export interface PracticeStatus {
+  due: number
+  reviews: number
+  new: number
+  find: number
+  threat: number
+  minutes: number
+  /** share right first time over the last 7 days, null with no attempt */
+  rightWeek: number | null
+  weekAttempts: number
+  learned: number
+  items: number
+  next: string | null
+  nextText: string | null
+  probes: boolean
+  newPerDay: number
+}
+/** COACH-2 C: one position to answer; no theme before the answer (ruling 6) */
+export interface PracticeItem {
+  id: number
+  kind: 'find' | 'threat'
+  source: 'game' | 'probe'
+  fen: string
+  side: 'white' | 'black'
+  hintSquare: string | null
+  gameId: number | null
+  ply: number | null
+  date: string | null
+  opponent: string | null
+  /** the user's move in the game, numbered */
+  played: string | null
+  /** the opponent's move before the position, numbered */
+  oppMove: string | null
+  puzzleRating: number | null
+}
+/** COACH-2 C: what an item shows once answered */
+export interface PracticeReveal {
+  verdict: 'right' | 'notQuite'
+  sentence: string
+  theme: string
+  focus: boolean
+  comesBack: string
+  due: string
+  dueText: string
+  answerUci: string
+  line: string[]
+  revealed: boolean
+}
+/** COACH-1 C: one line of the report's "Your patterns in this game" */
+export interface ReportPattern {
+  ply: number
+  kind: 'chance' | 'threat'
+  outcome: 'caught' | 'missed'
+  theme: string
+  name: string
+  focus: boolean
+  sentence: string
+  /** "You had missed this 6 of the last 9 times." — focus themes only (ruling 5) */
+  history: string | null
+  move: string
+  /** COACH-2 C (ruling 5): a missed moment Practice holds ("Added to Practice") */
+  practice?: boolean
+}
+
 export type GameReport =
   | { analysed: false; opening: ReportOpening | null; lines: string[] }
   | {
       analysed: true
+      /** COACH-1 C: null until the coach has read this game */
+      patterns?: { items: ReportPattern[] } | null
       basis: {
         depth: number
         analysedPlies: number
@@ -535,6 +650,8 @@ export interface SyncSourceCounts {
 
 export interface SyncStatus {
   syncing: boolean
+  /** the current or last sync run's id; every sync_ event carries it (COACH-2 D, ruling CB2) */
+  run?: number
   lichess: SyncSourceCounts
   chesscom: SyncSourceCounts
 }
@@ -830,6 +947,8 @@ export interface PuzzleStatus {
   imported: boolean
   count: number
   importing: boolean
+  /** the current or last import's id; its events carry it (COACH-2 D: an announced end is never revived) */
+  importRun?: number
   /** what is importing: a download from Lichess or a file (FIX-B6 B); null when idle */
   importKind?: 'lichess' | 'file' | null
   /** where the copy you have came from, its file's date (Lichess's Last-Modified), when imported */
@@ -1204,7 +1323,9 @@ export const api = {
    *  clocks (userMoveSender) */
   userMove: (uci: string, clockMs?: number | null) => sendUserMove(uci, clockMs),
   resign: () => sidecar.request<{ end: GameEndInfo }>('resign'),
-  draw: () => sidecar.request<{ end: GameEndInfo }>('draw'),
+  /** COACH.md ruling 8: accepted only from move 30 and when the engine's own evaluation does not favour it;
+   *  otherwise end is null and declined holds the exact message to show (it never states an evaluation) */
+  draw: () => sidecar.request<{ end: GameEndInfo | null; declined?: string }>('draw'),
   flag: (loser: Color) => sidecar.request<{ end: GameEndInfo }>('flag', { loser }),
   abandon: () => sidecar.request<{ end: GameEndInfo }>('abandon'),
   listGames: (limit?: number) =>
@@ -1249,6 +1370,8 @@ export const api = {
   // the sidecar ignores any depth sent, Server._clamp_depth). One game goes deeper only
   // through Analyse again (analyzeGame).
   syncStatus: () => sidecar.request<SyncStatus>('sync_status', {}),
+  /** COACH-2 D (ruling CB1): what runs in the background, for the store in background/jobs.svelte.ts */
+  backgroundJobs: () => sidecar.request<JobsSnapshot>('background_jobs'),
   startSync: (lichess: string, chesscom = '') =>
     sidecar.request<{ started: boolean; sources: GameSource[] }>('start_sync', { lichess, chesscom }),
   cancelSync: () => sidecar.request<{ ok: boolean }>('cancel_sync'),
@@ -1273,6 +1396,20 @@ export const api = {
   gamesPage: (params: GamesPageParams) => sidecar.request<GamesPage>('games_page', { ...params }),
   repairColors: (lichess: string, chesscom = '') =>
     sidecar.request<{ changed: number }>('repair_colors', { lichess, chesscom }),
+  coachOverview: () => sidecar.request<CoachOverview>('coach_overview'),
+  practiceStatus: (group?: string) => sidecar.request<PracticeStatus>('practice_status', group ? { group } : {}),
+  practiceSession: (group?: string) =>
+    sidecar.request<{ items: PracticeItem[]; secondsEach: number; session: string }>('practice_session', group ? { group } : {}),
+  practiceAnswer: (p: {
+    item_id: number
+    answer_uci: string | null
+    correct: boolean
+    time_ms: number
+    hint: boolean
+    revealed: boolean
+    loss: number | null
+    session: string | null
+  }) => sidecar.request<PracticeReveal>('practice_answer', p),
   insights: (
     opts: {
       color?: InsightsColor

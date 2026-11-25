@@ -173,6 +173,39 @@ class AnalysisRun:
         return json.loads(self.final_lines_json) if self.final_lines_json else []
 
 
+def puzzles_path(db_path: Path | str) -> Path:
+    """The puzzle set's own database file, beside the database (COACH-1 F, FIX-B6 decided item 6):
+    `zugzwang.db` → `zugzwang-puzzles.db`. An update builds a new file and replaces this one, so the
+    main database never grows by the set's size; the user's rating, attempts and sessions stay in the
+    main database. The main connection attaches it as `pz`; unqualified names reach it (SQLite looks
+    in main first, then the attached databases), so the queries are unchanged."""
+    p = Path(db_path)
+    return p.with_name(f"{p.stem}-puzzles{p.suffix or '.db'}")
+
+
+PUZZLE_DDL = """
+CREATE TABLE IF NOT EXISTS {schema}puzzles (
+    id               TEXT    PRIMARY KEY,
+    fen              TEXT    NOT NULL,
+    moves_uci        TEXT    NOT NULL,
+    rating           INTEGER NOT NULL,
+    rating_deviation INTEGER NOT NULL DEFAULT 80,
+    popularity       INTEGER NOT NULL DEFAULT 0,
+    nb_plays         INTEGER NOT NULL DEFAULT 0,
+    themes           TEXT    NOT NULL DEFAULT '',
+    game_url         TEXT,
+    opening_tags     TEXT,
+    imported_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS {schema}idx_puzzles_rating ON puzzles(rating);
+CREATE VIRTUAL TABLE IF NOT EXISTS {schema}puzzle_themes_fts USING fts5(
+    themes, content='puzzles', content_rowid='rowid'
+);
+"""
+PUZZLE_COLUMNS = ("id, fen, moves_uci, rating, rating_deviation, popularity, nb_plays, themes, game_url, "
+                  "opening_tags, imported_at")
+
+
 def standard_run_sql(alias: str = "r") -> str:
     """RUNS-DEPTH (owner, 2026-11-20): a WHERE term true for a game's **standard run** — a
     Stockfish run at `ANALYSIS_STANDARD_DEPTH` (14), or a run that is not Stockfish's (Lichess
@@ -251,7 +284,7 @@ class GameRecord:
 #: itself by probing `PRAGMA table_info`, which is what lets them run
 #: unconditionally on every open and stay correct on a database whose stored
 #: version says nothing useful. Bump this when adding a migration.
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 24
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -292,15 +325,6 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
 -- micro-optimisation: unindexed, `games_pending_analysis` scans the whole table
 -- once per candidate game and takes 55 ms, and it is on the sync path.
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_game ON analysis_runs(game_id, id DESC);
-
-CREATE TABLE IF NOT EXISTS puzzles (
-    id          TEXT    PRIMARY KEY,
-    fen         TEXT    NOT NULL,
-    moves_uci   TEXT    NOT NULL,
-    rating      INTEGER NOT NULL,
-    themes      TEXT,
-    imported_at TEXT    NOT NULL
-);
 
 CREATE TABLE IF NOT EXISTS move_analyses (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -468,10 +492,94 @@ class Database:
             self._set_busy_timeout()
             return
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = Path(path)
         self._conn = sqlite3.connect(str(path), check_same_thread=True)
         self._conn.row_factory = sqlite3.Row
         self._set_busy_timeout()
+        self._attach_puzzles()
         self._apply_schema()
+        self._vacuum_after_move()
+
+    # ── the puzzle file (COACH-1 F) ───────────────────────────────────────────
+
+    def _attach_puzzles(self) -> None:
+        """Attach the puzzle file as `pz` (created on first open) with its tables. A read-only
+        connection does not attach it: no reader on another thread reads puzzles, and a handle
+        left open there would stop an update from replacing the file on Windows."""
+        self._conn.execute("ATTACH DATABASE ? AS pz", (str(puzzles_path(self.path)),))
+        self._conn.execute("PRAGMA pz.journal_mode = WAL")
+        self._conn.executescript(PUZZLE_DDL.format(schema="pz."))
+        self._conn.commit()
+
+    def replace_puzzles_file(self, new_file: Path) -> None:
+        """Swap in a puzzle file an import built (puzzle_core.import_puzzle_stream): detach the old
+        one, move the new one over it, attach again. On this connection's thread, between requests."""
+        from zugzwang.core.puzzle_core import install_puzzles_file
+        self._conn.commit()
+        self._conn.execute("DETACH DATABASE pz")
+        try:
+            install_puzzles_file(Path(new_file), puzzles_path(self.path))
+        finally:
+            self._attach_puzzles()
+
+    def _main_has_puzzles(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='puzzles'").fetchone() is not None
+
+    def _migrate_v22(self) -> None:
+        # COACH-1 F: the puzzle set moves out of the main database into its own file (pz), copied row
+        # for row; no download. The user's rating, attempts and sessions are other tables and stay.
+        # Skipped, and tried again at the next open, when the disk lacks room for the copy; until
+        # then reads find main's table first (SQLite's name lookup) and nothing changes for the user.
+        if not self._main_has_puzzles():
+            return
+        import shutil
+        import time as _time
+        need = int(self.path.stat().st_size * 1.1) if self.path.exists() else 0
+        if shutil.disk_usage(self.path.parent).free < need:
+            logger.warning("puzzles stay in the main database for now: %d bytes free, %d needed",
+                           shutil.disk_usage(self.path.parent).free, need)
+            return
+        t0 = _time.monotonic()
+        before = self.path.stat().st_size
+        cols = {r[1] for r in self._conn.execute("PRAGMA main.table_info(puzzles)")}
+        moved = 0
+        if "rating_deviation" in cols and not self._conn.execute(
+                "SELECT 1 FROM pz.puzzles LIMIT 1").fetchone():
+            self._conn.execute(f"INSERT OR IGNORE INTO pz.puzzles ({PUZZLE_COLUMNS}) "
+                               f"SELECT {PUZZLE_COLUMNS} FROM main.puzzles")
+            moved = self._conn.execute("SELECT count(*) FROM pz.puzzles").fetchone()[0]
+            self._conn.execute("INSERT INTO pz.puzzle_themes_fts(puzzle_themes_fts) VALUES('rebuild')")
+        self._conn.execute("DROP TABLE IF EXISTS main.puzzle_themes_fts")
+        self._conn.execute("DROP TABLE IF EXISTS main.puzzles_new")
+        self._conn.execute("DROP TABLE main.puzzles")
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('puzzles_moved', ?)",
+            (json.dumps({"at": datetime.now(timezone.utc).isoformat(), "rows": moved,
+                         "copy_s": round(_time.monotonic() - t0, 1), "main_bytes_before": before}),))
+        self._vacuum_pending = True
+
+    def _vacuum_after_move(self) -> None:
+        """Give the moved set's pages back to the disk: VACUUM the main database once, after the
+        move committed (VACUUM cannot run inside a transaction)."""
+        if not getattr(self, "_vacuum_pending", False):
+            return
+        import time as _time
+        self._vacuum_pending = False
+        t0 = _time.monotonic()
+        self._conn.commit()
+        # The copy went through the puzzle file's write-ahead log (about the set's size); give it back
+        # now rather than when the app closes.
+        self._conn.execute("PRAGMA pz.wal_checkpoint(TRUNCATE)")
+        self._conn.execute("VACUUM main")
+        row = self._conn.execute("SELECT value FROM meta WHERE key = 'puzzles_moved'").fetchone()
+        info = json.loads(row[0]) if row else {}
+        info.update({"vacuum_s": round(_time.monotonic() - t0, 1),
+                     "main_bytes_after": self.path.stat().st_size})
+        self._conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('puzzles_moved', ?)",
+                           (json.dumps(info),))
+        self._conn.commit()
+        logger.info("puzzles moved to their own file: %s", info)
 
     def _set_busy_timeout(self) -> None:
         # 5 000 ms is what these connections already had: sqlite3.connect's
@@ -521,6 +629,9 @@ class Database:
         self._migrate_v19()
         self._migrate_v20()
         self._migrate_v21()
+        self._migrate_v22()
+        self._migrate_v23()
+        self._migrate_v24()
         # Stamped last, and overwritten rather than inserted-if-absent: the old
         # `INSERT OR IGNORE` meant the first value a database ever received was
         # the only one it ever had. On the live database that value was '1',
@@ -546,43 +657,15 @@ class Database:
             )
 
     def _migrate_v5(self) -> None:
-        # Rebuild puzzles table if it's the old stub (missing rating_deviation column).
-        cols = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(puzzles)").fetchall()
-        }
+        # A pre-v5 `puzzles` stub in the main database (no `rating_deviation`) held nothing worth
+        # keeping (the set is re-imported): it is dropped. Since COACH-1 F (v22) the full table and its
+        # FTS5 theme index live in the puzzle file (`_attach_puzzles`), never in main.
+        if not self._main_has_puzzles():
+            return
+        cols = {row[1] for row in self._conn.execute("PRAGMA main.table_info(puzzles)").fetchall()}
         if "rating_deviation" not in cols:
-            self._conn.execute("DROP TABLE IF EXISTS puzzles")
-            self._conn.execute("""
-                CREATE TABLE puzzles (
-                    id               TEXT    PRIMARY KEY,
-                    fen              TEXT    NOT NULL,
-                    moves_uci        TEXT    NOT NULL,
-                    rating           INTEGER NOT NULL,
-                    rating_deviation INTEGER NOT NULL DEFAULT 80,
-                    popularity       INTEGER NOT NULL DEFAULT 0,
-                    nb_plays         INTEGER NOT NULL DEFAULT 0,
-                    themes           TEXT    NOT NULL DEFAULT '',
-                    game_url         TEXT,
-                    opening_tags     TEXT,
-                    imported_at      TEXT    NOT NULL
-                )
-            """)
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_puzzles_rating ON puzzles(rating)"
-            )
-        # FTS5 virtual table for theme search (content table backed by puzzles).
-        fts_exists = self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='puzzle_themes_fts'"
-        ).fetchone()
-        if not fts_exists:
-            self._conn.execute("""
-                CREATE VIRTUAL TABLE puzzle_themes_fts USING fts5(
-                    themes,
-                    content='puzzles',
-                    content_rowid='rowid'
-                )
-            """)
+            self._conn.execute("DROP TABLE IF EXISTS main.puzzle_themes_fts")
+            self._conn.execute("DROP TABLE main.puzzles")
 
     def _migrate_v4(self) -> None:
         cols = {
@@ -848,6 +931,216 @@ class Database:
                 facts_json         TEXT NOT NULL,
                 PRIMARY KEY (run_id, facts_version)
             )""")
+
+    def _migrate_v23(self) -> None:
+        # COACH-1 C: the coach's moments per complete run (core/coach.py), stored as JSON and
+        # recomputed when the coach's or the themes' version changes; written by the sidecar's
+        # refill (on the analysis thread: the null-move searches) and read by the Coach page and the
+        # game report. Additive: one new table.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS coach_moments (
+                run_id         INTEGER PRIMARY KEY REFERENCES analysis_runs(id) ON DELETE CASCADE,
+                coach_version  INTEGER NOT NULL,
+                themes_version INTEGER NOT NULL,
+                moments_json   TEXT    NOT NULL,
+                computed_at    TEXT    NOT NULL
+            )""")
+
+    def _migrate_v24(self) -> None:
+        # COACH-2 C (rulings CP1, 1, 5, 6; core/practice.py): Practice. `practice_items`: a missed moment of the user's
+        # (once, by game and ply) or a transfer probe (once, by puzzle). `practice_attempts`: the attempt log,
+        # APPEND-ONLY (the triggers refuse UPDATE and DELETE); the scheduler's state is derived from it, never stored.
+        # Additive: two new tables, two triggers.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS practice_items (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                source        TEXT    NOT NULL,          -- 'game' | 'probe'
+                kind          TEXT    NOT NULL,          -- 'find' | 'threat'
+                theme         TEXT    NOT NULL,
+                grp           TEXT    NOT NULL,          -- 'chance:<theme>' | 'threat:<theme>' | 'probe:<theme>'
+                fen           TEXT    NOT NULL,
+                answer_uci    TEXT    NOT NULL,
+                line_json     TEXT,
+                played_uci    TEXT,
+                opp_uci       TEXT,
+                opp_label     TEXT,
+                threat_fen    TEXT,
+                game_id       INTEGER,
+                game_key      TEXT,
+                ply           INTEGER,
+                played_at     TEXT,
+                opponent      TEXT,
+                puzzle_id     TEXT,
+                puzzle_rating INTEGER,
+                created_at    TEXT    NOT NULL,
+                UNIQUE (source, game_key, ply, kind),
+                UNIQUE (puzzle_id)
+            )""")
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS practice_attempts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id     INTEGER NOT NULL REFERENCES practice_items(id),
+                kind        TEXT    NOT NULL,
+                source      TEXT    NOT NULL,
+                at          TEXT    NOT NULL,            -- UTC, ISO 8601
+                answer_uci  TEXT,                        -- NULL when the answer was shown without a move
+                correct     INTEGER NOT NULL,
+                time_ms     INTEGER,
+                hint        INTEGER NOT NULL DEFAULT 0,
+                revealed    INTEGER NOT NULL DEFAULT 0,
+                loss        REAL,                        -- the judge's win-probability loss (Try it's)
+                session     TEXT
+            )""")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_practice_attempts_item ON practice_attempts(item_id)")
+        self._conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS practice_attempts_append_only_u BEFORE UPDATE ON practice_attempts
+            BEGIN SELECT RAISE(ABORT, 'practice_attempts is append-only'); END""")
+        self._conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS practice_attempts_append_only_d BEFORE DELETE ON practice_attempts
+            BEGIN SELECT RAISE(ABORT, 'practice_attempts is append-only'); END""")
+
+    # ── Practice (COACH-2 C) ──────────────────────────────────────────────────
+
+    _ITEM_COLS = ("source", "kind", "theme", "grp", "fen", "answer_uci", "line_json", "played_uci", "opp_uci",
+                  "opp_label", "threat_fen", "game_id", "game_key", "ply", "played_at", "opponent", "puzzle_id",
+                  "puzzle_rating", "created_at")
+
+    def add_practice_items(self, items: list) -> list[int]:
+        """Insert core/practice.Item rows not already there (by game and ply, or by puzzle); the new ids."""
+        import json as _json
+        now = datetime.now(timezone.utc).isoformat()
+        ids = []
+        for it in items:
+            vals = (it.source, it.kind, it.theme, it.grp, it.fen, it.answer_uci, _json.dumps(it.line_uci),
+                    it.played_uci, it.opp_uci, it.opp_label, it.threat_fen, it.game_id, it.game_key, it.ply,
+                    it.played_at, it.opponent, it.puzzle_id, it.puzzle_rating, it.created_at or now)
+            cur = self._conn.execute(
+                f"INSERT OR IGNORE INTO practice_items ({', '.join(self._ITEM_COLS)}) "
+                f"VALUES ({', '.join('?' * len(self._ITEM_COLS))})", vals)
+            if cur.rowcount:
+                ids.append(cur.lastrowid)
+        self._conn.commit()
+        return ids
+
+    def practice_items(self) -> list[sqlite3.Row]:
+        prev = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            return self._conn.execute("SELECT * FROM practice_items ORDER BY id").fetchall()
+        finally:
+            self._conn.row_factory = prev
+
+    def practice_attempt_rows(self) -> list[sqlite3.Row]:
+        prev = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            return self._conn.execute("SELECT * FROM practice_attempts ORDER BY at, id").fetchall()
+        finally:
+            self._conn.row_factory = prev
+
+    def add_practice_attempt(self, *, item_id: int, kind: str, source: str, at: str, answer_uci: str | None,
+                             correct: bool, time_ms: int | None, hint: bool, revealed: bool, loss: float | None,
+                             session: str | None) -> int:
+        """Append one attempt (the log is append-only)."""
+        cur = self._conn.execute(
+            "INSERT INTO practice_attempts (item_id, kind, source, at, answer_uci, correct, time_ms, hint, revealed,"
+            " loss, session) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, kind, source, at, answer_uci, int(correct), time_ms, int(hint), int(revealed), loss, session))
+        self._conn.commit()
+        return cur.lastrowid
+
+    def practice_keys_for_game(self, game_key: str) -> set[tuple[int, str]]:
+        """(ply, kind) of the game's Practice items ("Added to Practice" in its report)."""
+        return {(r[0], r[1]) for r in self._conn.execute(
+            "SELECT ply, kind FROM practice_items WHERE source = 'game' AND game_key = ?", (game_key,))}
+
+    def pick_probe_puzzle(self, tag: str, rating: float, rng: int) -> tuple | None:
+        """One unseen puzzle tagged *tag* within *rng* of *rating*: never attempted in Puzzles and not already a
+        Practice item. (id, fen, moves, rating) or None. No puzzles downloaded: None."""
+        try:
+            row = self._conn.execute(
+                """SELECT p.id, p.fen, p.moves_uci, p.rating FROM puzzles p
+                   JOIN puzzle_themes_fts f ON p.rowid = f.rowid
+                   WHERE puzzle_themes_fts MATCH ? AND p.rating BETWEEN ? AND ?
+                     AND NOT EXISTS (SELECT 1 FROM puzzle_attempts a WHERE a.puzzle_id = p.id)
+                     AND NOT EXISTS (SELECT 1 FROM practice_items i WHERE i.puzzle_id = p.id)
+                   ORDER BY RANDOM() LIMIT 1""",
+                (f'"{tag}"', int(rating - rng), int(rating + rng))).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return tuple(row) if row else None
+
+    # ── the coach's moments (COACH-1 C) ───────────────────────────────────────
+
+    def runs_without_coach_moments(self, coach_version: int, themes_version: int) -> list[int]:
+        """Complete standard runs of the user's games with no current coach_moments row, newest first
+        (the games the user looks at first)."""
+        return [r[0] for r in self._conn.execute(
+            f"""SELECT r.id FROM analysis_runs r JOIN games g ON g.id = r.game_id
+                WHERE r.completed_at IS NOT NULL AND {standard_run_sql('r')}
+                  AND g.player_color IN ('white', 'black')
+                  AND NOT EXISTS (SELECT 1 FROM coach_moments c WHERE c.run_id = r.id
+                                  AND c.coach_version = ? AND c.themes_version = ?)
+                ORDER BY g.played_at DESC, r.id DESC""", (coach_version, themes_version))]
+
+    def save_coach_moments(self, rows: list[tuple[int, int, int, str]]) -> int:
+        """(run_id, coach_version, themes_version, moments_json) rows computed on another thread; a run
+        no longer complete is skipped."""
+        n = 0
+        now = datetime.now(timezone.utc).isoformat()
+        for run_id, cv, tv, js in rows:
+            if self._conn.execute("SELECT 1 FROM analysis_runs WHERE id = ? AND completed_at IS NOT NULL",
+                                  (run_id,)).fetchone() is None:
+                continue
+            self._conn.execute(
+                "INSERT OR REPLACE INTO coach_moments (run_id, coach_version, themes_version, moments_json,"
+                " computed_at) VALUES (?, ?, ?, ?, ?)", (run_id, cv, tv, js, now))
+            n += 1
+        self._conn.commit()
+        return n
+
+    def coach_rows(self, coach_version: int, themes_version: int) -> list[tuple]:
+        """(game id, source, external id, played_at, player colour, pgn headers' players, run id,
+        moments_json) for every game whose standard run has current moments."""
+        return [tuple(r) for r in self._conn.execute(
+            f"""SELECT g.id, g.source, g.external_id, g.played_at, g.player_color, g.pgn, r.id,
+                       c.moments_json
+                FROM coach_moments c JOIN analysis_runs r ON r.id = c.run_id JOIN games g ON g.id = r.game_id
+                WHERE r.completed_at IS NOT NULL AND {standard_run_sql('r')}
+                  AND c.coach_version = ? AND c.themes_version = ?
+                  AND r.id = (SELECT max(r2.id) FROM analysis_runs r2 WHERE r2.game_id = g.id
+                              AND r2.completed_at IS NOT NULL AND {standard_run_sql('r2')})""",
+            (coach_version, themes_version))]
+
+    def coach_run_inputs(self, run_id: int) -> tuple[str, str | None] | None:
+        """(the user's colour, the run's final lines) for a complete run, or None."""
+        r = self._conn.execute(
+            "SELECT g.player_color, r.final_lines_json FROM analysis_runs r JOIN games g ON g.id = r.game_id"
+            " WHERE r.id = ? AND r.completed_at IS NOT NULL", (run_id,)).fetchone()
+        return (r[0], r[1]) if r else None
+
+    def coach_moments_for_run(self, run_id: int, coach_version: int, themes_version: int) -> str | None:
+        r = self._conn.execute(
+            "SELECT moments_json FROM coach_moments WHERE run_id = ? AND coach_version = ? AND themes_version = ?",
+            (run_id, coach_version, themes_version)).fetchone()
+        return r[0] if r else None
+
+    def run_fens(self, run_id: int) -> dict[int, str]:
+        return {r[0]: r[1] for r in self._conn.execute(
+            "SELECT ply, fen_before FROM move_analyses WHERE run_id = ?", (run_id,))}
+
+    def run_losses(self, run_id: int) -> dict[int, float]:
+        """ply -> the move's win-probability loss for its mover (classification.wpl over the stored scores);
+        the cost Focus sums (COACH-2 ruling CF1). A ply with no scores is left out."""
+        from zugzwang.core.classification import wpl
+        out = {}
+        for ply, sb, sbm, sa, sam in self._conn.execute(
+                "SELECT ply, score_before_cp, score_before_mate, score_after_cp, score_after_mate"
+                " FROM move_analyses WHERE run_id = ?", (run_id,)):
+            if (sb is None and sbm is None) or (sa is None and sam is None):
+                continue
+            out[ply] = wpl(sb, sbm, sa, sam)
+        return out
 
     def _migrate_v21(self) -> None:
         # FRIENDS-2 (rulings G2, R1-R3): games against friends are stored in `games` with the

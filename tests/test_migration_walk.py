@@ -14,7 +14,7 @@ import pytest
 
 from zugzwang.core import relabel
 from zugzwang.core.classification import CLASSIFIER_VERSION
-from zugzwang.core.database import SCHEMA_VERSION, Database
+from zugzwang.core.database import SCHEMA_VERSION, Database, puzzles_path
 
 FIX = Path(__file__).parent / "fixtures"
 OLD = ["schema_base_ca20aa7.db", "schema_v9_ca20aa7.db"]
@@ -58,9 +58,12 @@ def test_old_database_walks_forward(tmp_path, name, fresh_columns):
         ["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7"]
     # The one non-additive step, measured here: v5 DROPS a pre-v5 `puzzles` stub (no
     # `rating_deviation`) and rebuilds it empty — the puzzles are re-imported from the
-    # CSV. The rating row survives. No beta database can predate v5.
+    # CSV. The rating row survives. No beta database can predate v5. Since v22 (COACH-1 F) the
+    # set lives in its own file beside the database, moved there row for row.
     want = [] if name == "schema_base_ca20aa7.db" else [("00008", 1913)]
-    assert con.execute("SELECT id, rating FROM puzzles").fetchall() == want
+    assert con.execute("SELECT 1 FROM sqlite_master WHERE name = 'puzzles'").fetchall() == []
+    con.execute("ATTACH DATABASE ? AS pz", (str(puzzles_path(db)),))
+    assert con.execute("SELECT id, rating FROM pz.puzzles").fetchall() == want
     rating = [(1234.5,)] if name == "schema_base_ca20aa7.db" else []   # v9: none was written
     assert con.execute("SELECT rating FROM puzzle_rating").fetchall() == rating
     con.close()

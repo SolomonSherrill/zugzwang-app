@@ -24,6 +24,7 @@
     type SyncWarningEvent,
   } from '../api'
   import { addSyncWarning, syncWarningLines, type SyncWarning } from '../syncWarnings'
+  import { RunGuard } from '../background/runGuard'
   import {
     DEPTH_LINE,
     SOURCE_NAME,
@@ -106,13 +107,26 @@
   let runErrors = $state<string[]>([])
   let warnings = $state<SyncWarning[]>([])
   const sources = $derived(connected(accounts))
-  const canSync = $derived(sources.length > 0 && !dirty && phase !== 'running' && !status?.syncing)
+  // COACH-2 D (ruling CB2): a status never revives a run whose end was announced, and one saying nothing runs closes
+  // a card still showing one
+  const guard = new RunGuard()
+  const canSync = $derived(
+    sources.length > 0 && !dirty && phase !== 'running' && !guard.live(status ? { running: status.syncing, run: status.run } : null),
+  )
 
   async function refreshSync() {
+    const asked = guard.ask()
     try {
       status = await api.syncStatus()
       statusError = null
-      if (status.syncing && phase !== 'running') phase = 'running'
+      const v = guard.verdict({ running: status.syncing, run: status.run }, asked, phase === 'running')
+      if (v === 'revive') {
+        guard.started()
+        phase = 'running'
+      } else if (v === 'close' && phase === 'running') {
+        phase = runErrors.length ? 'failed' : 'finished'
+        progress = null
+      }
     } catch (e) {
       statusError = e instanceof Error ? e.message : String(e)
     }
@@ -125,6 +139,7 @@
     warnings = []
     progress = { phase: 'fetching', done: 0, total: 0 }
     phase = 'running'
+    guard.started()
     try {
       await api.startSync(accounts.lichess, accounts.chesscom)
     } catch (e) {
@@ -136,6 +151,7 @@
 
   const label = (s: string) => SOURCE_NAME[s as Source] ?? ''
   const onProgress = (d: SyncProgressEvent) => {
+    if (phase !== 'running') guard.started()
     progress = d
     phase = 'running'
   }
@@ -148,12 +164,14 @@
     runErrors = [...runErrors, d.source ? `${label(d.source)}: ${d.message}` : d.message]
   }
   const onWarning = (d: SyncWarningEvent) => (warnings = addSyncWarning(warnings, d))
-  const onFinished = () => {
+  const onFinished = (d?: { run?: number }) => {
+    guard.end(d?.run)
     if (phase === 'running') phase = runErrors.length ? 'failed' : 'finished'
     progress = null
     void refreshSync()
   }
-  const onCancelled = () => {
+  const onCancelled = (d?: { run?: number }) => {
+    guard.end(d?.run)
     phase = 'idle'
     progress = null
   }

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import logging
 import os
 import queue
@@ -40,7 +41,8 @@ import chess.engine
 import chess.pgn
 
 import zugzwang.config as C
-from zugzwang.config import DB_PATH, ENGINE_MOVE_TIME_MS, SKILL_DEFAULT, skill_to_elo
+from zugzwang.config import (DB_PATH, DRAW_FAVOUR_CP, DRAW_FROM_MOVE, ENGINE_MOVE_TIME_MS, SKILL_DEFAULT,
+                             skill_to_elo)
 from zugzwang.core.analysis import (
     analyze_game_from_evals,
     analyze_game_plies,
@@ -84,6 +86,9 @@ from zugzwang.core.game import GameEnd, GameSession
 from zugzwang.core.import_pgn import parse_pgn_report
 from zugzwang.core.insights import build_insights
 from zugzwang.core.patterns import FACTS_VERSION, facts_row, write_facts_for_run
+from zugzwang.core import coach as coach_core
+from zugzwang.core import practice as practice_core
+from zugzwang.core.themes import THEMES_VERSION
 from zugzwang.core.platform_sync import (
     SyncError,
     check_usernames,
@@ -290,6 +295,24 @@ class EngineBudget:
         return self._ceiling
 
 
+def draw_decision(fullmove: int, last_eval: tuple[str, int | None, int | None] | None,
+                  opponent: str = "Stockfish") -> str | None:
+    """None to accept a draw offer, else the exact message to show (COACH.md ruling 8). *last_eval* is the
+    engine's evaluation from its last move's search, from its own side; with none, the offer is declined. The
+    engine favours the position when it sees a mate for itself or more than DRAW_FAVOUR_CP centipawns."""
+    if fullmove < DRAW_FROM_MOVE:
+        return "Draw offers open after move 30."
+    declined = f"{opponent} declined the draw."
+    if last_eval is None:
+        return declined
+    _fen, cp, mate = last_eval
+    if mate is not None:
+        return declined if mate > 0 else None
+    if cp is None or cp > DRAW_FAVOUR_CP:
+        return declined
+    return None
+
+
 class EngineWorker:
     """StockfishWorker's contract on a plain thread: one engine, one job queue,
     a generation counter instead of the _skip flag."""
@@ -299,6 +322,9 @@ class EngineWorker:
         self._engine: chess.engine.SimpleEngine | None = None
         self._path: str | None = None
         self._configured_skill: int | None = None
+        # The engine's own evaluation from its last move's search, from its side: (fen searched, cp, mate).
+        # A draw offer reads it (COACH.md ruling 8); nothing shows it.
+        self.last_eval: tuple[str, int | None, int | None] | None = None
         self._generation = 0
         self._gen_lock = threading.Lock()
         self.ready = threading.Event()
@@ -382,7 +408,7 @@ class EngineWorker:
                 return
             self._configure(skill)
             try:
-                result = self._engine.play(board, limit)
+                result = self._engine.play(board, limit, info=chess.engine.INFO_SCORE)
                 break
             except ENGINE_GONE as exc:
                 code = bury(self._engine)
@@ -397,6 +423,10 @@ class EngineWorker:
                 logger.error("play error: %s", exc)
                 _emit("engine_error", {"message": str(exc)})
                 return
+        score = result.info.get("score") if result.info else None
+        if score is not None:
+            pov = score.pov(board.turn)
+            self.last_eval = (fen, pov.score(), pov.mate())
         with self._gen_lock:
             stale = gen != self._generation
         if not stale and result.move is not None:
@@ -464,6 +494,16 @@ class AnalysisRunner:
         stats = {"runs": len(run_ids), "computed": 0, "t0": time.monotonic()}
         self._jobs.put(("facts", (db_path, list(run_ids), on_rows, on_done, stats, None)))
 
+    #: Runs per coach refill job: about 16 null-move searches each at depth 14 (COACH-1 B measured
+    #: the cost), so a game the user asks to analyse waits for a few seconds at most.
+    COACH_BATCH = 5
+
+    def refill_coach(self, db_path: Path, run_ids: list[int], on_rows, on_done) -> None:
+        """COACH-1 C: the coach's moments for runs that have none (or an old version), in the background,
+        on this thread and engine (the parried threats need one search per ply, core/coach.py)."""
+        stats = {"runs": len(run_ids), "computed": 0, "t0": time.monotonic()}
+        self._jobs.put(("coach", (db_path, list(run_ids), on_rows, on_done, stats, None)))
+
     def cancel(self) -> None:
         self._cancel = True
 
@@ -473,6 +513,52 @@ class AnalysisRunner:
         self._jobs.put(("quit", None))
 
     # ── worker thread ─────────────────────────────────────────────────────────
+
+    def _coach_row(self, ro: Database, run_id: int) -> tuple | None:
+        info = ro.coach_run_inputs(run_id)
+        if info is None:
+            return None
+        colour, final_json = info
+        plies = ro.load_move_analyses(run_id)
+        final = json.loads(final_json) if final_json else []
+        null_lines: dict[int, list[str]] = {}
+        for i in coach_core.user_plies(plies, colour):
+            fen = coach_core.needs_null_search(plies, i)
+            if fen is None:
+                continue
+            res = self._engine.analyse(chess.Board(fen),
+                                       chess.engine.Limit(depth=C.ANALYSIS_STANDARD_DEPTH))
+            null_lines[i] = [m.uci() for m in res.get("pv", [])]
+        moments = coach_core.moments_for_run(plies, final, colour, null_lines)
+        return (run_id, coach_core.COACH_VERSION, THEMES_VERSION,
+                json.dumps([m.to_dict() for m in moments]))
+
+    def _do_coach(self, db_path, todo, on_rows, on_done, stats, ro) -> None:
+        if self._stopping:
+            if ro is not None:
+                ro.close()
+            return
+        if ro is None:
+            ro = Database(db_path, read_only=True)
+        batch, rest = todo[:self.COACH_BATCH], todo[self.COACH_BATCH:]
+        rows = []
+        for run_id in batch:
+            try:
+                row = self._coach_row(ro, run_id)
+            except Exception:
+                logger.exception("coach moments for run %s not computed", run_id)
+                continue
+            if row is not None:
+                rows.append(row)
+        stats["computed"] += len(rows)
+        if rows:
+            self._post(lambda r=rows: on_rows(r))
+        if rest and not self._stopping:
+            self._jobs.put(("coach", (db_path, rest, on_rows, on_done, stats, ro)))
+        else:
+            ro.close()
+            stats["seconds"] = round(time.monotonic() - stats.pop("t0"), 1)
+            self._post(lambda: on_done(stats))
 
     def _run(self) -> None:
         while True:
@@ -488,7 +574,12 @@ class AnalysisRunner:
                         self.games_pending -= 1
                 elif kind == "facts":
                     self._do_facts(*payload)
+                elif kind == "coach":
+                    self._do_coach(*payload)
             except Exception as exc:
+                if kind == "coach":
+                    logger.exception("coach refill failed")
+                    continue
                 if kind == "facts":
                     logger.exception("pattern facts refill failed")
                     continue
@@ -706,27 +797,43 @@ class PuzzleImportRunner:
     to stdout; the end is marshalled to the app thread. The new set is swapped in only at the end,
     so a cancelled or failed import leaves the previous one usable."""
 
-    def __init__(self, post_call) -> None:
+    def __init__(self, post_call, install=None) -> None:
         self._post = post_call
+        # Moves the finished puzzle file over the set in use (COACH-1 F); the app's does it on the
+        # app thread, where the connection that attaches the file lives. None: moved directly.
+        self._install = install
         self._cancel = False
         self._thread: threading.Thread | None = None
         self.kind: str | None = None
+        # COACH-2 D (the sync's race, ruling CB2, found here too): the end is announced (done posted, or
+        # cancelled / error emitted) while the thread still lives; running() is false from then on, so the
+        # lobby's status check on puzzle_import_done never reads importing: true. Every run has an id.
+        self.run_id = 0
+        self._ended_run = 0
+        self.last_progress: dict | None = None
 
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return (self._thread is not None and self._thread.is_alive()
+                and self._ended_run != self.run_id)
+
+    def _over(self) -> None:
+        self._ended_run = self.run_id
 
     def start(self, csv_path: Path, db_path: Path, on_done) -> None:
-        self._start("file", lambda cancelled: import_puzzles_file(csv_path, db_path, cancelled), on_done)
+        self._start("file", lambda cancelled: import_puzzles_file(
+            csv_path, db_path, cancelled, install=self._install), on_done)
 
     def start_download(self, db_path: Path, on_done, url: str | None = None, open_fn=None) -> None:
         self._start("lichess", lambda cancelled: download_lichess_puzzles(
-            db_path, cancelled, open_fn=open_fn, url=url), on_done)
+            db_path, cancelled, open_fn=open_fn, url=url, install=self._install), on_done)
 
     def _start(self, kind: str, events, on_done) -> None:
         if self.running():
             raise RuntimeError("A puzzle import is already running.")
         self._cancel = False
         self.kind = kind
+        self.run_id += 1
+        self.last_progress = None
         self._thread = threading.Thread(
             target=self._run, args=(kind, events, on_done), name="puzzle-import", daemon=True,
         )
@@ -744,23 +851,31 @@ class PuzzleImportRunner:
                     now = time.monotonic()
                     if now - last >= 0.25:  # at most four a second: a batch can take 10 ms
                         last = now
-                        _emit("puzzle_import_progress", {"kind": kind, "bytes": event[1],
-                                                         "totalBytes": event[2], "imported": event[3]})
+                        self.last_progress = {"kind": kind, "bytes": event[1], "totalBytes": event[2],
+                                              "imported": event[3], "run": self.run_id}
+                        _emit("puzzle_import_progress", dict(self.last_progress))
                 elif what == "finishing":
                     _emit("puzzle_import_finishing", {"kind": kind, "imported": event[1]})
                 elif what == "done":
+                    self._over()
                     self._post(lambda stats=event[1]: on_done(stats))
                 elif what == "cancelled":
-                    _emit("puzzle_import_cancelled", {"kind": kind})
+                    self._over()
+                    _emit("puzzle_import_cancelled", {"kind": kind, "run": self.run_id})
                 elif what == "error":
-                    _emit("puzzle_import_error", {"kind": kind, "message": event[1]})
+                    self._over()
+                    _emit("puzzle_import_error", {"kind": kind, "message": event[1], "run": self.run_id})
         except PuzzleFileError as exc:
-            _emit("puzzle_import_error", {"kind": kind, "message": str(exc)})
+            self._over()
+            _emit("puzzle_import_error", {"kind": kind, "message": str(exc), "run": self.run_id})
         except Exception as exc:
             logger.exception("puzzle import failed")
             reason = getattr(exc, "reason", None) or exc
             what = "The download stopped" if kind == "lichess" else "The import stopped"
-            _emit("puzzle_import_error", {"kind": kind, "message": f"{what}: {reason}."})
+            self._over()
+            _emit("puzzle_import_error", {"kind": kind, "message": f"{what}: {reason}.", "run": self.run_id})
+        finally:
+            self._over()
 
 
 class CoverageRunner:
@@ -856,10 +971,29 @@ class SyncRunner:
         self._budget = budget or EngineBudget()
         self._engines: dict[int, SupervisedEngine] = {}
         self._engines_lock = threading.Lock()
+        self.on_finished = None   # called on the app thread when a run ends (Server sets it)
         self._breaker = DeathBreaker()
+        # COACH-2 D (ruling CB2): every run has an id, on sync_status and on every sync_ event. A run is over
+        # once its sync_finished is emitted, though its thread lives a moment longer (and posts the coach's
+        # refill): running() says so from then on, so a status check made on sync_finished never revives it.
+        self.run_id = 0
+        self._ended_run = 0
+        self.kind: str | None = None             # "sync" | "analyse": what the current or last run does
+        self.last_progress: dict | None = None   # its last sync_progress (background_jobs)
 
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return (self._thread is not None and self._thread.is_alive()
+                and self._ended_run != self.run_id)
+
+    def _emit(self, event: str, data: dict) -> None:
+        if event == "sync_progress":
+            self.last_progress = dict(data)
+        _emit(event, {**data, "run": self.run_id})
+
+    def _end(self) -> None:
+        """The run is over: announced, and running() false from here on (ruling CB2)."""
+        self._ended_run = self.run_id
+        self._emit("sync_finished", {})
 
     _FETCHERS = {
         "lichess": fetch_lichess_games,
@@ -873,6 +1007,8 @@ class SyncRunner:
         if self.running():
             raise RuntimeError("a sync is already running")
         self._cancel = False
+        self.run_id += 1
+        self.kind, self.last_progress = "sync", None
         self._thread = threading.Thread(
             target=self._run, args=(jobs, usernames, db_path, depth),
             name="sync", daemon=True,
@@ -890,6 +1026,8 @@ class SyncRunner:
         if self.running():
             raise RuntimeError("a sync is already running")
         self._cancel = False
+        self.run_id += 1
+        self.kind, self.last_progress = "analyse", None
         self._thread = threading.Thread(
             target=self._run_analyze, args=(sources, db_path, depth, count, chosen),
             name="analyze-pending", daemon=True,
@@ -918,27 +1056,29 @@ class SyncRunner:
                     new_count, analyzed = self._sync_source(
                         db, openings, source, username, usernames, depth
                     )
-                    _emit("sync_done",
+                    self._emit("sync_done",
                           {"source": source, "new": new_count, "analyzed": analyzed})
                 except SyncError as exc:
                     # One platform failing shouldn't abort the others.
-                    _emit("sync_error", {"source": source, "message": str(exc)})
+                    self._emit("sync_error", {"source": source, "message": str(exc)})
                 except RunHalted as exc:
                     # A failing engine fails every platform alike: stop the run.
-                    _emit("sync_error", {"source": source, "message": str(exc)})
+                    self._emit("sync_error", {"source": source, "message": str(exc)})
                     break
             if self._cancel:
-                _emit("sync_cancelled", {})
+                self._emit("sync_cancelled", {})
         except Exception as exc:
             logger.exception("sync failed")
-            _emit("sync_error", {"source": "", "message": str(exc)})
+            self._emit("sync_error", {"source": "", "message": str(exc)})
         finally:
             self._quit_engine()
             if openings is not None:
                 openings.close()
             if db is not None:
                 db.close()
-            _emit("sync_finished", {})
+            self._end()
+            if self.on_finished is not None:      # COACH-1 C: the coach reads the new runs
+                self._post(self.on_finished)
 
     @staticmethod
     def _newest_pending(db, sources, depth, count) -> dict[str, list]:
@@ -967,31 +1107,33 @@ class SyncRunner:
                     total = self._analyze_pending(
                         db, openings, source, depth,
                         records=None if chosen is None else chosen[source])
-                    _emit("sync_done", {"source": source, "new": 0, "analyzed": total})
+                    self._emit("sync_done", {"source": source, "new": 0, "analyzed": total})
                 except RunHalted as exc:
-                    _emit("sync_error", {"source": source, "message": str(exc)})
+                    self._emit("sync_error", {"source": source, "message": str(exc)})
                     break
                 except Exception as exc:
-                    _emit("sync_error", {"source": source, "message": str(exc)})
+                    self._emit("sync_error", {"source": source, "message": str(exc)})
             if self._cancel:
-                _emit("sync_cancelled", {})
+                self._emit("sync_cancelled", {})
         except Exception as exc:
             logger.exception("analyze-pending failed")
-            _emit("sync_error", {"source": "", "message": str(exc)})
+            self._emit("sync_error", {"source": "", "message": str(exc)})
         finally:
             self._quit_engine()
             if openings is not None:
                 openings.close()
             if db is not None:
                 db.close()
-            _emit("sync_finished", {})
+            self._end()
+            if self.on_finished is not None:      # COACH-1 C: the coach reads the new runs
+                self._post(self.on_finished)
 
     def _sync_source(self, db, openings, source, username, usernames, depth):
         fetch = self._FETCHERS.get(source)
         if fetch is None:
             raise SyncError(f"unknown sync source: {source}")
 
-        _emit("sync_progress",
+        self._emit("sync_progress",
               {"phase": "fetching", "source": source, "done": 0, "total": 0})
         games = fetch(username, usernames=usernames, openings=openings)
 
@@ -1021,7 +1163,7 @@ class SyncRunner:
             except AttributionPending as exc:
                 # Skipped, not guessed: it stays unsynced, so a later sync with the
                 # right handle (or after the migration) picks it up.
-                _emit("sync_warning", {"source": source,
+                self._emit("sync_warning", {"source": source,
                                        "message": f"Skipped {_pgn_label(pg.pgn)}: {exc}"})
                 continue
             new_count += 1
@@ -1060,13 +1202,13 @@ class SyncRunner:
                    else db.games_pending_analysis(source, depth, recent=recent))
         total = len(pending)
         done = 0
-        _emit("sync_progress",
+        self._emit("sync_progress",
               {"phase": "analyzing", "source": source, "done": 0, "total": total})
 
         def progressed() -> None:
             nonlocal done
             done += 1
-            _emit("sync_progress",
+            self._emit("sync_progress",
                   {"phase": "analyzing", "source": source, "done": done, "total": total})
 
         todo: queue.Queue = queue.Queue()
@@ -1086,7 +1228,7 @@ class SyncRunner:
                 # Needs an engine version, so asked once, when the first game needs one.
                 stuck = db.needs_attention_ids(source, self._ensure_engine(0).version)
                 if stuck:
-                    _emit("sync_warning", {"source": source, "message": (
+                    self._emit("sync_warning", {"source": source, "message": (
                         f"Not analysing {len(stuck)} game(s): the engine crashed on each "
                         f"in {C.ENGINE_POISON_MAX_ATTEMPTS} separate runs. They need "
                         "attention (see engine_failures).")})
@@ -1141,7 +1283,7 @@ class SyncRunner:
     def _skipped(self, source, rec, exc) -> None:
         # A single malformed/variant game must not abort the whole run.
         logger.warning("analysis failed for game %s: %s", rec.id, exc)
-        _emit("sync_warning", {"source": source, "message": f"Skipped a game: {exc}"})
+        self._emit("sync_warning", {"source": source, "message": f"Skipped a game: {exc}"})
 
     def _analyze_from_evals(self, db: Database, openings: OpeningsBook,
                             rec: GameRecord) -> bool:
@@ -1253,6 +1395,131 @@ def _write_pattern_facts(db: Database, run_id: int) -> None:
         write_facts_for_run(db, run_id)
     except Exception:
         logger.exception("pattern facts for run %s not written", run_id)
+
+
+_HEADER = re.compile(r'^\[(White|Black) "([^"]*)"\]', re.M)
+
+
+def _coach_games(db: Database) -> list:
+    """Every game with current coach moments, as core/coach.py's GameMoments."""
+    out = []
+    for gid, source, ext, played_at, colour, pgn, run_id, js in db.coach_rows(coach_core.COACH_VERSION,
+                                                                            THEMES_VERSION):
+        heads = dict(_HEADER.findall(pgn or ""))
+        opp = heads.get("Black" if colour == "white" else "White") or None
+        out.append(coach_core.GameMoments(
+            game_id=gid, key=str(ext) if ext else f"local-{gid}", played_at=played_at or "", colour=colour,
+            opponent=opp, fens=db.run_fens(run_id), moments=coach_core.moments_from_json(js),
+            losses=db.run_losses(run_id), run_id=run_id))
+    return out
+
+
+def _utcnow() -> datetime:
+    """The clock Practice reads (COACH-2 C); the tests replace it with a fake one."""
+    return datetime.now(timezone.utc)
+
+
+def _practice_items_for(db: Database, games: list, done: set) -> list:
+    """COACH-2 C: the Practice items the games' missed moments give (core/practice.py), for games not in *done*
+    (keys of (game key, run id) already read: a game read again only when its run changed). Read-only work: the
+    stored best move of each allowed threat's ply. The caller writes the items on the app thread."""
+    out = []
+    for g in games:
+        k = (g.key, g.run_id)
+        if k in done:
+            continue
+        done.add(k)
+        plies = [m.ply for m in g.moments if m.kind == "threat" and m.outcome == "missed"]
+        best = {}
+        if plies:
+            best = {r[0]: r[1] for r in db._conn.execute(
+                f"SELECT ply, best_uci FROM move_analyses WHERE run_id = ? AND ply IN ({','.join('?' * len(plies))})",
+                (g.run_id, *plies))}
+        out.extend(practice_core.items_from_game(g, best))
+    return out
+
+
+class CoachRunner:
+    """COACH-1 C: builds the Coach page's overview off the dispatch thread, on a read-only connection,
+    and keeps the latest one (with every game's moments, for the report's history lines). A rebuild
+    asked for while one runs is done once more when it ends. Emits coach_updated when one is ready."""
+
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
+        self._jobs: queue.Queue = queue.Queue()
+        self._lock = threading.Lock()
+        self.latest: dict | None = None
+        self.pending = 0
+        self._queued = False
+        # COACH-2 C: after each overview, the Practice items of games not read before go to on_items (the Server
+        # writes them on the app thread)
+        self.on_items = None
+        self._items_done: set = set()
+        threading.Thread(target=self._run, name="coach", daemon=True).start()
+
+    def rebuild(self, pending: int = 0) -> None:
+        with self._lock:
+            self.pending = pending
+            if self._queued:
+                return
+            self._queued = True
+        self._jobs.put("build")
+
+    def shutdown(self) -> None:
+        self._jobs.put(None)
+
+    def _run(self) -> None:
+        db: Database | None = None
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                if db is not None:
+                    db.close()
+                return
+            with self._lock:
+                self._queued = False
+                pending = self.pending
+            try:
+                if db is None:
+                    db = Database(self._db_path, read_only=True)
+                t0 = time.monotonic()
+                games = _coach_games(db)
+                overview = coach_core.build_overview(games, pending=pending)
+                index = {g.game_id: g for g in games}
+                with self._lock:
+                    self.latest = {"overview": overview, "index": index,
+                                   "order": sorted(games, key=lambda g: (g.played_at or "", g.game_id))}
+                logger.info("coach overview: %d games, %d focus items, %.1f s", overview["games"],
+                            len(overview["focus"]), time.monotonic() - t0)
+                _emit("coach_updated", {"games": overview["games"], "focus": len(overview["focus"]),
+                                        "pending": pending})
+                if self.on_items is not None:
+                    try:
+                        items = _practice_items_for(db, games, self._items_done)
+                    except Exception:
+                        logger.exception("practice items not read")
+                        items = []
+                    self.on_items(items)
+            except Exception:
+                logger.exception("coach overview failed")
+
+    def history(self, game_id: int) -> tuple[dict[str, list[str]], set[str]]:
+        """The outcomes per (kind:theme) in the user's games before *game_id* (oldest first), and the
+        focus keys; empty while no overview has been built."""
+        with self._lock:
+            latest = self.latest
+        if latest is None:
+            return {}, set()
+        focus_keys = {f["key"] for f in latest["overview"]["focus"]}
+        earlier: dict[str, list[str]] = {}
+        for g in latest["order"]:
+            if g.game_id == game_id:
+                break
+            for mo in g.moments:
+                k = coach_core.moment_key(mo)         # the theme it counts under (CF1)
+                if k is not None:
+                    earlier.setdefault(k, []).append(mo.outcome)
+        return earlier, focus_keys
 
 
 class InsightsRunner:
@@ -1627,13 +1894,22 @@ class Server:
     """Runs on the app thread; everything that touches the session or the DB
     goes through the inbox."""
 
+    #: COACH-2 D: the coach's reading for background_jobs (None: not reading); a class default as well, for a
+    #: Server built without __init__ (the tests' object.__new__)
+    _coach_reading: dict | None = None
+
+    @property
+    def _analysis_jobs(self) -> dict[int, dict]:
+        """COACH-2 D: the game analyses in flight by run id (background_jobs); created on first use."""
+        return self.__dict__.setdefault("_analysis_jobs_by_run", {})
+
     def __init__(self) -> None:
         self._inbox: queue.Queue = queue.Queue()
         self._engine = EngineWorker()
         self._budget = EngineBudget()
         self._analysis = AnalysisRunner(self.post_call, self._budget)
         self._live = FenAnalysisRunner()
-        self._importer = PuzzleImportRunner(self.post_call)
+        self._importer = PuzzleImportRunner(self.post_call, install=self._install_puzzles_file)
         self._coverage = CoverageRunner(self.post_call)
         self._sync = SyncRunner(self.post_call, self._budget)
         self._insights: InsightsRunner | None = None  # created in _boot, needs db_path
@@ -1645,6 +1921,14 @@ class Server:
         self._friends._app_db = lambda: self._db
         self._friends._save_friend_game = self._save_friend_game
         self._facts_refill_running = False
+        # COACH-1 C: the coach's moments refill (analysis thread) and the overview (its own thread)
+        self._coach: CoachRunner | None = None       # created in _boot, needs db_path
+        self._sync.on_finished = self._start_coach_refill
+        self._coach_refill_running = False
+        self._coach_again = False
+        # COACH-2 D (ruling CB1): what background_jobs reports. A game analysis by its run id (the latest is
+        # the one running: a new one cancels the one before), the coach's reading by runs done of runs to read.
+        self._coach_reading = None
         # Runs a book switch relabelled while a refill was in flight: their facts are deleted
         # again and recomputed when that refill ends (it may have read the old labels).
         self._facts_dirty: set[int] = set()
@@ -1679,6 +1963,8 @@ class Server:
         self._friends.shutdown()
         if self._insights:
             self._insights.shutdown()
+        if self._coach:
+            self._coach.shutdown()
         if self._openings:
             self._openings.close()
         if self._db:
@@ -1721,6 +2007,189 @@ class Server:
 
         self._analysis.refill_facts(self._db_path, todo, on_rows, on_done)
 
+    def _start_coach_refill(self) -> None:
+        """COACH-1 C: compute the coach's moments for every standard run of the user's that has none at
+        this version, on the analysis thread in small batches (a game analysis waits one batch at most),
+        then rebuild the overview. Asked again while running: once more when it ends. App thread."""
+        if self._db is None or self._db_path is None:
+            return
+        if self._coach_refill_running:
+            self._coach_again = True
+            return
+        todo = self._db.runs_without_coach_moments(coach_core.COACH_VERSION, THEMES_VERSION)
+        if self._coach is not None:
+            self._coach.rebuild(pending=len(todo))
+        if not todo:
+            return
+        self._coach_refill_running = True
+        logger.info("coach refill: %d runs", len(todo))
+        written = {"n": 0}
+        self._coach_reading = {"done": 0, "total": len(todo)}
+        _emit("coach_progress", dict(self._coach_reading))
+
+        def on_rows(rows: list) -> None:
+            try:
+                written["n"] += self._db.save_coach_moments(rows)
+            except Exception:
+                logger.exception("coach refill: write failed")
+            self._coach_reading = {"done": min(len(todo), written["n"]), "total": len(todo)}
+            _emit("coach_progress", dict(self._coach_reading))
+            # the overview follows the refill every 100 runs, so a long first refill shows progress
+            if self._coach is not None and written["n"] % 100 < len(rows):
+                self._coach.rebuild(pending=max(0, len(todo) - written["n"]))
+
+        def on_done(stats: dict) -> None:
+            self._coach_refill_running = False
+            self._coach_reading = None
+            _emit("coach_progress", {"done": len(todo), "total": len(todo), "finished": True})
+            stats["written"] = written["n"]
+            logger.info("coach refill done: %s", stats)
+            if self._coach_again:
+                self._coach_again = False
+                self._start_coach_refill()
+            elif self._coach is not None:
+                self._coach.rebuild(pending=0)
+
+        self._analysis.refill_coach(self._db_path, todo, on_rows, on_done)
+
+    def rpc_coach_overview(self) -> dict:
+        """The Coach page (COACH-1 C): Focus and "Behind your focus". Built off this thread; while none
+        is ready the answer is {"status": "building"} and a coach_updated event follows."""
+        latest = self._coach.latest if self._coach is not None else None
+        if latest is None:
+            if self._coach is not None:
+                self._coach.rebuild(pending=self._coach.pending)
+            return {"status": "building"}
+        return {"status": "ready", **latest["overview"]}
+
+    # ── Practice (COACH-2 C; core/practice.py) ────────────────────────────────
+
+    def _save_practice_items(self, items: list) -> None:
+        """App thread: the missed moments' items (added once; "Added to Practice")."""
+        if not items or self._db is None:
+            return
+        try:
+            ids = self._db.add_practice_items(items)
+        except Exception:
+            logger.exception("practice items not saved")
+            return
+        if ids:
+            logger.info("practice: %d items added", len(ids))
+            _emit("practice_updated", self._practice_counts())
+
+    def _practice_state(self):
+        items = [practice_core.item_from_row(r) for r in self._db.practice_items()]
+        log: dict[int, list] = {}
+        for r in self._db.practice_attempt_rows():
+            log.setdefault(r["item_id"], []).append(practice_core.attempt_from_row(r))
+        latest = self._coach.latest if self._coach is not None else None
+        focus = [f["key"] for f in latest["overview"]["focus"]] if latest else []
+        return items, log, focus
+
+    def _probes_possible(self) -> bool:
+        try:
+            return bool(self._db.puzzles_imported())
+        except Exception:
+            return False
+
+    def _practice_counts(self, grp: str | None = None) -> dict:
+        items, log, focus = self._practice_state()
+        now = _utcnow()
+        q = practice_core.build_queue(items, log, now, focus_keys=focus, grp=grp, probes=self._probes_possible())
+        out = practice_core.panel(items, log, now, q, practice_core.seconds_each(log))
+        out["probes"] = self._probes_possible()
+        out["newPerDay"] = practice_core.NEW_PER_DAY
+        return out
+
+    def rpc_practice_status(self, group: str | None = None) -> dict:
+        """The Coach page's Practice panel and the sidebar's due count (COACH-2 C)."""
+        return self._practice_counts(group)
+
+    def rpc_practice_session(self, group: str | None = None) -> dict:
+        """Today's queue (the due items, then the new ones the day's cap allows, probes in their slots), each
+        without its theme (ruling 6). *group* narrows it to one focus item ("kind:theme"), a focus card's Practise."""
+        items, log, focus = self._practice_state()
+        now = _utcnow()
+        probes = self._probes_possible()
+        q = practice_core.build_queue(items, log, now, focus_keys=focus, grp=group, probes=probes)
+        new = list(q.new)
+        if q.probe_slots:
+            themes = practice_core.probe_themes(items, log, focus)
+            if group:
+                themes = [group.split(":", 1)[1]]       # a focus card's Practise: probes of its theme only
+            rating = self._db.get_puzzle_rating()[0]
+            used: set[str] = set()
+            for slot in q.probe_slots:
+                made = None
+                for theme in themes:
+                    if theme in used and len(themes) > 1:
+                        continue
+                    for rng in practice_core.PROBE_RANGES:
+                        pz = self._db.pick_probe_puzzle(practice_core.LICHESS_TAG.get(theme, theme), rating, rng)
+                        if pz is not None:
+                            made = practice_core.probe_item(pz, theme)
+                            break
+                    if made is not None:
+                        used.add(theme)
+                        break
+                if made is not None:
+                    ids = self._db.add_practice_items([made])
+                    if ids:
+                        made.id = ids[0]
+                        new[slot] = made
+        queue = q.due + [it for it in new if it is not None]
+        return {"items": [practice_core.view(it) for it in queue],
+                "secondsEach": practice_core.seconds_each(log), "session": f"{now.isoformat()}"}
+
+    def rpc_practice_answer(self, item_id: int, answer_uci: str | None = None, correct: bool = False,
+                            time_ms: int | None = None, hint: bool = False, revealed: bool = False,
+                            loss: float | None = None, session: str | None = None) -> dict:
+        """Append one attempt to the log (append-only) and answer what the item shows after it: Right / Not quite,
+        the sentence, the theme, focus or not, when it comes back. *correct* is the judge's verdict (judge_move, as
+        Try it judges: any good move counts); an answer shown counts as wrong."""
+        rows = {r["id"]: r for r in self._db.practice_items()}
+        if item_id not in rows:
+            raise RuntimeError(f"no practice item {item_id}")
+        it = practice_core.item_from_row(rows[item_id])
+        if answer_uci:
+            board = legal_board(it.fen)
+            if chess.Move.from_uci(answer_uci) not in board.legal_moves:
+                raise RuntimeError(f"{answer_uci} is not legal here")
+        now = _utcnow()
+        correct = bool(correct) and not revealed
+        self._db.add_practice_attempt(item_id=item_id, kind=it.kind, source=it.source, at=now.isoformat(),
+                                      answer_uci=answer_uci, correct=correct, time_ms=time_ms, hint=hint,
+                                      revealed=revealed, loss=loss, session=session)
+        items, log, focus = self._practice_state()
+        card = practice_core.card_for(item_id, log.get(item_id, []))
+        out = practice_core.reveal(it, answer_uci, correct, revealed, focus, card.due, now)
+        out["dueText"] = practice_core.short_when(card.due, now)
+        _emit("practice_updated", self._practice_counts())
+        return out
+
+    def _coach_patterns(self, game_id: int, run_id: int) -> dict | None:
+        """The report's "Your patterns in this game" (COACH-1 C): this run's stored moments, the focus
+        keys and the history before this game from the latest overview. None until the run's moments
+        are computed."""
+        js = self._db.coach_moments_for_run(run_id, coach_core.COACH_VERSION, THEMES_VERSION)
+        if js is None:
+            return None
+        rec = self._db.get_game(game_id)
+        game = coach_core.GameMoments(game_id=game_id, key="", played_at=rec.played_at if rec else "",
+                                      colour=rec.player_color if rec else "", opponent=None,
+                                      fens=self._db.run_fens(run_id), moments=coach_core.moments_from_json(js))
+        earlier, focus_keys = self._coach.history(game_id) if self._coach is not None else ({}, set())
+        out = coach_core.report_patterns(game, earlier, focus_keys)
+        # COACH-2 C (ruling 5): a missed moment in Practice says so ("Added to Practice")
+        key = (str(rec.external_id) if rec and rec.external_id else f"local-{game_id}")
+        try:
+            practised = self._db.practice_keys_for_game(key)
+        except Exception:
+            practised = set()
+        for p in out["items"]:
+            p["practice"] = p["outcome"] == "missed" and (p["ply"], "find" if p["kind"] == "chance" else "threat") in practised
+        return out
+
     def _refill_dirty_facts(self) -> None:
         """Delete the facts of runs a book switch relabelled and refill them. App thread."""
         ids = sorted(self._facts_dirty)
@@ -1759,6 +2228,26 @@ class Server:
     def post_call(self, fn) -> None:
         self._inbox.put(("call", fn))
 
+    def _install_puzzles_file(self, new_file: Path, _target: Path) -> None:
+        """An import's last step, from its thread (COACH-1 F): the app thread's connection detaches
+        the puzzle file, the new one replaces it, and it is attached again; the import waits."""
+        done = threading.Event()
+        failed: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                self._db.replace_puzzles_file(new_file)
+            except BaseException as exc:  # noqa: BLE001 — handed back to the import's thread
+                failed.append(exc)
+            finally:
+                done.set()
+
+        self.post_call(run)
+        if not done.wait(600):
+            raise RuntimeError("The app did not swap the new puzzle set in.")
+        if failed:
+            raise failed[0]
+
     def post_stop(self) -> None:
         self._inbox.put(("stop", None))
 
@@ -1768,6 +2257,8 @@ class Server:
         self._db_path = db_path
         self._db = Database(db_path)
         self._insights = InsightsRunner(db_path)
+        self._coach = CoachRunner(db_path)
+        self._coach.on_items = lambda items: self.post_call(lambda: self._save_practice_items(items))
         # After the migrations (Database() ran them), before anything reads labels.
         try:
             self._relabel.check(db_path)
@@ -1780,6 +2271,12 @@ class Server:
                 self._start_facts_refill()
         except Exception:
             logger.exception("pattern facts refill not started")   # never a reason to fail boot
+        # COACH-1 C: the coach's moments for runs that have none, in the background; the overview
+        # is built from what is there now and again when the refill ends.
+        try:
+            self._start_coach_refill()
+        except Exception:
+            logger.exception("coach refill not started")
         # BOOK-DL: a book switch the app closed during resumes (its download is done; it
         # backs up again and relabels what is left).
         try:
@@ -2063,7 +2560,22 @@ class Server:
         return {"end": self._finish(session.resign())}
 
     def rpc_draw(self) -> dict:
+        """The user offers a draw (COACH.md ruling 8, DESIGN.md "Owner rulings, 2026-11-23"): accepted only
+        from move 30 on and only when the engine's own evaluation does not favour it; otherwise the game goes
+        on and the answer carries the message to show, which never states or implies an evaluation."""
         session = self._require_session()
+        last = getattr(self._engine, "last_eval", None)
+        if last is not None:              # only an evaluation of this game's own positions counts
+            b = session.board.root()
+            seen = {b.fen()}
+            for mv in session.board.move_stack:
+                b.push(mv)
+                seen.add(b.fen())
+            if last[0] not in seen:
+                last = None
+        verdict = draw_decision(session.board.fullmove_number, last)
+        if verdict is not None:
+            return {"end": None, "declined": verdict}
         self._engine.cancel()
         return {"end": self._finish(session.draw_agreed())}
 
@@ -2252,7 +2764,7 @@ class Server:
                 "opening": op,
                 "lines": [opening_sentence(op, rec.player_color, None)] if op else [],
             }
-        return build_report(
+        report = build_report(
             self._db.load_move_analyses(run.id),
             game_plies=len(nodes),
             result=rec.result,
@@ -2265,6 +2777,12 @@ class Server:
             book=book,
             final_lines=run.final_lines,
         )
+        try:
+            report["patterns"] = self._coach_patterns(game_id, run.id)   # COACH-1 C
+        except Exception:
+            logger.exception("coach patterns for game %s not built", game_id)
+            report["patterns"] = None
+        return report
 
     def rpc_review_extras(self, game_id: int, run_id: int | None = None) -> dict:
         """Read-only figures for the redesigned Review (UI-BUILD B3; core/review_extras.py):
@@ -2347,6 +2865,8 @@ class Server:
                 engine_path=find_stockfish(), depth=depth,
                 has_book=self._openings is not None and self._openings.has_book),
         )
+        self._analysis_jobs[run_id] = {"gameId": game_id, "runId": run_id, "depth": depth, "done": 0,
+                                       "total": 0}
         self._analysis.analyze_game(
             game_id, run_id, rec.pgn, depth, self._openings, self._on_analysis_event,
         )
@@ -2360,12 +2880,18 @@ class Server:
         """Runs on the app thread: persist then emit, mirroring
         MainWindow._on_ply_analyzed / _on_analysis_finished."""
         kind = event[0]
+        job = self._analysis_jobs.get(run_id)
+        tag = {"runId": run_id, "depth": job["depth"] if job else None}     # ruling CB1: whose events
+        if kind != "ply":
+            self._analysis_jobs.pop(run_id, None)    # over: done, cancelled, failed
         if kind == "ply":
             _, ply, total, ma = event
             self._db.save_move_analysis(run_id, ma)
+            if job is not None:
+                job.update(done=ply + 1, total=total)
             _emit("analysis_ply", {
                 "gameId": game_id, "ply": ply, "total": total,
-                "analysis": _ma_dict(ma),
+                "analysis": _ma_dict(ma), **tag,
             })
         elif kind == "done":
             summary = event[1]
@@ -2378,17 +2904,21 @@ class Server:
                     final_lines=event[2],
                 )
             except IncompleteRun as exc:
-                _emit("analysis_error", {"gameId": game_id, "message": str(exc)})
+                _emit("analysis_error", {"gameId": game_id, "message": str(exc), **tag})
                 return
             _write_pattern_facts(self._db, run_id)
             _emit("analysis_done", {
                 "gameId": game_id, "summary": summary,
-                "whiteAccuracy": white_acc, "blackAccuracy": black_acc,
+                "whiteAccuracy": white_acc, "blackAccuracy": black_acc, **tag,
             })
+            try:
+                self._start_coach_refill()        # COACH-1 C: this game's moments, then the overview
+            except Exception:
+                logger.exception("coach refill not started")
         elif kind == "cancelled":
-            _emit("analysis_cancelled", {"gameId": game_id})
+            _emit("analysis_cancelled", {"gameId": game_id, **tag})
         elif kind == "error":
-            _emit("analysis_error", {"gameId": game_id, "message": event[1]})
+            _emit("analysis_error", {"gameId": game_id, "message": event[1], **tag})
         elif kind == "engine_died":
             # The run stays incomplete — never shown, never counted — and the game's
             # previous analysis, if it had one, is untouched.
@@ -2402,7 +2932,7 @@ class Server:
                 game_id=game_id, ply=ply, exit_code=getattr(exc, "exit_code", None),
                 engine=getattr(exc, "version", None) or self._analysis_engine_version(),
             )
-            _emit("analysis_error", {"gameId": game_id, "message": message})
+            _emit("analysis_error", {"gameId": game_id, "message": message, **tag})
 
     def _live_engine_version(self) -> str | None:
         """The binary's version as the running live engine reports it — the same
@@ -2585,8 +3115,25 @@ class Server:
 
         return {
             "syncing": self._sync.running(),
+            "run": self._sync.run_id,       # the current or last run (ruling CB2)
             "lichess": counts("lichess"),
             "chesscom": counts("chesscom"),
+        }
+
+    def rpc_background_jobs(self) -> dict:
+        """COACH-2 D (ruling CB1): everything running in the background, for the sidebar's activity line, the
+        Review header and the Games rows; the webview's store reads it at start and keeps it from the events.
+        Each has the run id its events carry, so a snapshot never revives a run whose end was announced."""
+        analysis = max(self._analysis_jobs.values(), key=lambda j: j["runId"], default=None)
+        sync = self._sync
+        imp = self._importer
+        return {
+            "sync": {"running": sync.running(), "run": sync.run_id, "kind": sync.kind,
+                     "progress": sync.last_progress if sync.running() else None},
+            "analysis": dict(analysis) if analysis else None,
+            "coach": dict(self._coach_reading) if self._coach_reading else None,
+            "puzzles": {"running": imp.running(), "run": imp.run_id, "kind": imp.kind if imp.running() else None,
+                        "progress": imp.last_progress if imp.running() else None},
         }
 
     def rpc_check_usernames(self, req_id, chesscom: str = "", lichess: str = "") -> None:
@@ -2733,6 +3280,7 @@ class Server:
             "count": count_row[0] if count_row else 0,
             "importing": self._importer.running(),
             "importKind": self._importer.kind if self._importer.running() else None,
+            "importRun": self._importer.run_id,
             "source": meta.get("puzzles_source") or None,
             "sourceDate": meta.get("puzzles_source_date") or None,
             "importedAt": meta.get("puzzles_imported_at") or None,
@@ -2792,7 +3340,8 @@ class Server:
         logger.info("puzzle import done: %s", stats)
         _emit("puzzle_import_done", {"count": stats["count"], "added": stats["added"],
                                      "removed": stats["removed"],
-                                     "removedAttempted": stats["removed_attempted"]})
+                                     "removedAttempted": stats["removed_attempted"],
+                                     "run": self._importer.run_id})
 
     def rpc_get_puzzle_rating(self) -> dict:
         rating, rd, volatility = self._db.get_puzzle_rating()

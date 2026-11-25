@@ -5,6 +5,7 @@
   import PositionPopover from './lib/games/PositionPopover.svelte'
   import TrainerScreen from './lib/screens/TrainerScreen.svelte'
   import InsightsView from './lib/insights/InsightsView.svelte'
+  import CoachView from './lib/coach/CoachView.svelte'
   import {
     api,
     sidecar,
@@ -30,8 +31,11 @@
   import FriendGame from './lib/play/FriendGame.svelte'
   import { incomingChallenges, live, liveHooks, startLive } from './lib/friends/live.svelte'
   import UpdateCheck from './lib/UpdateCheck.svelte'
+  import { refresh as refreshJobs, start as startJobs } from './lib/background/jobs.svelte'
+  import type { JobTarget } from './lib/background/jobsModel'
+  import { dueCount, refreshPractice, startPractice } from './lib/coach/practiceState.svelte'
 
-  type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'insights' | 'friends' | 'friend' | 'settings'
+  type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'coach' | 'insights' | 'friends' | 'friend' | 'settings'
 
 
   /** Where the app opens: always Home in the app; the browser harness passes a screen. */
@@ -82,6 +86,12 @@
     reviewTarget = { gameId, ply }
     route = 'review'
   }
+  // COACH-1 C: a moment behind a focus item, opened in Review; Back returns to Coach.
+  function openReviewFromCoach(gameId: number, ply: number) {
+    reviewOrigin = 'coach'
+    reviewTarget = { gameId, ply }
+    route = 'review'
+  }
   // Home's "Retry a moment": the review opens on the moment and starts Try it or the arrow.
   function openFromHome(gameId: number, ply: number, action: 'try' | 'best') {
     reviewOrigin = 'home'
@@ -107,7 +117,7 @@
   }
   /** The breadcrumb's first word on Analyse a position: where Back returns. */
   const ORIGIN_LABEL: Partial<Record<Route, string>> = {
-    home: 'Home', games: 'Games', play: 'Play', puzzles: 'Puzzles', trainer: 'Openings', insights: 'Insights', settings: 'Settings',
+    home: 'Home', games: 'Games', play: 'Play', puzzles: 'Puzzles', trainer: 'Openings', coach: 'Coach', insights: 'Insights', settings: 'Settings',
     friends: 'Friends', friend: 'Friends',
   }
   function openFenReview(fen: string, origin: Route = 'games') {
@@ -161,6 +171,7 @@
     { route: 'play', label: 'Play' },
     { route: 'puzzles', label: 'Puzzles' },
     ...(SHOW_TRAINER ? [{ route: 'trainer' as Route, label: 'Openings' }] : []),
+    { route: 'coach', label: 'Coach' },
     { route: 'games', label: 'Games' },
     { route: 'insights', label: 'Insights' },
     ...(SHOW_FRIENDS ? [{ route: 'friends' as Route, label: 'Friends' }] : []),
@@ -186,6 +197,18 @@
     if (backend === 'up') api.setActiveScreen(route).catch(() => {})
   })
 
+  // COACH-2 D (ruling CB1): the one store of background jobs, read again whenever the backend comes (back) up
+  $effect(() => {
+    if (backend === 'up') {
+      refreshJobs()
+      refreshPractice()
+    }
+  })
+  function openJob(t: JobTarget) {
+    if (t.route === 'review') openReview(t.gameId)
+    else navTo(t.route)
+  }
+
   // ── relabel on update (BETA item 5) ──────────────────────────────────────
   // The sidecar relabels runs an older classifier wrote, on open, in the background.
   // Its events can fire before this subscribes, so the state is also asked for.
@@ -206,9 +229,15 @@
     sidecar.on('relabel_progress', onRelabelProgress)
     sidecar.on('relabel_done', onRelabelDone)
     sidecar.on('relabel_error', onRelabelError)
+    const stopJobs = startJobs()
+    const stopPractice = startPractice()
     const unsubscribe = sidecar.onStatus((s) => (backend = s))
     sidecar.start().catch((e) => (spawnError = String(e)))
-    return unsubscribe
+    return () => {
+      unsubscribe()
+      stopJobs()
+      stopPractice()
+    }
   })
 </script>
 
@@ -218,11 +247,13 @@
     showOpenings={SHOW_TRAINER}
     showFriends={SHOW_FRIENDS}
     friendsCount={SHOW_FRIENDS ? incomingCount() + incomingChallenges().length : 0}
+    coachCount={dueCount()}
     recent={route === 'review' ? recent : null}
     currentGameId={reviewTarget?.gameId ?? null}
     onnav={(r) => navTo(r as Route)}
     onopengame={openReview}
     onsearch={() => (commandMenu.open = true)}
+    onopenjob={openJob}
   />
 
   <main class="content">
@@ -291,6 +322,8 @@
           onrequesthandled={() => (trainerOpening = null)}
           onsettings={() => navTo('settings')}
         />
+      {:else if route === 'coach'}
+        <CoachView onopen={openReviewFromCoach} />
       {:else if route === 'insights'}
         <InsightsView onconnect={() => navTo('settings')} onopen={openReviewAt} />
       {:else if route === 'friends' && SHOW_FRIENDS}

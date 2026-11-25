@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 import zugzwang.config as C
-from zugzwang.core.database import Database
+from zugzwang.core.database import Database, puzzles_path
 from zugzwang.core.puzzle_core import (
     alternate_final_mates,
     glicko2_update,
@@ -76,7 +76,7 @@ def db_path(tmp_path):
 
 
 def _puzzle_count(db_path):
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(puzzles_path(db_path)))
     try:
         return conn.execute("SELECT COUNT(*) FROM puzzles").fetchone()[0]
     finally:
@@ -100,7 +100,7 @@ def test_import_filters_low_nbplays_boundary(tmp_path, db_path):
     # nb_plays: 50 is kept (filter is `< 50`), 49 is dropped.
     _write_csv(csv_path, [_row("keep50", nb="50"), _row("drop49", nb="49")])
     _run(csv_path, db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(puzzles_path(db_path)))
     ids = {r[0] for r in conn.execute("SELECT id FROM puzzles").fetchall()}
     conn.close()
     assert ids == {"keep50"}
@@ -110,7 +110,7 @@ def test_import_filters_negative_popularity(tmp_path, db_path):
     csv_path = tmp_path / "p.csv"
     _write_csv(csv_path, [_row("neg", pop="-1"), _row("zero", pop="0")])
     _run(csv_path, db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(puzzles_path(db_path)))
     ids = {r[0] for r in conn.execute("SELECT id FROM puzzles").fetchall()}
     conn.close()
     assert ids == {"zero"}

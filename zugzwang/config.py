@@ -227,6 +227,13 @@ ENGINE_ELO_MAX = 3190
 # review/scratch/f5_mechanism.py). This value sets the bot's pace, nothing else.
 ENGINE_MOVE_TIME_MS = 1000
 
+# Draw offers against Stockfish and the coach (COACH.md ruling 8, owner 2026-11-23): accepted only from this
+# full move on, and only when the engine's own evaluation (its last move's search, from its side) does not
+# favour it: no mate for itself and at most DRAW_FAVOUR_CP centipawns. 20 cp, a fifth of a pawn, is read as
+# level (decided by COACH-1 D, for the owner to confirm).
+DRAW_FROM_MOVE = 30
+DRAW_FAVOUR_CP = 20
+
 # Which level→Elo ladder a game was played on. Stamped on every locally-played
 # game so a stored level can be read honestly later: the number alone does not
 # survive a ladder change (old Level 10 was Elo 1800, this one is 2304). This is

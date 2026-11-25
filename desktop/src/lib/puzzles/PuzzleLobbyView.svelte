@@ -27,6 +27,7 @@
     type PuzzleUpdateInfo,
   } from '../api'
   import { pickPuzzleCsv } from '../pick'
+  import { RunGuard } from '../background/runGuard'
   import { registerCommands } from '../shell/commands.svelte'
   import { dayWord, sparkline } from '../home/homeModel'
   import {
@@ -61,11 +62,19 @@
   let noThemePuzzles = $state(false)
   let starting = $state(false)
 
+  // COACH-2 D: the sync's race, found here too (puzzle_import_done arrived while the import's thread lived, and the
+  // status asked on it said importing): an announced end is never revived
+  const guard = new RunGuard()
   async function refresh() {
     error = null
+    const asked = guard.ask()
     try {
       status = await api.puzzleStatus()
-      importing = status.importing
+      const v = guard.verdict({ running: status.importing, run: status.importRun }, asked, importing)
+      if (v === 'revive') {
+        guard.started()
+        importing = true
+      } else if (v === 'close') importing = false
       summary = status.imported ? await api.puzzleSummary() : null
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -79,6 +88,7 @@
     finishing = false
     // Set before the call: the first progress event comes after the first batch.
     importing = true
+    guard.started()
     importProgress = { kind, bytes: 0, totalBytes: null, imported: 0 }
   }
   async function run(start: () => Promise<unknown>) {
@@ -174,19 +184,22 @@
     finishing = true
   }
   const onDone = (d: Record<string, unknown>) => {
+    guard.end(d.run as number | undefined)
     importing = false
     finishing = false
     importProgress = null
     importDone = d as unknown as ImportDone
     void refresh()
   }
-  const onCancelled = () => {
+  const onCancelled = (d: Record<string, unknown>) => {
+    guard.end(d.run as number | undefined)
     importing = false
     finishing = false
     importProgress = null
     void refresh()
   }
   const onError = (d: Record<string, unknown>) => {
+    guard.end(d.run as number | undefined)
     importError = String(d.message)
     importing = false
     finishing = false

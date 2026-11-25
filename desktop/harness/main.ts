@@ -5,6 +5,7 @@
  *   ?screen=review&fen=<FEN>                                  Analyse a position
  *   ?screen=review&game=promo, ?state=promotion        promotion positions (promotionHarness.ts)
  *   ?state=<scenario>                                  see fakeSidecar.ts
+ *   ?jobs=all|analysis                                 background jobs running (jobsHarness.ts, COACH-2 D)
  *   ?latency=<ms>                                      delay every answer (loading states)
  *   ?cold=1                                            mount the app before the sidecar starts, as
  *                                                      the real app does (FIX-STARTUP; harness/coldStart.ts)
@@ -23,10 +24,12 @@ import App from '../src/App.svelte'
 import { sidecar } from '../src/lib/api'
 import { fakeTransport, flagLog, requestLog, type Fixtures } from './fakeSidecar'
 import { scenarioHandlers, scenarioReady } from './scenarios'
+import { jobsHandlers } from './jobsHarness'
 import { puzzleHandlers, type PuzzleFixtures } from './puzzlesHarness'
 import { gamesHandlers, type GamesFixtures } from './gamesHarness'
 import { PROMO_GAME_ID, promotionHandlers } from './promotionHarness'
 import { friendsHandlers, type FriendsFixtures } from './friendsHarness'
+import { coachHandlers } from './coachHarness'
 import { longNamer } from './longNames'
 import type { SidecarTransport } from '../src/lib/sidecar'
 
@@ -82,7 +85,7 @@ function withLongNames(t: SidecarTransport): SidecarTransport {
 const transport = fakeTransport(fx, {
     scenario,
     latencyMs: Number(q.get('latency') ?? 0),
-    handlers: { ...puzzleHandlers(pfx, scenario), ...gamesHandlers(gfx, scenario, fx.meta.mainGameId), ...scenarioHandlers(fx, scenario), ...promotionHandlers(fx, scenario, gameParam), ...friendsHandlers(ffx, scenario) },
+    handlers: { ...jobsHandlers(fx, q.get('jobs')), ...coachHandlers(fx, scenario), ...puzzleHandlers(pfx, scenario), ...gamesHandlers(gfx, scenario, fx.meta.mainGameId), ...scenarioHandlers(fx, scenario), ...promotionHandlers(fx, scenario, gameParam), ...friendsHandlers(ffx, scenario) },
     ready: scenarioReady(scenario),
     spawnDelayMs: Number(q.get('spawnMs') ?? 0),
   })
@@ -94,7 +97,7 @@ sidecar.useTransport(q.get('names') === 'long' ? withLongNames(transport) : tran
 const cold = q.get('cold') === '1'
 if (!cold) await sidecar.start()
 
-type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'insights' | 'friends' | 'friend' | 'settings'
+type Route = 'home' | 'play' | 'games' | 'review' | 'puzzles' | 'trainer' | 'coach' | 'insights' | 'friends' | 'friend' | 'settings'
 mount(App, {
   target: document.getElementById('app')!,
   props: {

@@ -58,6 +58,11 @@
       .map((m) => ({ position: m.ply + 1, cls: m.classification as never })),
   )
   const byPly = $derived(new Map((game.analysis?.moves ?? []).map((m) => [m.ply, m])))
+  // COACH-1 C: "Your patterns in this game" and each key moment's theme (the user's moment at that ply,
+  // or at the next for an opponent's move: the chance it gave you). Fixed sentences from the sidecar.
+  const patterns = $derived(report.patterns?.items ?? [])
+  const patternAt = $derived(new Map(patterns.map((p) => [p.ply, p])))
+  const themeOf = (m: ReportMoment) => patternAt.get(m.ply) ?? (m.side !== you ? patternAt.get(m.ply + 1) : undefined) ?? null
   const kinds = $derived(new Map((extras?.errors ?? []).map((e) => [e.ply, e.kind])))
 
   // The chart's readout (ruling 12 of 2026-11-20, fourth): the move and its value in this mode.
@@ -170,6 +175,29 @@
     </dl>
   </div>
 
+  {#if patterns.length}
+    <section class="patterns" aria-label="Your patterns in this game">
+      <div class="mh"><h2>Your patterns in this game</h2><span>{patterns.length}</span></div>
+      <ul>
+        {#each patterns as p (p.ply)}
+          <li data-testid="report-pattern">
+            <div class="pt">
+              <span class="pname" title={p.name}>{p.name}</span>
+              {#if p.focus}<span class="tag">Focus</span>{/if}
+              <button type="button" class="pmove" onclick={() => onjump(p.ply + 1)}>{p.move}</button>
+            </div>
+            <p class="say">{p.sentence}</p>
+            {#if p.history}<p class="hist">{p.history}</p>{/if}
+            {#if p.practice}<p class="hist added" data-testid="added-to-practice">Added to Practice</p>{/if}
+          </li>
+        {/each}
+      </ul>
+      <p class="pnote">
+        {#if patterns.some((p) => p.practice)}Missed moments go to Practice.{' '}{/if}History lines appear for the themes in your Focus.
+      </p>
+    </section>
+  {/if}
+
   {#if report.moments.shown.length}
     <section class="moments" aria-label="Key moments">
       <div class="mh"><h2>Key moments</h2><span>{report.moments.shown.length}</span></div>
@@ -203,7 +231,9 @@
             />
             </div>
             {#if open}
+              {@const th = themeOf(m)}
               <div class="body" use:reveal>
+                {#if th}<p class="theme"><span class="pname">{th.name}</span>{#if th.focus}<span class="tag">Focus</span>{/if}</p>{/if}
                 {#if !hiding}
                   {#each m.sentences as s (s)}<p class="say">{s}<FlagThis kind="report claim" gameId={game.id} ply={m.ply} label={m.classification} shown={s} /></p>{/each}
                   {#if m.qualifier}<p class="say">{m.qualifier}<FlagThis kind="report qualifier" gameId={game.id} ply={m.ply} label={m.classification} shown={m.qualifier} /></p>{/if}
@@ -503,5 +533,70 @@
     margin: 0 0 4px;
     color: var(--text-3);
     font: var(--secondary);
+  }
+  /* COACH-1 C: your patterns in this game */
+  .patterns ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .patterns li {
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .pt {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .pname {
+    font-weight: 500;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tag {
+    flex: none;
+    padding: 1px 6px;
+    border: 1px solid var(--border-strong, var(--border));
+    border-radius: var(--radius-chip, 4px);
+    color: var(--text-2);
+    font: var(--secondary);
+  }
+  .pmove {
+    margin-left: auto;
+    flex: none;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-chip, 4px);
+    padding: 1px 6px;
+    color: var(--text-2);
+    font: var(--secondary);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+  .pmove:hover {
+    color: var(--text);
+  }
+  .patterns .say {
+    margin: 4px 0 0;
+  }
+  .hist {
+    margin: 2px 0 0;
+    color: var(--text-3);
+    font: var(--secondary);
+  }
+  .pnote {
+    margin: 4px 0 0;
+    color: var(--text-3);
+    font: var(--secondary);
+  }
+  .theme {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 6px;
   }
 </style>

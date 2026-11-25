@@ -459,7 +459,7 @@ def test_a_game_that_crashes_every_sync_is_marked_and_no_longer_queued(
     # The status line counts it apart from the work the bulk action would queue.
     server = object.__new__(sidecar.Server)
     server._db = db
-    server._sync = type("S", (), {"running": lambda self: False})()
+    server._sync = type("S", (), {"running": lambda self: False, "run_id": 0})()
     server._engine = type("E", (), {"_engine": type("X", (), {"id": {"name": version}})()})()
     c = server.rpc_sync_status(depth=DEPTH)["chesscom"]
     assert (c["needsAttention"], c["unanalysed"], c["pending"]) == (1, 0, 0)

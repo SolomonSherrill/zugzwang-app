@@ -6,6 +6,8 @@
    * the move navigator; a resizable split; the panel with the Report and Moves tabs.
    */
   import { onDestroy, onMount } from 'svelte'
+  import { jobs, analysisStarted } from '../background/jobs.svelte'
+  import { analysisFor, analysisText } from '../background/jobsModel'
   import { Chess, type Square } from 'chess.js'
   import type { Key } from 'chessground/types'
   import type { DrawShape } from 'chessground/draw'
@@ -436,6 +438,7 @@
     try {
       const r = await api.analyzeGame(gameId, depth)
       pendingRun = r.runId
+      analysisStarted({ gameId, runId: r.runId, depth: r.depth })
       run = { state: 'running', done: 0, total: n, depth: r.depth }
     } catch (e) {
       run = { state: 'error', done: 0, total: n, depth, message: e instanceof Error ? e.message : String(e) }
@@ -657,6 +660,8 @@
         ? { label: moveLabel(cur - 1, game.plies[cur - 1].san, startsWhite), cls: byPly.get(cur - 1)?.classification ?? null }
         : null,
   )
+  // COACH-2 D (ruling CB1): a running analysis of this game, on every tab, from the one store of background jobs
+  const bgRun = $derived(analysisFor(jobs.now, gameId))
   /** "Back to the game" names where it returns: the move the variation leaves from. */
   const branchLabel = $derived(game && cur > 0 ? moveLabel(cur - 1, game.plies[cur - 1].san, startsWhite) : 'the start')
 </script>
@@ -670,6 +675,12 @@
       <span class="sep" aria-hidden="true">/</span>
       <span class="title" title={game ? `${names.white} vs ${names.black}` : undefined}>{game ? `${names.white} vs ${names.black}` : ''}</span>
     </div>
+    {#if bgRun}
+      <div class="bgrun" role="status" data-testid="review-analysing">
+        <span class="bgt" title={analysisText(bgRun)}>{analysisText(bgRun)}</span>
+        <span class="bgbar" aria-hidden="true"><span style:width="{bgRun.total ? Math.round((bgRun.done / bgRun.total) * 100) : 0}%"></span></span>
+      </div>
+    {/if}
     <div class="actions">
       <Button kbd="F" onclick={flip}>Flip</Button>
       <Button ariaHaspopup="dialog" ariaExpanded={depthMenu} pressed={depthMenu} disabled={!engineOk || !game} onclick={() => (depthMenu = !depthMenu)}
@@ -936,6 +947,36 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  /* a running analysis, beside the actions on every tab (COACH-2 D) */
+  .bgrun {
+    margin-left: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    max-width: 280px;
+    flex: 0 1 auto;
+  }
+  .bgt {
+    color: var(--text-2);
+    font: var(--secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bgbar {
+    display: block;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--raised);
+    overflow: hidden;
+  }
+  .bgbar span {
+    display: block;
+    height: 100%;
+    background: var(--text-2);
+    transition: width 120ms linear;
   }
   .over {
     position: absolute;

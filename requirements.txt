@@ -2,3 +2,4 @@ chess>=1.11.0
 pytest>=9.0.0
 certifi>=2024.2.2
 cryptography>=44.0.0
+fsrs==6.3.3

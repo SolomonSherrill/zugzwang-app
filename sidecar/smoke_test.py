@@ -145,12 +145,19 @@ def main() -> None:
     resign_id = res["end"]["gameId"]
     print(f"✓ resign saved as game {resign_id}")
 
-    # ── draw → saved ──────────────────────────────────────────────────────────
+    # ── draw: declined before move 30, agreed in a level position after it (COACH.md ruling 8) ──
     c.request("new_game", {"color": "white", "skill": 0})
     res = c.request("draw")
+    assert res["end"] is None and res["declined"] == "Draw offers open after move 30.", res
+    print("✓ draw declined before move 30")
+    c.request("new_game", {"color": "black", "skill": 0,
+                           "fen": "4k3/8/8/p1p1p1p1/P1P1P1P1/8/8/4K3 w - - 0 40"})
+    c.wait_event("engine_move")
+    res = c.request("draw")
+    assert res["end"] is not None, res
     assert res["end"]["termination"] == "draw_agreed"
     assert res["end"]["result"] == "1/2-1/2"
-    print("✓ draw agreed saved")
+    print("✓ draw agreed saved (move 40, a locked position)")
 
     # ── flag (timeout) → saved ────────────────────────────────────────────────
     c.request("new_game", {"color": "white", "skill": 0})
@@ -266,6 +273,8 @@ def main() -> None:
             # run, macOS x86_64). Later plies come in milliseconds at depth 8.
             ev = c.wait_event("analysis_ply", timeout=60.0 if plies_seen == 0 else 5.0)
             assert ev["gameId"] == imported_id
+            # COACH-2 D (ruling CB1): every analysis event says whose run it is and at what depth
+            assert ev["runId"] == res["runId"] and ev["depth"] == 8, ev
             plies_seen += 1
         except TimeoutError:
             break
@@ -274,6 +283,17 @@ def main() -> None:
     assert done["whiteAccuracy"] is None or done["whiteAccuracy"] > 0
     print(f"✓ analysis streamed {plies_seen} plies in {time.monotonic() - t2:.1f}s "
           f"(accuracies: W {done['whiteAccuracy']} / B {done['blackAccuracy']})")
+
+    # COACH-2 D (rulings CB1, CB2): once its end is announced, nothing reports the analysis or a sync as running
+    assert done["runId"] == res["runId"], done
+    jobs = c.request("background_jobs")
+    assert jobs["analysis"] is None and jobs["sync"]["running"] is False and jobs["puzzles"]["running"] is False, jobs
+    print("✓ background_jobs: nothing running once the analysis's end was announced")
+
+    # COACH-2 C: Practice answers its status (the sidebar's count, the Coach page's panel)
+    pst = c.request("practice_status")
+    assert {"due", "find", "threat", "learned", "rightWeek", "probes", "newPerDay"} <= set(pst), pst
+    print(f"✓ practice_status → {pst['due']} due, {pst['items']} items, probes {pst['probes']}")
 
     detail = c.request("get_game", {"game_id": imported_id})
     assert detail["analysis"] is not None

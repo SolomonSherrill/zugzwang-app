@@ -31,6 +31,8 @@
   import { accounts } from '../settings.svelte'
   import { lastSynced, markSynced } from '../gamesFilter.svelte'
   import { addSyncWarning, syncWarningLines, type SyncWarning } from '../syncWarnings'
+  import { RunGuard } from '../background/runGuard'
+  import { jobs, analysisStarted } from '../background/jobs.svelte'
   import { SOURCE_NAME, connected, finishedText, progressFraction, progressText, type Source } from '../settings/settingsModel'
   import {
     PAGE,
@@ -184,15 +186,24 @@
   let warnings = $state<SyncWarning[]>([])
   const sources = $derived(connected(accounts))
   const pending = $derived(status ? (status.chesscom?.pending ?? 0) + (status.lichess?.pending ?? 0) : 0)
-  const running = $derived(run?.phase === 'running' || !!status?.syncing)
+  // COACH-2 D (ruling CB2): a status never revives a run whose end was announced, and one saying nothing runs closes
+  // a card still showing one
+  const guard = new RunGuard()
+  const running = $derived(run?.phase === 'running' || guard.live(status ? { running: status.syncing, run: status.run } : null))
   const synced = $derived(syncedText(lastSynced, sources))
   const label = (s: string) => SOURCE_NAME[s as Source] ?? SOURCE_LABEL[s as keyof typeof SOURCE_LABEL] ?? ''
 
   async function refreshStatus() {
+    const asked = guard.ask()
     try {
       status = await api.syncStatus()
-      if (status.syncing && run?.phase !== 'running')
+      const v = guard.verdict({ running: status.syncing, run: status.run }, asked, run?.phase === 'running')
+      if (v === 'revive') {
+        guard.started()
         run = { kind: 'sync', phase: 'running', progress: null, done: [], errors: [], retry: syncNow }
+      } else if (v === 'close' && run?.phase === 'running') {
+        run = { ...run, phase: run.errors.length ? 'failed' : 'finished', progress: null }
+      }
     } catch {
       /* the strip waits for the next refresh */
     }
@@ -201,6 +212,7 @@
     if (running) return
     warnings = []
     run = { kind, phase: 'running', progress: kind === 'sync' ? { phase: 'fetching', done: 0, total: 0 } : null, done: [], errors: [], retry }
+    guard.started()
     try {
       await call()
     } catch (e) {
@@ -219,7 +231,10 @@
   }
   const onProgress = (d: SyncProgressEvent) => {
     if (run?.phase === 'running') run.progress = d
-    else run = { kind: d.phase === 'fetching' ? 'sync' : 'analyse', phase: 'running', progress: d, done: [], errors: [], retry: syncNow }
+    else {
+      guard.started()
+      run = { kind: d.phase === 'fetching' ? 'sync' : 'analyse', phase: 'running', progress: d, done: [], errors: [], retry: syncNow }
+    }
   }
   const onDone = (d: SyncDoneEvent) => {
     if (run) run.done = [...run.done, d]
@@ -231,12 +246,14 @@
     if (run) run.errors = [...run.errors, d.source ? `${label(d.source)}: ${d.message}` : d.message]
   }
   const onWarning = (d: SyncWarningEvent) => (warnings = addSyncWarning(warnings, d))
-  const onFinished = () => {
+  const onFinished = (d?: { run?: number }) => {
+    guard.end(d?.run)
     if (run?.phase === 'running') run = { ...run, phase: run.errors.length ? 'failed' : 'finished', progress: null }
     void refreshStatus()
     void load('refresh')
   }
-  const onCancelled = () => {
+  const onCancelled = (d?: { run?: number }) => {
+    guard.end(d?.run)
     run = null
     void refreshStatus()
   }
@@ -264,7 +281,8 @@
   async function startRow(id: number) {
     rowRun = { id, done: 0, total: 0 }
     try {
-      await api.analyzeGame(id, 14)
+      const r = await api.analyzeGame(id, 14)
+      analysisStarted({ gameId: id, runId: r.runId, depth: r.depth })
     } catch (e) {
       rowErrors[id] = e instanceof Error ? e.message : String(e)
       rowRun = null
@@ -598,7 +616,7 @@
                 {@const res = resultCell(g)}
                 {@const opp = opponentCell(g)}
                 {@const lines = playerLines(g)}
-                {@const note = analysisNote(g, rowRun, rowQueue, rowErrors[g.id])}
+                {@const note = analysisNote(g, rowRun, rowQueue, rowErrors[g.id], jobs.now.analysis)}
                 <li class="zg row" class:sel={gamesView.selected === i} data-index={i}>
                   <button
                     type="button"
@@ -624,7 +642,7 @@
                     <span class="el t2" title={g.openingName ?? undefined}>{shortOpening(g.openingName)}{#if g.openingEco}{' '}<span class="muted">{g.openingEco}</span>{/if}</span>
                     {#if note}
                       <span class="note">
-                        <span class:not={note.canAnalyse} title={rowErrors[g.id] ?? undefined}>{note.text}</span>
+                        <span class="nt" class:not={note.canAnalyse} title={rowErrors[g.id] ?? note.text}>{note.text}</span>
                         {#if note.canAnalyse}<button type="button" class="an" onclick={() => analyseRow(g.id)}>Analyse</button>{/if}
                       </span>
                     {/if}
@@ -1083,6 +1101,13 @@
     gap: 10px;
     color: var(--text-3);
     font: var(--secondary);
+    min-width: 0;
+  }
+  .note .nt {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .dot {
     width: 7px;

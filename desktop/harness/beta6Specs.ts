@@ -60,7 +60,24 @@ export const SCREENS: Case[] = [
   { name: 'puzzles', path: '/?screen=puzzles' },
   { name: 'trainer', path: '/?screen=trainer' },
   { name: 'insights', path: '/?screen=insights' },
+  // COACH-1 C: Coach (Focus, Behind your focus), its learning state, one focus item's positions shown
+  { name: 'coach', path: '/?screen=coach' },
+  { name: 'coach-learning', path: '/?screen=coach&state=coach-learning' },
+  { name: 'coach-show', path: '/?screen=coach', prepare: role('button', 'Show positions') },
+  // COACH-2 C: Practice: a session (Find the move, Spot the threat, a probe), an answer shown, the empty queue
+  { name: 'practice', path: '/?screen=coach', prepare: role('button', 'Start practice') },
+  { name: 'practice-threat', path: '/?screen=coach&state=practice-threat', prepare: role('button', 'Start practice') },
+  { name: 'practice-probe', path: '/?screen=coach&state=practice-probe', prepare: role('button', 'Start practice') },
+  { name: 'practice-answer', path: '/?screen=coach', prepare: seq(role('button', 'Start practice'), role('button', 'Show the answer')) },
+  { name: 'practice-focus', path: '/?screen=coach', prepare: role('button', /^Practise$/) },
+  { name: 'coach-practice-empty', path: '/?screen=coach&state=practice-empty' },
   { name: 'settings', path: '/?screen=settings' },
+  // COACH-2 D (ruling CB1): background jobs running: the sidebar's activity line, the Review header's progress, the
+  // Games row being re-analysed
+  { name: 'home+jobs', path: '/?screen=home&jobs=all' },
+  { name: 'review+jobs', path: '/?screen=review&game=main&jobs=all' },
+  { name: 'review-moves+jobs', path: '/?screen=review&game=main&jobs=all', prepare: role('tab', 'Moves') },
+  { name: 'games+jobs', path: '/?screen=games&jobs=all' },
   { name: 'friends', path: '/?screen=friends' },
   { name: 'friends-many', path: '/?screen=friends&friends=many' },
   { name: 'friends-one', path: '/?screen=friends&friends=one' },

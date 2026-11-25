@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * The left sidebar (DESIGN.md "Shell"): app mark (the ℤ tile, LOGO-1) and name, "Search or jump to" with ⌘K,
-   * then Home, Play, Puzzles, Openings, Games, Insights (no Coach item, ruling 16); on Review
+   * then Home, Play, Puzzles, Openings, Coach, Games, Insights (Coach after Openings: COACH.md ruling 6); on Review
    * a "Recent games" list; Settings at the foot. A dot on Play while a game runs, on every
    * screen (UI-BUILD-2, Play).
    *
@@ -9,14 +9,18 @@
    * icons at 16 px, each label as a tooltip on hover and keyboard focus and as the button's
    * accessible name; "Search or jump to" an icon button opening the same command menu; Recent
    * games hidden. ⌘K is App's and unchanged.
+   *
+   * At the very bottom, while anything runs in the background, the activity line (COACH-2 D, ruling CB1).
    */
   import { onMount } from 'svelte'
   import type { GameSummary } from '../api'
   import { playState } from '../play/playState.svelte'
+  import ActivityLine from './ActivityLine.svelte'
+  import type { JobTarget } from '../background/jobsModel'
   // the app mark (LOGO-1): the TeX \mathbb{Z} on the light tile, design/logo/
   import logoMark from '../../assets/logo/zugzwang-mark.png'
 
-  export type NavRoute = 'home' | 'play' | 'puzzles' | 'trainer' | 'games' | 'insights' | 'friends' | 'settings'
+  export type NavRoute = 'home' | 'play' | 'puzzles' | 'trainer' | 'coach' | 'games' | 'insights' | 'friends' | 'settings'
   interface Props {
     active: NavRoute | null
     /** the Openings item (the trainer until OPEN-1); hidden in beta builds */
@@ -25,13 +29,17 @@
     showFriends?: boolean
     /** incoming friend requests, shown on the Friends item */
     friendsCount?: number
+    /** Practice positions due today, shown on the Coach item (COACH.md ruling 6; COACH-2 C) */
+    coachCount?: number
     recent?: GameSummary[] | null
     currentGameId?: number | null
     onnav: (r: NavRoute) => void
     onopengame?: (id: number) => void
     onsearch: () => void
+    /** COACH-2 D (ruling CB1): the activity line's click: open what a background job is about */
+    onopenjob?: (t: JobTarget) => void
   }
-  let { active, showOpenings, showFriends = false, friendsCount = 0, recent = null, currentGameId = null, onnav, onopengame, onsearch }: Props =
+  let { active, showOpenings, showFriends = false, friendsCount = 0, coachCount = 0, recent = null, currentGameId = null, onnav, onopengame, onsearch, onopenjob }: Props =
     $props()
 
   const ICONS: Record<NavRoute, string> = {
@@ -39,6 +47,7 @@
     play: '<circle cx="12" cy="12" r="9"/><path d="m10 8.5 5 3.5-5 3.5z"/>',
     puzzles: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/>',
     trainer: '<path d="M2 5h6a4 4 0 0 1 4 4v11a3 3 0 0 0-3-3H2zM22 5h-6a4 4 0 0 0-4 4v11a3 3 0 0 1 3-3h7z"/>',
+    coach: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12h.01"/>',
     games: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
     insights: '<path d="M4 20V11M10 20V5M16 20v-8M22 20H2"/>',
     friends: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.8"/><path d="M16.5 14.6c2.6.2 4.4 1.9 5 5.4"/>',
@@ -50,6 +59,7 @@
     { route: 'play', label: 'Play' },
     { route: 'puzzles', label: 'Puzzles' },
     ...(showOpenings ? [{ route: 'trainer' as NavRoute, label: 'Openings' }] : []),
+    { route: 'coach', label: 'Coach' },
     { route: 'games', label: 'Games' },
     { route: 'insights', label: 'Insights' },
   ])
@@ -115,12 +125,22 @@
       class="item"
       class:active={active === it.route}
       aria-current={active === it.route ? 'page' : undefined}
-      aria-label={rail ? (it.route === 'play' && playState.inGame ? 'Play, game in progress' : it.label) : undefined}
+      aria-label={rail
+        ? it.route === 'play' && playState.inGame
+          ? 'Play, game in progress'
+          : it.route === 'coach' && coachCount
+            ? `Coach, ${coachCount} to practise`
+            : it.label
+        : undefined}
       onclick={() => onnav(it.route)}
     >
       <svg width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"
         >{@html ICONS[it.route]}</svg
-      >{#if rail}<span class="tip" aria-hidden="true">{it.label}</span>{:else}{it.label}{/if}{#if it.route === 'play' && playState.inGame}<span class="live" role="img" aria-label="Game in progress"></span>{/if}
+      >{#if rail}<span class="tip" aria-hidden="true">{it.label}</span>{:else}{it.label}{/if}{#if it.route === 'play' && playState.inGame}<span class="live" role="img" aria-label="Game in progress"></span>{/if}{#if it.route === 'coach' && coachCount}<span
+          class="count"
+          data-testid="coach-due"
+          aria-label="{coachCount} positions to practise">{coachCount}</span
+        >{/if}
     </button>
   {/each}
   {#if !rail && recent && recent.length}
@@ -169,6 +189,7 @@
       >{@html ICONS.settings}</svg
     >{#if rail}<span class="tip" aria-hidden="true">Settings</span>{:else}Settings{/if}
   </button>
+  <ActivityLine {rail} onopen={(t) => (onopenjob ? onopenjob(t) : t.route === 'review' ? onopengame?.(t.gameId) : onnav(t.route))} />
 </nav>
 
 <style>

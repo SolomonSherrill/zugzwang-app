@@ -13,7 +13,7 @@ import pytest
 
 import zugzwang.config as C
 from zugzwang.core import puzzle_core as P
-from zugzwang.core.database import Database
+from zugzwang.core.database import Database, puzzles_path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "puzzles_small.csv.zst"
 KEPT = {"zA001", "zA002", "zA003", "zA006"}   # zA004 NbPlays 10, zA005 Popularity -5
@@ -44,7 +44,10 @@ def db_path(tmp_path):
 
 
 def _q(db_path, sql, *args):
+    """A query on the database with its puzzle file attached, as the app's connection has it."""
     conn = sqlite3.connect(str(db_path))
+    if puzzles_path(db_path).exists():
+        conn.execute("ATTACH DATABASE ? AS pz", (str(puzzles_path(db_path)),))
     try:
         return conn.execute(sql, args).fetchall()
     finally:
@@ -188,7 +191,7 @@ def test_an_update_keeps_rating_attempts_sessions_and_drops_removed_puzzles(db_p
     assert _q(db_path, "SELECT * FROM puzzle_attempts ORDER BY id") == attempts
     assert _q(db_path, "SELECT * FROM puzzle_sessions ORDER BY id") == sessions
     # the rating index and the theme index exist over the new table
-    assert _q(db_path, "SELECT name FROM sqlite_master WHERE name = 'idx_puzzles_rating'")
+    assert _q(db_path, "SELECT name FROM pz.sqlite_master WHERE name = 'idx_puzzles_rating'")
     assert len(_q(db_path, "SELECT rowid FROM puzzle_themes_fts WHERE puzzle_themes_fts MATCH 'fork'")) == 2
     d = Database(db_path)
     assert {p.id for p in d.select_puzzles(user_rating=1600, rating_range=50, exclude_recent=0)} == {"keep", "fresh"}

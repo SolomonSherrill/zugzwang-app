@@ -1105,7 +1105,7 @@ def test_sync_status_splits_unanalysed_from_below_depth(server, sent, tmp_path):
     mark_complete(db, db.save_analysis_run(game_id=shallow, engine_name="Stockfish",
                                            depth=10))
     server._db = db
-    server._sync = type("S", (), {"running": lambda self: False})()
+    server._sync = type("S", (), {"running": lambda self: False, "run_id": 0})()
 
     server._handle_request({"id": 1, "method": "sync_status", "params": {"depth": 14}})
     c = sent[0]["result"]["chesscom"]
