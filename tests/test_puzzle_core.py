@@ -71,7 +71,10 @@ def _write_csv(path, rows):
 @pytest.fixture
 def db_path(tmp_path):
     p = tmp_path / "puz.db"
-    Database(p)  # creates the puzzles + puzzle_themes_fts schema the import needs
+    # creates the puzzles + puzzle_themes_fts schema the import needs. Closed here, not left to the garbage
+    # collector: on Windows a connection still open holds the puzzle file, and the import's replace of it fails with
+    # "Access is denied" (0.1.0-beta.8's first Windows CI run, COACH-2 E); macOS renames over an open file.
+    Database(p).close()
     return p
 
 
