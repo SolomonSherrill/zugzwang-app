@@ -56,6 +56,7 @@
     timeText,
     toggleSpeed,
     withMonths,
+    appendPage,
   } from './gamesModel'
   import { clearFilters, gamesView } from './gamesState.svelte'
   import ImportPopover from './ImportPopover.svelte'
@@ -95,7 +96,7 @@
       if (my !== token) return
       error = null
       page = r
-      games = mode === 'more' ? [...games, ...r.games] : r.games
+      games = mode === 'more' ? appendPage(games, r.games) : r.games
       gamesView.loaded = games.length
       if (mode === 'reset') gamesView.selected = -1
     } catch (e) {

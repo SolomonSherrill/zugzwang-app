@@ -15,7 +15,7 @@
   import EvalChart, { type ChartMode } from './EvalChart.svelte'
   import { moveReadout } from '../ui/readoutModel'
   import {
-    evalAfter, formatEval, lineEval, moveLabel, phaseBands, swingWords, type PhaseBand, type Side,
+    evalAfter, formatEval, lineEval, moveLabel, patternKey, patternsByPly, phaseBands, swingWords, type PhaseBand, type Side,
   } from './reviewModel'
   import { isQualityClass } from '../ui/moveQuality'
   import FlagThis from '../FlagThis.svelte'
@@ -61,7 +61,8 @@
   // COACH-1 C: "Your patterns in this game" and each key moment's theme (the user's moment at that ply,
   // or at the next for an opponent's move: the chance it gave you). Fixed sentences from the sidecar.
   const patterns = $derived(report.patterns?.items ?? [])
-  const patternAt = $derived(new Map(patterns.map((p) => [p.ply, p])))
+  // FIX-B7 (ruling HF1): a move that both missed a chance and dealt with a threat lists both; its moment shows the missed one
+  const patternAt = $derived(patternsByPly(patterns))
   const themeOf = (m: ReportMoment) => patternAt.get(m.ply) ?? (m.side !== you ? patternAt.get(m.ply + 1) : undefined) ?? null
   const kinds = $derived(new Map((extras?.errors ?? []).map((e) => [e.ply, e.kind])))
 
@@ -105,10 +106,10 @@
   <div class="head">
     {#if report.headline?.length}
       <h1>{report.headline[0]}<FlagThis kind="report headline" gameId={game.id} shown={report.headline[0]} /></h1>
-      {#each report.headline.slice(1) as s (s)}<p class="sub">{s}<FlagThis kind="report headline" gameId={game.id} shown={s} /></p>{/each}
+      {#each report.headline.slice(1) as s, i (i)}<p class="sub">{s}<FlagThis kind="report headline" gameId={game.id} shown={s} /></p>{/each}
     {/if}
     <div class="meta">
-      {#each meta as m (m)}<span>{m}</span>{/each}
+      {#each meta as m, i (i)}<span>{m}</span>{/each}
     </div>
   </div>
 
@@ -179,7 +180,7 @@
     <section class="patterns" aria-label="Your patterns in this game">
       <div class="mh"><h2>Your patterns in this game</h2><span>{patterns.length}</span></div>
       <ul>
-        {#each patterns as p (p.ply)}
+        {#each patterns as p (patternKey(p))}
           <li data-testid="report-pattern">
             <div class="pt">
               <span class="pname" title={p.name}>{p.name}</span>
@@ -235,11 +236,11 @@
               <div class="body" use:reveal>
                 {#if th}<p class="theme"><span class="pname">{th.name}</span>{#if th.focus}<span class="tag">Focus</span>{/if}</p>{/if}
                 {#if !hiding}
-                  {#each m.sentences as s (s)}<p class="say">{s}<FlagThis kind="report claim" gameId={game.id} ply={m.ply} label={m.classification} shown={s} /></p>{/each}
+                  {#each m.sentences as s, si (si)}<p class="say">{s}<FlagThis kind="report claim" gameId={game.id} ply={m.ply} label={m.classification} shown={s} /></p>{/each}
                   {#if m.qualifier}<p class="say">{m.qualifier}<FlagThis kind="report qualifier" gameId={game.id} ply={m.ply} label={m.classification} shown={m.qualifier} /></p>{/if}
                   {#if m.descriptions?.length}
                     <p class="cmp">Compared with {m.bestSan ?? 'the engine move'}</p>
-                    {#each m.descriptions as d (d)}<p class="say">{d}<FlagThis
+                    {#each m.descriptions as d, di (di)}<p class="say">{d}<FlagThis
                         kind="report description"
                         gameId={game.id}
                         ply={m.ply}
@@ -279,7 +280,7 @@
 
   {#if report.context?.length}
     <div class="context">
-      {#each report.context as c (c)}<p>{c}<FlagThis kind="report line" gameId={game.id} shown={c} /></p>{/each}
+      {#each report.context as c, i (i)}<p>{c}<FlagThis kind="report line" gameId={game.id} shown={c} /></p>{/each}
     </div>
   {/if}
 </div>

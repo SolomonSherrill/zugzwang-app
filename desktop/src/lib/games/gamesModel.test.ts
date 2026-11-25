@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { GamesItem, GamesMonth } from '../api'
 import {
+  appendPage,
   shortOpening,
   countPgnGames,
   countText,
@@ -238,5 +239,15 @@ describe('FRIENDS-2: a friend game\'s ratings at its start (R1-R3)', () => {
     expect(ratingOf({ whiteElo: null, blackElo: null, startRatings: sr }, 'black')).toBe('≈1390')
     expect(ratingOf({ whiteElo: null, blackElo: null, startRatings: { white: null, black: null } }, 'black')).toBeNull()
     expect(ratingOf({ whiteElo: null, blackElo: null }, 'black')).toBeNull()
+  })
+})
+
+describe('appendPage (FIX-B7)', () => {
+  it('drops a game the list already holds: a game synced between pages shifts the next page by one', () => {
+    const shown = [{ id: 9 }, { id: 8 }, { id: 7 }]
+    expect(appendPage(shown, [{ id: 7 }, { id: 6 }, { id: 5 }]).map((g) => g.id)).toEqual([9, 8, 7, 6, 5])
+  })
+  it('appends a page with nothing in common as it is', () => {
+    expect(appendPage([{ id: 2 }], [{ id: 1 }]).map((g) => g.id)).toEqual([2, 1])
   })
 })

@@ -4,7 +4,7 @@
  *   ?screen=review&game=main|unanalysed|played|<id>[&ply=N]   open a screen (default home)
  *   ?screen=review&fen=<FEN>                                  Analyse a position
  *   ?screen=review&game=promo, ?state=promotion        promotion positions (promotionHarness.ts)
- *   ?state=<scenario>                                  see fakeSidecar.ts
+ *   ?state=<scenario>                                  see fakeSidecar.ts (FIX-B7: report-throws, coach-throws-once)
  *   ?jobs=all|analysis                                 background jobs running (jobsHarness.ts, COACH-2 D)
  *   ?latency=<ms>                                      delay every answer (loading states)
  *   ?cold=1                                            mount the app before the sidecar starts, as
@@ -41,6 +41,11 @@ const played = (await fetch('/played_fixtures.json')
   .then((r) => (r.ok ? r.json() : null))
   .catch(() => null)) as { meta: { playedGameId: number }; responses: Record<string, unknown> } | null
 if (played) Object.assign(fx.responses, played.responses)
+// FIX-B7: games recorded by review/ui_fixtures/record_keys_fixtures.py (optional, private); `game=<id>` opens one
+const keysFx = (await fetch('/keys_fixtures.json')
+  .then((r) => (r.ok ? r.json() : null))
+  .catch(() => null)) as { responses: Record<string, unknown> } | null
+if (keysFx) Object.assign(fx.responses, keysFx.responses)
 const gameParam = q.get('game')
 const gameId =
   gameParam === 'main'

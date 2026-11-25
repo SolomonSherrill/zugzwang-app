@@ -17,6 +17,7 @@
   import PlayerStrip from '../ui/PlayerStrip.svelte'
   import MoveQualityIcon from '../ui/MoveQualityIcon.svelte'
   import EmptyState from '../ui/EmptyState.svelte'
+  import ScreenBoundary from '../shell/ScreenBoundary.svelte'
   import ReportTab from './ReportTab.svelte'
   import MovesTab from './MovesTab.svelte'
   import DepthMenu from './DepthMenu.svelte'
@@ -800,6 +801,8 @@
           <span class="rn">Insights and Home use the depth-14 run.</span>
         </div>
       {/if}
+      <!-- FIX-B7 (ruling HF2): the panel that failed while drawing says so, in place of "Opening the game…" -->
+      <ScreenBoundary screen="review" review={{ onback }}>
       {#if loadError}
         <div class="pad">
           <EmptyState tone="error" sentence="This game could not be opened." sub={loadError} action={{ label: 'Back to games', run: onback }} />
@@ -871,7 +874,7 @@
             <div class="unan">
               <div class="head">
                 <h1>{names.white} vs {names.black}</h1>
-                <div class="meta">{#each meta as m (m)}<span>{m}</span>{/each}</div>
+                <div class="meta">{#each meta as m, i (i)}<span>{m}</span>{/each}</div>
               </div>
               {#if engineOk}
                 <EmptyState
@@ -886,11 +889,12 @@
                   action={{ label: 'Open Settings', run: onsettings }}
                 />
               {/if}
-              {#each report.lines as l (l)}<p class="ctx">{l}</p>{/each}
+              {#each report.lines as l, i (i)}<p class="ctx">{l}</p>{/each}
             </div>
           {/if}
         </div>
       {/if}
+      </ScreenBoundary>
     </aside>
   </div>
 </div>

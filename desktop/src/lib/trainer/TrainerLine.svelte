@@ -121,6 +121,13 @@
     syncBoard()
     return plyLabel(n, white, m.san)
   }
+  /** "This run"'s moves, numbered from the run's own first position (FIX-B7: a run from the line start begins at the
+   *  line's FEN, and replaying its moves from the standard start threw while drawing, an error the screen's boundary
+   *  now shows) */
+  function runMoves(): string {
+    const h = chess.history({ verbose: true })
+    return movesText(h.map((m) => m.lan), h[0]?.before)
+  }
   const arrowFor = (uci: string): DrawShape => ({ orig: uci.slice(0, 2) as Key, dest: uci.slice(2, 4) as Key, brush: 'green' })
 
   // ── choose ──────────────────────────────────────────────────────────────
@@ -531,7 +538,7 @@
               {/if}
               <div class="heading">{yourTurn ? 'Your move' : busy ? 'The book is replying…' : ''}</div>
             {/if}
-            <p class="moves">{history.length ? movesText(chess.history({ verbose: true }).map((m) => m.lan)) : 'No moves yet.'}</p>
+            <p class="moves">{history.length ? runMoves() : 'No moves yet.'}</p>
           </div>
           <dl class="sec score">
             <div><dt>This run</dt><dd>{right} of {yourMoves} right</dd></div>

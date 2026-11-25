@@ -1263,6 +1263,9 @@ const sendUserMove = userMoveSender(
 
 export const api = {
   engineStatus: () => sidecar.request<EngineStatus>('engine_status'),
+  /** FIX-B7 (ruling HF2): a screen failed while drawing; the sidecar logs it at ERROR in logs/sidecar.log */
+  clientError: (screen: string, message: string, stack: string) =>
+    sidecar.request<{ ok: boolean }>('client_error', { screen, message, stack }),
   appInfo: () => sidecar.request<AppInfo>('app_info'),
   /** Relabel on update (BETA item 5). */
   relabelStatus: () => sidecar.request<RelabelStatus>('relabel_status'),

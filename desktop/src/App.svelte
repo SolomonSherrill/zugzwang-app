@@ -17,6 +17,7 @@
   import CommandMenu from './lib/shell/CommandMenu.svelte'
   import { commandMenu, registerCommands } from './lib/shell/commands.svelte'
   import GameReview from './lib/review/GameReview.svelte'
+  import ScreenBoundary from './lib/shell/ScreenBoundary.svelte'
   import PositionAnalysis from './lib/review/PositionAnalysis.svelte'
   import HomeView from './lib/home/HomeView.svelte'
   import SettingsView from './lib/settings/SettingsView.svelte'
@@ -256,6 +257,8 @@
     onopenjob={openJob}
   />
 
+  <!-- FIX-B7 (ruling HF2): each screen in a ScreenBoundary, so one that fails while drawing says so instead of staying
+       on its loading state -->
   <main class="content">
     {#if spawnError}
       <div class="spawn-error">Could not start the engine sidecar: {spawnError}</div>
@@ -265,75 +268,101 @@
       {#if SHOW_FRIENDS}<ChallengeBanners screen={route} />{/if}
       <!-- Play stays mounted so a running game (and its clocks) survives navigation -->
       <div class="screen" style:display={route === 'play' && !live.activeId ? '' : 'none'}>
-        <PlayView
-          bind:this={play}
-          onreview={openFromPlay}
-          onsettings={() => navTo('settings')}
-          onfriends={() => navTo('friends')}
-          active={route === 'play' && !live.activeId}
-        />
+        <ScreenBoundary screen="play">
+          <PlayView
+            bind:this={play}
+            onreview={openFromPlay}
+            onsettings={() => navTo('settings')}
+            onfriends={() => navTo('friends')}
+            active={route === 'play' && !live.activeId}
+          />
+        </ScreenBoundary>
       </div>
       {#if SHOW_FRIENDS && live.activeId}
         <!-- FRIENDS-2: a game against a friend, on Play's screen while it lasts; mounted on every screen so
              its clocks and chat keep up -->
         <div class="screen" style:display={route === 'play' ? '' : 'none'}>
-          <FriendGame onreview={openFromPlayFriend} active={route === 'play'} />
+          <ScreenBoundary screen="play-friend">
+            <FriendGame onreview={openFromPlayFriend} active={route === 'play'} />
+          </ScreenBoundary>
         </div>
       {/if}
       {#if route === 'home'}
-        <HomeView
-          showTrain={SHOW_TRAINER}
-          onnav={(r) => navTo(r)}
-          onanalyze={() => (positionDialog = true)}
-          onopen={openFromHomeList}
-          onopenat={openFromHome}
-        />
+        <ScreenBoundary screen="home">
+          <HomeView
+            showTrain={SHOW_TRAINER}
+            onnav={(r) => navTo(r)}
+            onanalyze={() => (positionDialog = true)}
+            onopen={openFromHomeList}
+            onopenat={openFromHome}
+          />
+        </ScreenBoundary>
       {:else if route === 'games'}
-        <GamesView onopen={openReview} onfen={(fen) => openFenReview(fen, 'games')} onplayfen={playFromFen} onnav={navTo} />
+        <ScreenBoundary screen="games">
+          <GamesView onopen={openReview} onfen={(fen) => openFenReview(fen, 'games')} onplayfen={playFromFen} onnav={navTo} />
+        </ScreenBoundary>
       {:else if route === 'review' && reviewTarget?.gameId != null}
         {#key reviewTarget.gameId}
-          <GameReview
-            gameId={reviewTarget.gameId}
-            ply={reviewTarget.ply ?? null}
-            action={reviewTarget.action ?? null}
-            onback={() => navTo(reviewOrigin)}
-            onsettings={() => navTo('settings')}
-          />
+          <ScreenBoundary screen="review" review={{ onback: () => navTo(reviewOrigin) }}>
+            <GameReview
+              gameId={reviewTarget.gameId}
+              ply={reviewTarget.ply ?? null}
+              action={reviewTarget.action ?? null}
+              onback={() => navTo(reviewOrigin)}
+              onsettings={() => navTo('settings')}
+            />
+          </ScreenBoundary>
         {/key}
       {:else if route === 'review' && reviewTarget?.fen != null}
         <!-- Analyse a position (ruling 8 of 2026-11-20, fourth): Review's Moves layout, no game -->
         {#key reviewTarget.fen}
-          <PositionAnalysis
-            fen={reviewTarget.fen}
-            initialMoves={reviewTarget.moves ?? null}
-            title={reviewTarget.title ?? 'Analyse a position'}
-            backLabel={ORIGIN_LABEL[reviewOrigin] ?? 'Games'}
-            onback={() => navTo(reviewOrigin)}
-            onplayfen={playFromFen}
-            onsettings={() => navTo('settings')}
-          />
+          <ScreenBoundary screen="review-position">
+            <PositionAnalysis
+              fen={reviewTarget.fen}
+              initialMoves={reviewTarget.moves ?? null}
+              title={reviewTarget.title ?? 'Analyse a position'}
+              backLabel={ORIGIN_LABEL[reviewOrigin] ?? 'Games'}
+              onback={() => navTo(reviewOrigin)}
+              onplayfen={playFromFen}
+              onsettings={() => navTo('settings')}
+            />
+          </ScreenBoundary>
         {/key}
       {:else if route === 'puzzles'}
-        <PuzzlesView />
+        <ScreenBoundary screen="puzzles">
+          <PuzzlesView />
+        </ScreenBoundary>
       {:else if route === 'trainer' && SHOW_TRAINER}
-        <TrainerScreen
-          onplayfen={playFromFen}
-          openingRequest={trainerOpening}
-          onrequesthandled={() => (trainerOpening = null)}
-          onsettings={() => navTo('settings')}
-        />
+        <ScreenBoundary screen="trainer">
+          <TrainerScreen
+            onplayfen={playFromFen}
+            openingRequest={trainerOpening}
+            onrequesthandled={() => (trainerOpening = null)}
+            onsettings={() => navTo('settings')}
+          />
+        </ScreenBoundary>
       {:else if route === 'coach'}
-        <CoachView onopen={openReviewFromCoach} />
+        <ScreenBoundary screen="coach">
+          <CoachView onopen={openReviewFromCoach} />
+        </ScreenBoundary>
       {:else if route === 'insights'}
-        <InsightsView onconnect={() => navTo('settings')} onopen={openReviewAt} />
+        <ScreenBoundary screen="insights">
+          <InsightsView onconnect={() => navTo('settings')} onopen={openReviewAt} />
+        </ScreenBoundary>
       {:else if route === 'friends' && SHOW_FRIENDS}
-        <FriendsView onopen={openFriend} now={initial?.now} />
+        <ScreenBoundary screen="friends">
+          <FriendsView onopen={openFriend} now={initial?.now} />
+        </ScreenBoundary>
       {:else if route === 'friend' && SHOW_FRIENDS && friendHandle}
         {#key friendHandle}
-          <FriendProfile handle={friendHandle} onback={() => navTo('friends')} onanalyse={analyseFriendGame} now={initial?.now} />
+          <ScreenBoundary screen="friend">
+            <FriendProfile handle={friendHandle} onback={() => navTo('friends')} onanalyse={analyseFriendGame} now={initial?.now} />
+          </ScreenBoundary>
         {/key}
       {:else if route === 'settings'}
-        <SettingsView onnav={(r) => navTo(r)} />
+        <ScreenBoundary screen="settings">
+          <SettingsView onnav={(r) => navTo(r)} />
+        </ScreenBoundary>
       {/if}
     {/if}
   </main>

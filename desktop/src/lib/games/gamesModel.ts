@@ -370,3 +370,11 @@ export function shortOpening(name: string | null): string {
   const parts = rest.join(', ').split(/,\s*/).map((p) => p.replace(/\s+(Variation|Defense|Defence)$/, '')).filter(Boolean)
   return [fam, ...parts].join(', ')
 }
+
+/** FIX-B7: the next page appended to the list without a game it already holds. Pages are read by offset, so a game
+ *  added in between (a sync, an import) shifts the next page by one and repeats the last game of the one before:
+ *  the list is keyed by game id, and a repeated key stops the screen drawing. */
+export function appendPage<T extends { id: number }>(shown: readonly T[], next: readonly T[]): T[] {
+  const have = new Set(shown.map((g) => g.id))
+  return [...shown, ...next.filter((g) => !have.has(g.id))]
+}

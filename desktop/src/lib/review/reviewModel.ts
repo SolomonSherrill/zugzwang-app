@@ -3,7 +3,7 @@
  * series, phase bands, the move table, the moments' words and the strips' clocks. Every
  * figure is read off the stored game, report and review_extras; nothing is estimated.
  */
-import type { GameDetail, MoveAnalysisInfo, ReportMoment, Band, EngineLine } from '../api'
+import type { GameDetail, MoveAnalysisInfo, ReportMoment, ReportPattern, Band, EngineLine } from '../api'
 import { GRAPH_DOT_QUALITIES, isQualityClass, type QualityClass } from '../ui/moveQuality'
 
 export type Side = 'white' | 'black'
@@ -268,4 +268,25 @@ export function gameMeta(tc: string | null, speed: string | null, playedAt: stri
     ? null
     : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' })
   return [parts.join(''), date].filter(Boolean).join(', ')
+}
+
+// ── the report's patterns (COACH-1 C; FIX-B7) ────────────────────────────────────
+
+/** FIX-B7: "Your patterns in this game" keyed by ply and kind. One move can both miss a chance and deal with a
+ *  threat (ruling HF1: both are listed), so the ply alone repeats; the sidecar gives at most one item per ply
+ *  and kind (each kind's moment at a ply counts under one theme), measured over every analysed game
+ *  (review/scratch/fixb7_keys.out). */
+export function patternKey(p: Pick<ReportPattern, 'ply' | 'kind'>): string {
+  return `${p.ply}:${p.kind}`
+}
+
+/** FIX-B7 (ruling HF1): the pattern each ply's key moment shows. Where a move both missed a chance and dealt with a
+ *  threat, the missed one. */
+export function patternsByPly<T extends Pick<ReportPattern, 'ply' | 'outcome'>>(items: readonly T[]): Map<number, T> {
+  const out = new Map<number, T>()
+  for (const p of items) {
+    const had = out.get(p.ply)
+    if (!had || (had.outcome !== 'missed' && p.outcome === 'missed')) out.set(p.ply, p)
+  }
+  return out
 }

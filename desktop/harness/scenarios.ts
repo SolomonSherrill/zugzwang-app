@@ -4,6 +4,7 @@
  */
 import { fixtureKey, type Fixtures } from './fakeSidecar'
 import { playHandlers } from './fakePlay'
+import { coachHandlers } from './coachHarness'
 
 type Emit = (event: string, data: Record<string, unknown>) => void
 type Handler = (params: Record<string, unknown>, emit: Emit) => unknown
@@ -16,6 +17,24 @@ export function scenarioHandlers(fx: Fixtures, scenario: string | undefined): Re
   }
   const insightsAll = () => fx.responses[fixtureKey('insights', { view: 'v2', color: 'all' })] as Record<string, unknown>
   switch (scenario) {
+    case 'report-throws':
+      // FIX-B7 (ruling HF2): the main game's report built to throw while drawing (no moments: ReportTab reads
+      // report.moments.shown), so Review shows its error instead of "Opening the game…"
+      return {
+        game_report: (p) => {
+          const r = fx.responses[fixtureKey('game_report', p)] as Record<string, unknown>
+          return p.game_id === main ? { ...r, moments: null } : r
+        },
+      }
+    case 'coach-throws-once': {
+      // FIX-B7 (ruling HF2): the Coach page's first overview throws while drawing (no focus list); "Try again"
+      // redraws the screen, which asks again and gets the harness's usual overview
+      let calls = 0
+      const usual = coachHandlers(fx, undefined).coach_overview
+      return {
+        coach_overview: (p, emit) => (++calls === 1 ? { status: 'ready', focus: null, behind: null } : usual(p, emit)),
+      }
+    }
     case 'analysing': {
       // The main game with its analysis taken away; Analyse replays the stored moves as
       // analysis_ply events, one every 40 ms, and never finishes (the running state).

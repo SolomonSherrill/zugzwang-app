@@ -66,6 +66,8 @@ export function fakeTransport(fx: Fixtures, opts: FakeOptions = {}): SidecarTran
     analyze_fen: analyzeFen(),
     probe_move: probeMove,
     cancel_analysis: () => ({ ok: true }),
+    // FIX-B7 (ruling HF2): a screen that failed while drawing; the request log keeps its params (the error, its stack)
+    client_error: () => ({ ok: true }),
     // the trainer's record writes (UI-BUILD-2 E3): acknowledged, nothing stored
     trainer_attempt: () => ({ ok: true }),
     // "Flag this" (beta builds): kept in memory, never written anywhere

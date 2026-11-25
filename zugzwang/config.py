@@ -440,7 +440,7 @@ EXPLAIN_MIN_MOTIF_MATERIAL = 2.0
 # ── Platform sync ───────────────────────────────────────────────────────────────
 
 SYNC_MAX_GAMES: int | None = None  # cap on games fetched per platform; None = entire history
-SYNC_USER_AGENT = "Zugzwang/1.0 (local chess analysis app)"
+SYNC_USER_AGENT = "Zugzwang (open-source chess app; https://github.com/SolomonSherrill/zugzwang-app; contact: privacy@zugzwangapp.com)"
 
 # ── Friends (FRIENDS.md, FRIENDS-1) ──────────────────────────────────────────
 #: The Friends server (server/, a Cloudflare Worker), deployed 2026-11-22 at its custom domain

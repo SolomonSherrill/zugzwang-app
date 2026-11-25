@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   clocksAt, formatEval, lineTokens, materialBalance, moveLabel, moveRows, notableDots, numberedLine,
-  phaseBands, players, swingWords, toWhite, evalAfter,
+  phaseBands, players, swingWords, toWhite, evalAfter, patternKey, patternsByPly,
 } from './reviewModel'
-import type { GameDetail, MoveAnalysisInfo } from '../api'
+import type { GameDetail, MoveAnalysisInfo, ReportPattern } from '../api'
 
 const ma = (ply: number, cls: string, after: number | null, mate: number | null = null): MoveAnalysisInfo => ({
   ply, playedUci: '', bestUci: null, pvUci: '', scoreBeforeCp: 0, scoreBeforeMate: null,
@@ -116,5 +116,33 @@ describe('strips', () => {
   it('show the engine\'s level in a local game', () => {
     const p = players(game({ source: 'local', skillLevel: 10, playerColor: 'white' }))
     expect(p.black).toEqual({ name: 'Stockfish', rating: 'Level 10', you: false })
+  })
+})
+
+describe('the report\'s patterns at one ply (FIX-B7, ruling HF1)', () => {
+  // the case BETA.md "FIX-B7" names: one move (15. Qd2) missed a chance (cxb4 took a loose piece) and caught a threat (Nxd3)
+  const pat = (ply: number, kind: 'chance' | 'threat', outcome: 'caught' | 'missed', theme = 'hangingPiece'): ReportPattern => ({
+    ply, kind, outcome, theme, name: 'Loose piece', focus: true, sentence: `${kind} ${outcome}`, history: null, move: '15. Qd2',
+  })
+  const both = [pat(28, 'chance', 'missed'), pat(28, 'threat', 'caught'), pat(40, 'threat', 'missed', 'fork')]
+
+  it('keys both items of a ply apart, and every item of the list', () => {
+    const keys = both.map(patternKey)
+    expect(keys).toEqual(['28:chance', '28:threat', '40:threat'])
+    expect(new Set(keys).size).toBe(both.length)
+  })
+
+  it('gives a key moment the missed item where a move has both, whichever comes first', () => {
+    expect(patternsByPly(both).get(28)?.outcome).toBe('missed')
+    expect(patternsByPly(both).get(28)?.kind).toBe('chance')
+    const caughtFirst = [pat(28, 'threat', 'caught'), pat(28, 'chance', 'missed')]
+    expect(patternsByPly(caughtFirst).get(28)?.kind).toBe('chance')
+  })
+
+  it('keeps the only item of a ply, caught or missed', () => {
+    const m = patternsByPly([pat(10, 'threat', 'caught'), pat(40, 'threat', 'missed', 'fork')])
+    expect(m.get(10)?.outcome).toBe('caught')
+    expect(m.get(40)?.theme).toBe('fork')
+    expect(m.size).toBe(2)
   })
 })

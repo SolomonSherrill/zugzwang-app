@@ -72,10 +72,10 @@
       </span>
     {/key}
   </div>
-  {#each says as s (s)}<p class="say">{s}</p>{/each}
+  {#each says as s, i (i)}<p class="say">{s}</p>{/each}
   {#if descriptions.length}
     <p class="cmp">{compared}</p>
-    {#each descriptions as d (d)}<p class="say">{d}</p>{/each}
+    {#each descriptions as d, i (i)}<p class="say">{d}</p>{/each}
   {/if}
 </section>
 

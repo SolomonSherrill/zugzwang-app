@@ -2471,6 +2471,14 @@ class Server:
         logger.info("flag saved: %s ply %s (%s)", rec["platform_game_id"], ply, kind)
         return {"path": str(path), "count": count}
 
+    def rpc_client_error(self, screen: str = "", message: str = "", stack: str = "") -> dict:
+        """FIX-B7 (ruling HF2): a screen that failed while drawing reports here, so the next stuck screen can be
+        diagnosed from logs/sidecar.log alone. Logged at ERROR with the error and its stack; never raises."""
+        cap = 8000
+        logger.error("screen %r failed while drawing: %s\n%s", str(screen)[:80], str(message)[:cap],
+                     str(stack)[:cap] or "(no stack)")
+        return {"ok": True}
+
     def rpc_set_active_screen(self, screen: str | None = None) -> dict:
         """The screen the user is looking at, so the engine budget reserves live play
         and the FEN path only while their screens are open (ENG-ALLOC)."""

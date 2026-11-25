@@ -59,3 +59,14 @@ describe('families list moves (UI-BUILD-3 B2)', () => {
     expect(familyMovesText({})).toBe('Several move orders')
   })
 })
+
+describe('movesText from a line start (FIX-B7)', () => {
+  // the run's moves from the line's own position: a promotion there is illegal from the standard start
+  const PROMO_FEN = 'r1bqkb1r/pP1npppp/5n2/8/8/8/PPPP1PPP/RNBQKBNR w KQkq - 1 5'
+  it('numbers the moves from the given position, a promotion included', () => {
+    expect(movesText(['b7a8n'], PROMO_FEN)).toBe('5. bxa8=N')
+  })
+  it('throws from the standard start, which is why the run passes its first position', () => {
+    expect(() => movesText(['b7a8n'])).toThrow()
+  })
+})
