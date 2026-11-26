@@ -27,6 +27,16 @@ export function evalAfter(ma: MoveAnalysisInfo, startsWhite = true): WhiteEval {
   return toWhite(ma.ply + (startsWhite ? 0 : 1), ma.scoreAfterCp, ma.scoreAfterMate)
 }
 
+/** Review's running state from an `analysis_ply` event (FIX-B8 B): the event's own depth first (ruling CB1), then
+ *  the depth Review already knew (it started the run), then 14. Review opened mid-run knows nothing, so before this a
+ *  depth-24 run read "Analysing at depth 14". */
+export function runFromPly(
+  e: { ply: number; total: number; depth?: number | null },
+  prev: { depth: number } | null,
+): { state: 'running'; done: number; total: number; depth: number } {
+  return { state: 'running', done: e.ply + 1, total: e.total, depth: e.depth ?? prev?.depth ?? 14 }
+}
+
 /** An engine line's score (mover-POV at the position before ply `ply`) from White's side. */
 export function lineEval(ply: number, line: EngineLine, startsWhite = true): WhiteEval {
   return toWhite(ply + (startsWhite ? 0 : 1), line.cp, line.mate)

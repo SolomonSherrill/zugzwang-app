@@ -87,7 +87,7 @@ def test_an_in_book_brilliant_does_not_end_the_prefix(monkeypatch):
     # move was a book move, so the game has not left the book.
     real = labelling.brilliant
     monkeypatch.setattr(labelling, "brilliant",
-                        lambda ma, after: ma.ply == 2 or real(ma, after))
+                        lambda ma, after, **kw: ma.ply == 2 or real(ma, after, **kw))
     assert _labels(_plies(MAIN, [True] * 6)) == ["book", "book", "brilliant", "book", "book",
                                                   "book"]
 

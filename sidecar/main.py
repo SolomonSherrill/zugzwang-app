@@ -85,6 +85,7 @@ from zugzwang.core.retry import judge as judge_try
 from zugzwang.core.game import GameEnd, GameSession
 from zugzwang.core.import_pgn import parse_pgn_report
 from zugzwang.core.insights import build_insights
+from zugzwang.core.insights_cache import InsightsCache
 from zugzwang.core.patterns import FACTS_VERSION, facts_row, write_facts_for_run
 from zugzwang.core import coach as coach_core
 from zugzwang.core import practice as practice_core
@@ -1168,9 +1169,12 @@ class SyncRunner:
                 continue
             new_count += 1
 
-        # Only the account's most recent games are analysed by a sync (BETA-PUB Q4).
-        total = self._analyze_pending(db, openings, source, depth,
-                                      recent=C.SYNC_AUTO_ANALYSE_RECENT)
+        # Only the account's most recent games, and the gaps inside what is already analysed, are analysed by a
+        # sync (BETA-PUB Q4; FIX-B8 D, owner note 12: a gap used to wait forever).
+        total = self._analyze_pending(
+            db, openings, source, depth,
+            records=db.games_pending_for_sync(source, depth, recent=C.SYNC_AUTO_ANALYSE_RECENT,
+                                              gap_limit=C.SYNC_AUTO_ANALYSE_RECENT))
         return new_count, total
 
     def _analyze_pending(self, db, openings, source, depth, *,
@@ -1538,6 +1542,7 @@ class InsightsRunner:
         self._db_path = db_path
         self._jobs: queue.Queue = queue.Queue()
         self._db: Database | None = None
+        self._cache = InsightsCache.beside(db_path)
         self._generation = 0
         self._gen_lock = threading.Lock()
         self._stopping = False
@@ -1602,8 +1607,11 @@ class InsightsRunner:
         try:
             if self._db is None:
                 self._db = Database(self._db_path, read_only=True)
-            with self._db.snapshot():
-                result = build_insights(self._db, **params)
+            db = self._db
+            with db.snapshot():
+                # FIX-B8 D (note 11): the payload is kept under a key of everything that changes it
+                # (core/insights_cache.py), so opening Insights again, or after a restart, does not rebuild it.
+                result = self._cache.get_or_build(db, params, lambda: build_insights(db, **params))
         except Exception as exc:
             if self._stopping:
                 return  # interrupted by shutdown; nobody is listening

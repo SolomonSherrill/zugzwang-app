@@ -368,7 +368,7 @@ def reveal(it: Item, answer_uci: str | None, correct: bool, revealed: bool, focu
     fk = set(focus_keys)
     best = CO.move_label(it.fen, it.answer_uci)
     mine = CO.move_label(it.fen, answer_uci) if answer_uci else None
-    phrase = CO.THEME_PHRASES[it.theme]
+    phrase = CO.theme_phrase("chance" if it.kind == "find" else "threat", it.theme)
     multi = len(it.line_uci) > 1
     if it.source == "probe":
         sentence = (f"You found it: {best}." if correct and answer_uci == it.answer_uci
@@ -395,7 +395,7 @@ def reveal(it: Item, answer_uci: str | None, correct: bool, revealed: bool, focu
     return {
         "verdict": "right" if correct else "notQuite",
         "sentence": sentence,
-        "theme": CO.THEME_NAMES.get(it.theme, it.theme),
+        "theme": CO.theme_name("chance" if it.kind == "find" else "threat", it.theme),
         "focus": it.source == "game" and key in fk,
         "comesBack": comes_back(due, now),
         "due": due.isoformat(),

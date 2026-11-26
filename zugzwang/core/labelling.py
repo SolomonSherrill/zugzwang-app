@@ -18,16 +18,18 @@ conservative swing estimate reads it (owner ruling 10), and nothing else does.
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import replace
-from typing import Sequence
+from typing import Callable, Sequence
 
 import chess
 
 from .. import config as C
 from . import pv_reading as P
 from .classification import (MISS_DECIDED_MATE_MAX, MISS_MIN_MATERIAL, WPL_EXCELLENT, WPL_GREAT_GAP,
-                             PlyScore, _can_be_great, book_holds, classify, game_accuracy,
-                             win_prob, wpl)
+                             PlyScore, WP_CP_CLAMP, _can_be_great, book_holds, classify,
+                             game_accuracy, win_prob, wpl)
 from .database import MoveAnalysis
 from .explain import _VALUE, _holds_after_reply, _immediate_gain, explain_ply, see
 from .explain_text import capture_is_an_error
@@ -533,16 +535,225 @@ def immune_behind_a_pin(board: chess.Board, move: chess.Move) -> bool:
     takes = [m for m in after.legal_moves if m.to_square == move.to_square]
     return bool(takes) and all(_capture_by_a_pinned_piece(after, m) for m in takes)
 
+# ── version 9 (BRIL-1, owner 2026-11-25; BRILLIANT.md "BRIL-1") ──────────────
+
+def _forker_threat(null: chess.Board, square: int) -> float:
+    """The loss the piece on *square* threatens that the mover cannot avoid by moving one piece
+    away: the second-largest SEE gain among its captures in *null* (the mover's turn passed).
+    A piece attacking a single unit threatens nothing unavoidable (the unit can move or be
+    defended); a fork's two targets cannot both move."""
+    gains = sorted((see(null, m) for m in null.legal_moves
+                    if m.from_square == square and null.is_capture(m)), reverse=True)
+    return gains[1] if len(gains) >= 2 and gains[1] >= 1.0 else 0.0
+
+
+def captures_the_forker(board: chess.Board, move: chess.Move) -> bool:
+    """D2 (owner, 2026-11-25, BRIL-1; classifier version 9): the move captures the piece that was
+    threatening at least what the move gives up (`-net_on_landing`), so the alternatives lose
+    at least as much. "Threatening" is read as a threat the mover could not avoid by moving the
+    threatened piece away (`_forker_threat`: a fork); BRILLIANT.md "BRIL-1 as built". Not in
+    check (a null move is not legal there)."""
+    if board.is_check() or not board.is_capture(move) or board.is_en_passant(move):
+        return False
+    gives_up = -net_on_landing(board, move)
+    if gives_up <= 0:
+        return False
+    null = board.copy(stack=False)
+    null.push(chess.Move.null())
+    return _forker_threat(null, move.to_square) >= gives_up
+
+
+def bound_win_prob(cp: int | None, mate: int | None, rating: int | None) -> float:
+    """BR-A + BR-C (BRIL-1; switch `BRILLIANT_RATING_BOUNDS`, off): the win probability the
+    brilliant bounds (0.90, 0.30) are judged on. With the switch on, a centipawn score and a
+    rating inside a row of `BRILLIANT_RATING_CURVE` read that row's fitted curve; anything else
+    (switch off, no rating, outside the fitted range, a mate) reads `win_prob`, the current
+    curve. Never used for a label's cost or for accuracy."""
+    if not C.BRILLIANT_RATING_BOUNDS or rating is None or mate is not None or cp is None:
+        return win_prob(cp, mate)
+    for lo, hi, k in C.BRILLIANT_RATING_CURVE:
+        if lo <= rating <= hi:
+            x = max(-WP_CP_CLAMP, min(WP_CP_CLAMP, cp))
+            return 1.0 / (1.0 + math.exp(-k * x))
+    return win_prob(cp, mate)
+
+
+def ratings_from_pgn(pgn: str | None) -> tuple[int | None, int | None]:
+    """(White's, Black's) rating from the PGN's WhiteElo / BlackElo headers; None where absent."""
+    out: list[int | None] = []
+    for tag in ("WhiteElo", "BlackElo"):
+        m = re.search(r'^\[' + tag + r' "(\d+)"\]', pgn or "", re.M)
+        out.append(int(m.group(1)) if m else None)
+    return out[0], out[1]
+
+
+def other_piece_offered(board: chess.Board, move: chess.Move) -> list[int]:
+    """BR-E (BRIL-1; switch `BRILLIANT_OTHER_PIECE`, off; T11's rule, W3's option (d)): the squares
+    of the mover's pieces other than the one that moved (not a pawn, not the king) that the move
+    newly leaves en prise (the opponent takes for a pawn or more by SEE, which it could not with
+    the mover to pass before the move), where the opponent's best capture fails the two-ply
+    minimax and the piece is not immune behind a pin (X1a's test, on that square)."""
+    if board.is_check():
+        return []
+    mover = board.turn
+    null = board.copy(stack=False)
+    null.push(chess.Move.null())
+    before = _en_prise(null, mover)
+    after = board.copy(stack=False)
+    after.push(move)
+    out = []
+    for sq in sorted(_en_prise(after, mover) - before - {move.to_square}):
+        if after.piece_type_at(sq) == chess.PAWN:
+            continue
+        caps = [m for m in after.legal_moves if m.to_square == sq and after.is_capture(m)]
+        if not caps or all(_capture_by_a_pinned_piece(after, m) for m in caps):
+            continue
+        if _holds_after_reply(after, max(caps, key=lambda m: see(after, m)), 1.0) is None:
+            out.append(sq)
+    return out
+
+
+_PIECE_VALUE = {chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
+
+
+def _piece_balance(board: chess.Board, side: bool) -> int:
+    return sum(v * (len(board.pieces(t, side)) - len(board.pieces(t, not side)))
+               for t, v in _PIECE_VALUE.items())
+
+
+def down_along_line(fen: str, line: Sequence[str], plies: int | None = None) -> bool:
+    """BR-F check (1) (BRIL-1): a real sacrifice along the line. After the first *plies*
+    (`BRILLIANT_LINE_DOWN_PLIES`, 5: the move, the reply, and the mover's second move after it) of
+    *line* (the played move first), the mover's piece balance (N, B, R, Q; pawns not counted) is
+    below its level before the move. The count is read after one of the mover's own moves, never
+    mid-exchange after the opponent's: an odd count, and a shorter line is cut back to its last
+    mover's move. At least three plies (the move, a reply, a mover's move) are needed."""
+    k = C.BRILLIANT_LINE_DOWN_PLIES if plies is None else plies
+    board = chess.Board(fen)
+    side = board.turn
+    start = _piece_balance(board, side)
+    played = []
+    for u in line[:k]:
+        m = chess.Move.from_uci(u)
+        if m not in board.legal_moves:
+            break
+        board.push(m)
+        played.append(m)
+    while played and len(played) % 2 == 0:          # end on the mover's move
+        board.pop()
+        played.pop()
+    return len(played) >= 3 and _piece_balance(board, side) < start
+
+
+def failure_shape(board: chess.Board, move: chess.Move) -> str | None:
+    """BR-F check (3) (BRIL-1): BRILLIANT-WIDEN's (e) read's failure shapes as BR-E2 defined them —
+    "endgame" (after the move no queen is on the board and each side has at most two N/B/R),
+    "queen" (a queen offered), "exchange" (a rook offered whose best capture is by a knight or
+    bishop, or a rook taking a knight or bishop). None otherwise. The lost position (BR-E2's X4)
+    is X1b's already."""
+    after = board.copy(stack=False)
+    after.push(move)
+    minors = lambda s: sum(len(after.pieces(t, s)) for t in (chess.KNIGHT, chess.BISHOP, chess.ROOK))
+    if not after.pieces(chess.QUEEN, chess.WHITE) and not after.pieces(chess.QUEEN, chess.BLACK) \
+            and minors(chess.WHITE) <= 2 and minors(chess.BLACK) <= 2:
+        return "endgame"
+    piece = move.promotion or board.piece_type_at(move.from_square)
+    if piece == chess.QUEEN:
+        return "queen"
+    if piece == chess.ROOK:
+        takes = [m for m in after.legal_moves if m.to_square == move.to_square]
+        best = max(takes, key=lambda m: see(after, m)) if takes else None
+        if (best is not None and after.piece_type_at(best.from_square) in (chess.KNIGHT, chess.BISHOP)) \
+                or board.piece_type_at(move.to_square) in (chess.KNIGHT, chess.BISHOP):
+            return "exchange"
+    return None
+
+
+def eval_sound_candidate(ma: MoveAnalysis, line: Sequence[str],
+                         after: tuple[int | None, int | None]) -> bool:
+    """BR-F (BRIL-1; switch `BRILLIANT_EVAL_SOUND`, off) without its search: for a piece offered on
+    the landing square that B4 and B4b do not prove, the depth-14 after-score is scored (X1c then
+    holds it within WPL_EXCELLENT of the before-score: option (e)), check (1)
+    `down_along_line`, check (3) no `failure_shape`. The candidates are what the verification
+    search (check (2), `eval_holds`) is run on."""
+    if not _scored(*after) or not _scored(ma.score_before_cp, ma.score_before_mate):
+        return False
+    board = chess.Board(ma.fen_before)
+    return down_along_line(ma.fen_before, line) and \
+        failure_shape(board, chess.Move.from_uci(ma.played_uci)) is None
+
+
+def eval_holds(ma: MoveAnalysis, deep_after: tuple[int | None, int | None] | None) -> bool:
+    """BR-F check (2): the verification search's score of the position after the move (from the
+    mover's side, depth `BRILLIANT_VERIFY_DEPTH`) keeps the mover within WPL_EXCELLENT of the
+    stored before-score. No search given: not proven."""
+    if deep_after is None or not _scored(*deep_after):
+        return False
+    return win_prob(ma.score_before_cp, ma.score_before_mate) - win_prob(*deep_after) <= WPL_EXCELLENT
+
+
+def brilliant_path(ma: MoveAnalysis,
+                   after: tuple[int | None, int | None] | None = None, *,
+                   rating: int | None = None,
+                   verify: Callable[[MoveAnalysis], tuple[int | None, int | None] | None] | None = None,
+                   ) -> str | None:
+    """Which way ply *ma* is brilliant, or None: "landing" (B3 + B4 / B4b, the rule since W),
+    "eval" (BR-F, switch `BRILLIANT_EVAL_SOUND`), "other" (BR-E, switch `BRILLIANT_OTHER_PIECE`).
+    `brilliant` is its truth value; the gates are `brilliant`'s docstring. *rating* is the
+    mover's (BR-A/C's bounds); *verify* is BR-F's verification search, called only on a
+    candidate (`eval_sound_candidate`) with the row, returning the after-move score from the
+    mover's side."""
+    line = nearly_best_line(ma)
+    if line is None:
+        return None
+    if ma.score_before_mate is not None and ma.score_before_mate > 0:
+        return None
+    wp_bound = bound_win_prob(ma.score_before_cp, ma.score_before_mate, rating)   # BR-A/C
+    if wp_bound > C.BRILLIANT_MAX_WP_BEFORE:
+        return None
+    if wp_bound < C.BRILLIANT_MIN_WP_BEFORE:                         # X1b
+        return None
+    wp_before = win_prob(ma.score_before_cp, ma.score_before_mate)
+    a_cp, a_mate = after if after is not None else (ma.score_after_cp, ma.score_after_mate)
+    if _scored(a_cp, a_mate) and _scored(ma.score_before_cp, ma.score_before_mate) and \
+            wp_before - win_prob(a_cp, a_mate) > WPL_EXCELLENT:     # X1c
+        return None
+    board = chess.Board(ma.fen_before)
+    if board.legal_moves.count() < C.BRILLIANT_MIN_LEGAL:             # B2, BR-D
+        return None
+    move = chess.Move.from_uci(ma.played_uci)
+    if captures_the_forker(board, move):                             # D2
+        return None
+    if net_on_landing(board, move) < 0 and offers_a_piece(board, move) and \
+            not immune_behind_a_pin(board, move):                    # B3, X1a
+        pos = board.copy(stack=False)
+        pos.push(move)
+        takes = [m for m in pos.legal_moves if m.to_square == move.to_square]
+        if not takes or _holds_after_reply(pos, max(takes, key=lambda m: see(pos, m)),
+                                           1.0) is None or \
+                taking_it_fails_in_line(replace(ma, pv_uci=" ".join(line))):   # B4, B4b
+            return "landing"
+        if C.BRILLIANT_EVAL_SOUND and verify is not None and \
+                eval_sound_candidate(ma, line, (a_cp, a_mate)) and eval_holds(ma, verify(ma)):
+            return "eval"                                            # BR-F
+    if C.BRILLIANT_OTHER_PIECE and other_piece_offered(board, move):  # BR-E
+        return "other"
+    return None
+
 
 def brilliant(ma: MoveAnalysis,
-              after: tuple[int | None, int | None] | None = None) -> bool:
+              after: tuple[int | None, int | None] | None = None, *,
+              rating: int | None = None,
+              verify: Callable[[MoveAnalysis], tuple[int | None, int | None] | None] | None = None,
+              ) -> bool:
     """BRILLIANT.md's rule as ruled in W (owner, 2026-11-19: "brilliant is more about
     sacrificing"; classifier version 6), from the stored row and its FEN only (no engine):
 
     - B1 nearly best (`nearly_best_line`): the stored best, or a stored line within WPL 0.02
       of it; the mover had no forced mate already; win probability before at most
       `BRILLIANT_MAX_WP_BEFORE` (0.90). *No book exclusion* (ruling 9).
-    - B2 not forced: at least `BRILLIANT_MIN_LEGAL` (5) legal moves.
+    - B2 not forced: at least `BRILLIANT_MIN_LEGAL` legal moves — 2 since BR-D (version 9, BRIL-1:
+      "not the only legal move"); 5 before.
     - B3 a real sacrifice: `net_on_landing` < 0 — what the move took, less the
       opponent's best SEE back on its square — of a piece, not a pawn (`offers_a_piece`,
       ruling R6).
@@ -562,38 +773,15 @@ def brilliant(ma: MoveAnalysis,
       (`label_ply` passes it); None reads the row's stored `score_after_*`, which is that
       score since version 3. An unscored after-score cannot be judged and does not exclude.
 
+    Version 9 (BRIL-1, owner 2026-11-25): **D2** excludes capturing the piece that threatened at
+    least what the move gives up (`captures_the_forker`). Behind switches, off: **BR-A/C** reads
+    the 0.90 / 0.30 bounds on the rating-aware curve (`bound_win_prob`, the mover's *rating*);
+    **BR-F** passes B4 by the engine's evaluation (`eval_sound_candidate` and `eval_holds` on
+    *verify*'s search); **BR-E** passes for another piece left en prise (`other_piece_offered`).
+
     Checking sacrifices are included (ruling 9: "keep checking sacrifices, even if it's a
     book move it's still brilliant"); B4's minimax answers checks."""
-    line = nearly_best_line(ma)
-    if line is None:
-        return False
-    if ma.score_before_mate is not None and ma.score_before_mate > 0:
-        return False
-    wp_before = win_prob(ma.score_before_cp, ma.score_before_mate)
-    if wp_before > C.BRILLIANT_MAX_WP_BEFORE:
-        return False
-    if wp_before < C.BRILLIANT_MIN_WP_BEFORE:                       # X1b
-        return False
-    a_cp, a_mate = after if after is not None else (ma.score_after_cp, ma.score_after_mate)
-    if _scored(a_cp, a_mate) and _scored(ma.score_before_cp, ma.score_before_mate) and \
-            wp_before - win_prob(a_cp, a_mate) > WPL_EXCELLENT:     # X1c
-        return False
-    board = chess.Board(ma.fen_before)
-    if board.legal_moves.count() < C.BRILLIANT_MIN_LEGAL:
-        return False
-    move = chess.Move.from_uci(ma.played_uci)
-    if not net_on_landing(board, move) < 0 or not offers_a_piece(board, move):
-        return False
-    if immune_behind_a_pin(board, move):                            # X1a
-        return False
-    pos = board.copy(stack=False)
-    pos.push(move)
-    takes = [m for m in pos.legal_moves if m.to_square == move.to_square]
-    if takes and _holds_after_reply(pos, max(takes, key=lambda m: see(pos, m)),
-                                    1.0) is not None and \
-            not taking_it_fails_in_line(replace(ma, pv_uci=" ".join(line))):
-        return False
-    return True
+    return brilliant_path(ma, after, rating=rating, verify=verify) is not None
 
 
 def forfeited_mate_in_one(board: chess.Board, played: chess.Move) -> bool:
@@ -628,6 +816,8 @@ def label_ply(
     final_lines: Sequence[dict] | None,
     *,
     book_open: bool = True,
+    ratings: tuple[int | None, int | None] | None = None,
+    verify: Callable[[MoveAnalysis], tuple[int | None, int | None] | None] | None = None,
 ) -> MoveAnalysis:
     """Ply *i* with its version-3 after-score and label.
 
@@ -640,7 +830,10 @@ def label_ply(
     the book rule (`in_book`). Book is a prefix (BOOK-PREFIX, owner ruling 10, 2026-11-20
     fourth, version 8): once a ply fails it, no later ply is `book`, even one that
     transposes back into a book position. The caller keeps it (`label_game` and the
-    analysis loop, in ply order); the stored `is_book` stays the probe."""
+    analysis loop, in ply order); the stored `is_book` stays the probe.
+
+    *ratings* (White's, Black's; `ratings_from_pgn`) and *verify* reach `brilliant` only: BR-A/C
+    and BR-F, both behind switches that are off (BRIL-1), read them."""
     ma = plies[i]
     book = ma.is_book and book_open
     s_cp, s_mate = search_after(ma)
@@ -663,7 +856,9 @@ def label_ply(
         is_book=book,
         only_legal_move=board.legal_moves.count() == 1,
         forfeited_mate_in_one=forfeited,
-        brilliant=brilliant(ma, (a_cp, a_mate)),
+        brilliant=brilliant(ma, (a_cp, a_mate),
+                            rating=None if ratings is None else ratings[0 if board.turn else 1],
+                            verify=verify),
         missed_win=event is not None,
         critical_missed=critical_missed(plies, i, final_lines, a_cp, a_mate),
         great_eligible=great_eligible(plies, i),
@@ -690,13 +885,16 @@ def label_ply(
 def label_game(
     plies: Sequence[MoveAnalysis],
     final_lines: Sequence[dict] | None,
+    *,
+    ratings: tuple[int | None, int | None] | None = None,
+    verify: Callable[[MoveAnalysis], tuple[int | None, int | None] | None] | None = None,
 ) -> list[MoveAnalysis]:
     """Every ply of a run, labelled. *plies* ordered by ply, 0..n−1. The book prefix
     (`label_ply`'s *book_open*) is kept here, in ply order, as the analysis loop keeps it."""
     out: list[MoveAnalysis] = []
     book_open = True
     for i in range(len(plies)):
-        ma = label_ply(plies, i, final_lines, book_open=book_open)
+        ma = label_ply(plies, i, final_lines, book_open=book_open, ratings=ratings, verify=verify)
         book_open = book_open and in_book(ma)
         out.append(ma)
     return out

@@ -146,6 +146,24 @@ def test_search_finds_a_game_by_id_exactly_or_text_as_a_substring(db):
     assert GL.matches_id("#12", 12, None) and not GL.matches_id("#12", 120, None)
 
 
+def test_search_finds_a_game_by_a_pasted_link(db):
+    """FIX-B8 D, owner note 3: a Chess.com or Lichess game link names the game by its platform id."""
+    # The hosts are joined here so no published file holds a literal game link (the public scan reads one as a
+    # game id: .claude/rules/public-scan.md).
+    cc, li = "chess" + ".com", "lichess" + ".org"
+    a = _save(db, at="2026-11-01T10:00:00+00:00", ext="4417")
+    b = _save(db, at="2026-11-18T10:00:00+00:00", ext="AbCdEfGh", source="lichess")
+    for path in ("game/live/", "game/daily/", "live/game/", "analysis/game/live/", "game/"):
+        for link in (f"https://www.{cc}/{path}4417", f"{cc}/{path}4417?move=12", f"  https://{cc}/{path}4417#5  "):
+            assert ids(page(db, search=link)) == [a], link
+    for tail in ("AbCdEfGh", "abcdefgh/black", "AbCdEfGhWxYz", "AbCdEfGh#32"):
+        assert ids(page(db, search=f"https://{li}/{tail}")) == [b], tail
+    assert ids(page(db, search=f"https://www.{cc}/game/live/4418")) == []   # a link names one id only
+    assert ids(page(db, search=f"https://{li}/study/AbCdEfGh")) == []       # not a game link: text, no match
+    assert GL.id_from_link(f"https://www.{cc}/game/live/4417") == "4417"
+    assert GL.id_from_link("4417") is None
+
+
 def test_the_opponent_is_the_other_side_and_stockfish_for_games_played_here(db):
     _save(db, at="2026-11-01T10:00:00+00:00", color="black", white="bob", black="alice", ext="x")
     _save(db, at="2026-11-02T10:00:00+00:00", source="local", white="You", black="Stockfish")

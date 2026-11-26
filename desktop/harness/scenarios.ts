@@ -51,10 +51,30 @@ export function scenarioHandlers(fx: Fixtures, scenario: string | undefined): Re
           const moves = game.analysis?.moves ?? []
           const total = game.plies.length
           moves.slice(0, Math.floor(total * 0.42)).forEach((m, i) =>
-            setTimeout(() => emit('analysis_ply', { gameId: p.game_id, ply: i, total, analysis: m }), 40 * (i + 1)),
+            setTimeout(() => emit('analysis_ply', { gameId: p.game_id, ply: i, total, analysis: m, runId: 1, depth: p.depth ?? 14 }), 40 * (i + 1)),
           )
           return { runId: 1, depth: p.depth ?? 14 }
         },
+      }
+    }
+    case 'analysing-24': {
+      // FIX-B8 B: a depth-24 run started elsewhere (Games, an earlier visit) is under way when Review opens: the main
+      // game has no analysis, and analysis_ply events carrying depth 24 (ruling CB1) arrive without Review asking.
+      return {
+        get_game: (p, emit) => {
+          const g = fx.responses[fixtureKey('get_game', p)] as Record<string, unknown>
+          if (p.game_id !== main) return g
+          const moves = game.analysis?.moves ?? []
+          const total = game.plies.length
+          moves.slice(0, 30).forEach((m, i) =>
+            setTimeout(() => emit('analysis_ply', { gameId: p.game_id, ply: i, total, analysis: m, runId: 7, depth: 24 }), 300 + 40 * i),
+          )
+          return { ...g, analysis: null }
+        },
+        game_report: (p) =>
+          p.game_id === main
+            ? fx.responses[fixtureKey('game_report', { game_id: fx.meta.unanalysedGameId })]
+            : fx.responses[fixtureKey('game_report', p)],
       }
     }
     case 'no-games':

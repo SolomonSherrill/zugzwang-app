@@ -26,7 +26,9 @@ from typing import NamedTuple, Sequence
 # label written today. Bump it with any change that can alter a label, and say in the
 # commit which rows it affects. NULL in the column means "written before the write path
 # stamped one" — every run from I3 until 2026-11-07 (W9, W22).
-CLASSIFIER_VERSION = 8   # 8: BOOK-PREFIX, book is a prefix: once a ply fails the book rule, no later
+CLASSIFIER_VERSION = 9   # 9: BRIL-1, brilliant D2 (not for capturing the piece that threatened at least what
+                         # the move gives up) and BR-D (B2: not the only legal move), 2026-11-25 (every live
+                         # run carried 8). 8: BOOK-PREFIX, book is a prefix: once a ply fails the book rule, no later
                          # ply of the game is book (owner ruling 10, 2026-11-20 fourth; every live run
                          # carried 7). 7: X1, brilliant excludes an immune piece behind a pin, a lost position
                          # (wp before < 0.30) and a cost above WPL_EXCELLENT (2026-11-19; every live

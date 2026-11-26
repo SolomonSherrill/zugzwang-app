@@ -467,7 +467,9 @@ SYNC_MIN_EVAL_COVERAGE = 0.8
 SYNC_EVAL_BEST_WPL = 0.005
 # A sync analyses automatically only the pending games among each account's this-many most
 # recent games, newest first; older games wait for "Analyse more", in a step the user
-# chooses or all (BETA-PUB Q4, owner 2026-11-12). Per account (per source).
+# chooses or all (BETA-PUB Q4, owner 2026-11-12). Per account (per source). Also, up to this
+# many pending games dated inside the span already analysed (FIX-B8 D, note 12:
+# Database.games_pending_for_sync), which no sync analysed before.
 SYNC_AUTO_ANALYSE_RECENT = 100
 
 # ── Insights ──────────────────────────────────────────────────────────────────
@@ -494,7 +496,43 @@ BRILLIANT_MIN_WP_BEFORE = 0.30
 # BRILLIANT.md B2 (owner ruling 9, 2026-11-11): not forced — at least this many legal
 # moves. The version-2 detector's SACRIFICE_MATERIAL_THRESHOLD and
 # BRILLIANT_CAPTURE_COST_CP went with its live engine search (`labelling.brilliant`).
-BRILLIANT_MIN_LEGAL = 5
+# BR-D (owner, 2026-11-25, BRILLIANT.md "BRIL-1"; classifier version 9): "not the only legal
+# move", 5 -> 2.
+BRILLIANT_MIN_LEGAL = 2
+
+# ── BRIL-1 switches (owner, 2026-11-25; BRILLIANT.md "BRIL-1"): rules that ADD brilliants are
+# built behind a switch, off, and ship only after the owner's read of a seeded 20 (BR-G). ──
+# BR-A + BR-C: the 0.90 ceiling and the 0.30 floor are judged on a rating-aware curve
+# (`labelling.bound_win_prob`): the mover's expected score from the depth-14 evaluation at his
+# rating band. Brilliant only; labels and accuracy keep the Lichess curve.
+BRILLIANT_RATING_BOUNDS = False
+# The fitted curve (review/scratch/bril1/fit_curve.py, the fit half): rows (lowest rating,
+# highest rating, k) with expected score 1 / (1 + exp(-k * cp)), cp clamped as `win_prob`
+# clamps it. A rating outside every row, an unknown rating, or a mate score uses the current
+# curve (`classification.win_prob`).
+BRILLIANT_RATING_CURVE: tuple[tuple[int, int, float], ...] = (
+    (100, 399, 0.00094261),
+    (400, 499, 0.00250454),
+    (500, 599, 0.00198055),
+    (600, 699, 0.00214080),
+    (700, 799, 0.00274677),
+    (800, 899, 0.00267696),
+    (900, 999, 0.00272494),
+    (1000, 1399, 0.00302786),
+)
+# BR-E: another piece (not a pawn, not the king, not the one that moved) newly left en prise,
+# whose best capture fails the two-ply minimax (`labelling.other_piece_offered`).
+BRILLIANT_OTHER_PIECE = False
+# BR-F: soundness by the engine's evaluation (`labelling.eval_sound`), all three checks:
+# (1) the mover still a piece down this many plies into the played move's own stored line
+# (N, B, R, Q counted, pawns not; read after the mover's own move, so odd: 5 is the mover's
+# second move after the reply); (2) the evaluation after the move holds within
+# WPL_EXCELLENT of the before-score at a verification search of this depth (Stockfish, one
+# thread, the candidates only; the search is not run while labelling, its result is passed
+# in); (3) BR-E2's failure shapes (an endgame, a queen offered, the exchange) excluded.
+BRILLIANT_EVAL_SOUND = False
+BRILLIANT_LINE_DOWN_PLIES = 5
+BRILLIANT_VERIFY_DEPTH = 22
 
 # ── Move classification colours ───────────────────────────────────────────────
 

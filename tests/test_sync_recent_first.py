@@ -105,8 +105,9 @@ def test_a_first_sync_analyses_the_100_most_recent_newest_first(tmp_path, runner
 
 
 def test_a_library_already_analysed_re_runs_nothing(tmp_path, runner, monkeypatch):
-    """The owner's case: his recent games are analysed, so a sync analyses only what is
-    new, and an old unanalysed game outside the window stays where it is."""
+    """The owner's case: his recent games are analysed, so a sync re-runs nothing analysed. An old
+    unanalysed game outside the window but inside the analysed span (a gap) is analysed by the next
+    sync (FIX-B8 D, owner note 12: before, it stayed pending after every sync)."""
     db = Database(tmp_path / "z.db")
     games = [_game("chesscom", n) for n in range(150)]
     for g in games:
@@ -114,15 +115,34 @@ def test_a_library_already_analysed_re_runs_nothing(tmp_path, runner, monkeypatc
         if g.external_id != "chesscom-0003":           # one old game never analysed
             _analysed(db, gid)
     monkeypatch.setitem(sidecar.SyncRunner._FETCHERS, "chesscom", _fetcher(games))
-    assert runner._sync_source(db, None, "chesscom", "x", ["x"], 14) == (0, 0)
-    assert runner.taken == []
+    assert runner._sync_source(db, None, "chesscom", "x", ["x"], 14) == (0, 1)
+    assert runner.taken == ["chesscom-0003"]           # the gap, and nothing analysed again
     # Two new games played since: those, and only those, are analysed.
     newer = games + [_game("chesscom", 150), _game("chesscom", 151)]
     monkeypatch.setitem(sidecar.SyncRunner._FETCHERS, "chesscom", _fetcher(newer))
     assert runner._sync_source(db, None, "chesscom", "x", ["x"], 14) == (2, 2)
-    assert runner.taken == ["chesscom-0151", "chesscom-0150"]
-    assert [g.external_id for g in db.games_pending_analysis("chesscom", 14)] == [
-        "chesscom-0003"]
+    assert runner.taken == ["chesscom-0003", "chesscom-0151", "chesscom-0150"]
+    assert db.games_pending_analysis("chesscom", 14) == []
+
+
+def test_note12_games_a_later_sync_brings_in_inside_the_analysed_span_are_analysed(tmp_path, runner, monkeypatch):
+    """FIX-B8 D, owner note 12 (reproduced on a copy of the 2026-11-25 backup: 9 Chess.com games from March to
+    September, synced after the newest 100 had moved on, never analysed by any sync, so Settings kept saying
+    "9 games from Chess.com waiting for analysis"). A first sync of 130 games analyses the newest 100 (Q4); a
+    second sync with nothing new leaves the 30 older ones for "Analyse more" (Q4's backlog: older than every
+    analysed game); a third brings in 9 games dated among the analysed ones, and those are analysed."""
+    db = Database(tmp_path / "z.db")
+    games = [_game("chesscom", n) for n in range(0, 260, 2)]           # 130 games
+    monkeypatch.setitem(sidecar.SyncRunner._FETCHERS, "chesscom", _fetcher(games))
+    assert runner._sync_source(db, None, "chesscom", "x", ["x"], 14) == (130, 100)
+    runner.taken.clear()
+    assert runner._sync_source(db, None, "chesscom", "x", ["x"], 14) == (0, 0)
+    assert len(db.games_pending_analysis("chesscom", 14)) == 30
+    late = [_game("chesscom", n) for n in range(61, 79, 2)]              # 9 games among the analysed ones
+    monkeypatch.setitem(sidecar.SyncRunner._FETCHERS, "chesscom", _fetcher(games + late))
+    assert runner._sync_source(db, None, "chesscom", "x", ["x"], 14) == (9, 9)
+    assert runner.taken == [g.external_id for g in reversed(late)]
+    assert len(db.games_pending_analysis("chesscom", 14)) == 30          # only Q4's backlog is left
 
 
 # ── Analyse more ─────────────────────────────────────────────────────────────

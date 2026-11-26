@@ -138,6 +138,8 @@
             {/each}
           </div>
         {/each}
+        <!-- ruling D6 (FIX-B8, GAME_REPORT.md): the labels' help, word for word at depth 14 -->
+        <p class="cnote" data-testid="labels-help">Move labels come from the depth-{game.analysis?.depth ?? 14} analysis.</p>
       </section>
     {/if}
   </div>
@@ -210,5 +212,10 @@
   }
   .zero {
     color: var(--disabled);
+  }
+  .cnote {
+    margin: 8px 8px 0;
+    color: var(--text-3);
+    font: var(--secondary);
   }
 </style>

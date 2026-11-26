@@ -550,6 +550,9 @@ export interface AnalysisPlyEvent {
   ply: number
   total: number
   analysis: MoveAnalysisInfo | null
+  /** the run's depth (ruling CB1: every analysis event names its run); null when the sidecar has no job record */
+  depth?: number | null
+  runId?: number
 }
 
 export interface AnalysisDoneEvent {

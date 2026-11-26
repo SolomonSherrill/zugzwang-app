@@ -787,8 +787,9 @@ def test_queued_request_superseded_before_it_runs(
     insights_server._handle_request({"id": 1, "method": "insights", "params": {}})
     assert blocked_insights.entered.wait(timeout=5)  # id 1 is now in flight
 
-    insights_server._handle_request({"id": 2, "method": "insights", "params": {}})
-    insights_server._handle_request({"id": 3, "method": "insights", "params": {}})
+    # the filters toggled (FIX-B8 D: the same filters on the same data would be the cache's, not a build)
+    insights_server._handle_request({"id": 2, "method": "insights", "params": {"color": "white"}})
+    insights_server._handle_request({"id": 3, "method": "insights", "params": {"color": "black"}})
     blocked_insights.gate.set()
 
     _wait_for(lambda: len(sent) == 3)

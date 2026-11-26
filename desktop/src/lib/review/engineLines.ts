@@ -28,15 +28,20 @@ export interface LineRow {
 }
 
 /** The stored lines of the ply played from position `current`, with the played move's line
- *  added (from its after-score and the next ply's best line) when it is not among them. */
+ *  added (from its after-score and the next ply's best line) when it is not among them.
+ *  Ruling D5 (FIX-B8, GAME_REPORT.md): one number per move. The line that starts with the played move shows the
+ *  move's depth-14 after-score (the eval bar's and the label's number), not its own score from the position before,
+ *  which is a search one ply earlier and can differ (a sacrifice often reads higher once it is on the board). */
 export function storedRows(game: GameDetail, byPly: Map<number, MoveAnalysisInfo>, current: number): LineRow[] {
   const startsWhite = !game.startFen.includes(' b ')
   const a = byPly.get(current)
   if (!a) return []
   const played = game.plies[current]?.uci
+  const after = evalAfter(a, startsWhite)
+  const hasAfter = after.cp !== null || after.mate !== null
   const out: LineRow[] = a.lines.map((l, i) => ({
     key: `l${i}`,
-    eval: formatEval(lineEval(current, l, startsWhite)),
+    eval: formatEval(played && l.uci[0] === played && hasAfter ? after : lineEval(current, l, startsWhite)),
     sans: l.san,
     ucis: l.uci,
     best: i === 0,
@@ -46,7 +51,7 @@ export function storedRows(game: GameDetail, byPly: Map<number, MoveAnalysisInfo
     const next = byPly.get(current + 1)
     out.push({
       key: 'played',
-      eval: formatEval(evalAfter(a, startsWhite)),
+      eval: formatEval(after),
       sans: [game.plies[current].san, ...(next?.lines[0]?.san ?? [])],
       ucis: [played, ...(next?.lines[0]?.uci ?? [])],
       best: false,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  runFromPly,
   clocksAt, formatEval, lineTokens, materialBalance, moveLabel, moveRows, notableDots, numberedLine,
   phaseBands, players, swingWords, toWhite, evalAfter, patternKey, patternsByPly,
 } from './reviewModel'
@@ -144,5 +145,16 @@ describe('the report\'s patterns at one ply (FIX-B7, ruling HF1)', () => {
     expect(m.get(10)?.outcome).toBe('caught')
     expect(m.get(40)?.theme).toBe('fork')
     expect(m.size).toBe(2)
+  })
+})
+
+describe("Review's running state from analysis_ply (FIX-B8 B, ruling CB1)", () => {
+  it("takes the event's own depth first: Review opened mid-run at depth 24 reads 24", () => {
+    expect(runFromPly({ ply: 9, total: 80, depth: 24 }, null)).toEqual({ state: 'running', done: 10, total: 80, depth: 24 })
+    expect(runFromPly({ ply: 9, total: 80, depth: 24 }, { depth: 14 }).depth).toBe(24)
+  })
+  it('falls back to the depth Review knew, then 14', () => {
+    expect(runFromPly({ ply: 0, total: 80, depth: null }, { depth: 18 }).depth).toBe(18)
+    expect(runFromPly({ ply: 0, total: 80 }, null).depth).toBe(14)
   })
 })

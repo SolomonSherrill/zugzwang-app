@@ -27,7 +27,7 @@ describe('storedRows', () => {
     const by = new Map([[0, ma(0, [{ uci: ['e2e4', 'e7e5'], san: ['e4', 'e5'], cp: 30 }, { uci: ['d2d4'], san: ['d4'], cp: 20 }])]])
     const rows = storedRows(game, by, 0)
     expect(rows.map((r) => [r.ucis, r.best, r.played, r.eval])).toEqual([
-      [['e2e4', 'e7e5'], true, true, '+0.3'],
+      [['e2e4', 'e7e5'], true, true, '+0.2'], // the played move's line: its after-score (D5)
       [['d2d4'], false, false, '+0.2'],
     ])
   })
@@ -40,6 +40,22 @@ describe('storedRows', () => {
     const played = storedRows(game, by, 0).find((r) => r.played)!
     expect(played.ucis).toEqual(['e2e4', 'c7c5', 'g1f3'])
     expect(played.sans).toEqual(['e4', 'c5', 'Nf3'])
+  })
+
+  it("D5: the line that starts with the played move shows the move's after-score, other lines their own", () => {
+    // ply 0 played e4; its line scores +0.3 from the position before, the after-score (ply 1's search) reads +0.4
+    const by = new Map([[0, ma(0, [{ uci: ['d2d4'], san: ['d4'], cp: 50 }, { uci: ['e2e4', 'e7e5'], san: ['e4', 'e5'], cp: 30 }], 40)]])
+    const rows = storedRows(game, by, 0)
+    expect(rows.map((r) => [r.sans[0], r.played, r.eval])).toEqual([
+      ['d4', false, '+0.5'],
+      ['e4', true, '+0.4'],
+    ])
+  })
+
+  it("D5: keeps the line's own score when no after-score is stored", () => {
+    const m = ma(0, [{ uci: ['e2e4'], san: ['e4'], cp: 30 }])
+    ;(m as unknown as { scoreAfterCp: null }).scoreAfterCp = null
+    expect(storedRows(game, new Map([[0, m]]), 0)[0].eval).toBe('+0.3')
   })
 
   it('is empty where nothing is stored', () => {

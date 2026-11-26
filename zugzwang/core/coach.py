@@ -40,7 +40,8 @@ from zugzwang.core.pv_reading import (
     read_line, read_ply)
 from zugzwang.core.stats import benjamini_hochberg, normal_two_sided_p
 
-COACH_VERSION = 1
+#: 2 (FIX-B8, ruling D9a, 2026-11-25): a threat parried only by moving the attacked piece away is no longer a catch.
+COACH_VERSION = 2
 
 #: The themes the coach counts: tactical motifs, of those that shipped (themes.SHIPPED).
 #: Mate lengths, the descriptive tags (castling, en passant, quiet or defensive moves) and the
@@ -61,6 +62,12 @@ THEME_NAMES = {
     "mateIn1": "Mate in one", "mateIn2": "Mate in two", "promotion": "Promotion",
     "attackingF2F7": "Attack on f2/f7",
 }
+#: The threat side's own names (FIX-B8, ruling D9b, 2026-11-25): "Loose piece" against the user reads "Hanging piece";
+#: the chance side keeps "Loose piece". theme_name / theme_phrase / theme_plural pick by side.
+THREAT_NAMES = {"hangingPiece": "Hanging piece"}
+THREAT_PHRASES = {"hangingPiece": "a hanging piece"}
+THREAT_PLURALS = {"hangingPiece": "hanging pieces"}
+
 #: The phrase a sentence uses ("was a knight fork", "allowed a back-rank mate").
 THEME_PHRASES = {
     "fork": "a fork", "knightFork": "a knight fork", "pin": "a pin", "skewer": "a skewer",
@@ -263,11 +270,26 @@ def parried_threat_at(plies: Sequence, final_lines: Sequence[dict], i: int,
         if plies[i + 1].fen_before.split()[:4] != after.fen().split()[:4]:
             return None
     line = trimmed(nl)
+    if moved_away(nf, line, m.played_uci):
+        return None                                  # ruling D9a: moving the attacked piece away is not a catch
     setup = (plies[i - 1].fen_before, plies[i - 1].played_uci) if i > 0 else (None, None)
     return Moment(ply=m.ply, kind="threat", outcome="caught", via="parried", fen=nf, line=line,
                   played=m.played_uci, key_move=line[0], move_type=move_type(nf, line[0]), mate=nl.mate,
                   gain=0.0 if nl.mate else round(_attacker_gain(nl), 1),
                   themes=line_themes(nf, line, *setup))
+
+
+def moved_away(threat_fen: str, line: Sequence[str], played_uci: str) -> bool:
+    """FIX-B8, ruling D9a (2026-11-25): the threat is one move, a capture, and the user's move took the attacked
+    piece off that square. Such a parry is not counted as caught (ARCH-AUDIT-1 §8 (e): 73.3 % of the caught
+    "Loose piece" threats were this). A parry by any other move (defending the piece, blocking, a counter-threat,
+    moving another piece) still counts, and so does moving away from a threat longer than one move."""
+    if len(line) != 1:
+        return False
+    key = chess.Move.from_uci(line[0])
+    if not chess.Board(threat_fen).is_capture(key):
+        return False
+    return chess.Move.from_uci(played_uci).from_square == key.to_square
 
 
 def user_plies(plies: Sequence, player_color: str) -> Iterable[int]:
@@ -548,6 +570,19 @@ def move_label(fen: str, uci: str, numbered: bool = True) -> str:
     return f"{b.fullmove_number}{'.' if b.turn == chess.WHITE else '...'} {san}"
 
 
+def theme_name(kind: str, theme: str) -> str:
+    """The name a screen shows for a theme on one side (ruling D9b): "Hanging piece" against the user."""
+    return (THREAT_NAMES.get(theme) if kind == "threat" else None) or THEME_NAMES.get(theme, theme)
+
+
+def theme_phrase(kind: str, theme: str) -> str:
+    return (THREAT_PHRASES.get(theme) if kind == "threat" else None) or THEME_PHRASES[theme]
+
+
+def theme_plural(kind: str, theme: str) -> str:
+    return (THREAT_PLURALS.get(theme) if kind == "threat" else None) or THEME_PLURALS[theme]
+
+
 def primary(themes: Sequence[str], focus: Iterable[str] = ()) -> str | None:
     f = set(focus)
     for t in themes:
@@ -586,12 +621,12 @@ def sentence(m: Moment, theme: str, fen_before: str) -> str:
     if m.outcome == "missed":
         theirs = move_label(m.fen, m.key_move)
         if theme == "hangingPiece":
-            return f"{played} left a piece loose: {theirs} takes it."
+            return f"{played} left a piece hanging: {theirs} takes it."
         phrase = THEME_PHRASES[theme]
         return f"{played} allowed {phrase}, starting with {theirs}." if multi else f"{played} allowed {phrase}: {theirs}."
     theirs = move_label(m.fen, m.key_move, numbered=False)
     if theme == "hangingPiece":
-        return f"{played} dealt with a loose piece ({theirs} would have taken it)."
+        return f"{played} dealt with a hanging piece ({theirs} would have taken it)."
     return f"{played} dealt with the threat of {THEME_PHRASES[theme]} ({theirs})."
 
 
@@ -609,7 +644,7 @@ def history_line(earlier: Sequence[str]) -> str | None:
 
 
 def item_title(kind: str, theme: str) -> str:
-    plural = THEME_PLURALS[theme]
+    plural = theme_plural(kind, theme)
     if kind == "threat":
         return f"{plural[0].upper()}{plural[1:]} against you"
     return f"Your own {plural}"
@@ -654,12 +689,12 @@ def build_overview(games: Sequence[GameMoments], *, pending: int = 0, behind_max
                     outcomes.append(mo.outcome)
                     rows.append({"gameId": g.game_id, "ply": mo.ply, "date": g.played_at,
                                  "opponent": g.opponent, "move": move_label(g.fens[mo.ply], mo.played),
-                                 "theme": THEME_NAMES[theme], "kind": kind, "outcome": mo.outcome,
+                                 "theme": theme_name(kind, theme), "kind": kind, "outcome": mo.outcome,
                                  "key": key})
         recent = outcomes[-5:]
         items.append({
             "key": key, "kind": kind, "theme": theme, "title": item_title(kind, theme),
-            "name": THEME_NAMES[theme], "missed": c["missed"], "total": c["total"],
+            "name": theme_name(kind, theme), "missed": c["missed"], "total": c["total"],
             "cost": c["cost"], "held": c["held"],
             "recentCaught": recent.count("caught"), "recentTotal": len(recent),
             "rows": list(reversed(rows))[:behind_max], "rowCount": len(rows),
@@ -687,7 +722,7 @@ def report_patterns(game: GameMoments, earlier: dict[str, list[str]], focus_keys
         is_focus = key in fk
         out.append({
             "ply": mo.ply, "kind": mo.kind, "outcome": mo.outcome, "theme": theme,
-            "name": THEME_NAMES[theme], "focus": is_focus,
+            "name": theme_name(mo.kind, theme), "focus": is_focus,
             "sentence": sentence(mo, theme, game.fens[mo.ply]),
             "history": history_line(earlier.get(key, [])) if is_focus else None,
             "move": move_label(game.fens[mo.ply], mo.played),

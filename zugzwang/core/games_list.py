@@ -19,12 +19,14 @@ the month records agree:
   week", a custom range and the like into these).
 - **opening**: a substring of the opening's name or ECO.
 - **search**: a game id names one game exactly ("#483" the app's id; a bare token either the app's
-  or the platform's id), else a substring of the opponent, the opening, the ECO or the date.
+  or the platform's id; a pasted Chess.com or Lichess game link its platform id, FIX-B8 D), else a
+  substring of the opponent, the opening, the ECO or the date.
 
 Months are local calendar months (the sidecar runs on the user's machine).
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
@@ -169,15 +171,34 @@ def load_rows(conn) -> list[Row]:
     return [Row(*tuple(r)) for r in conn.execute(sql)]
 
 
+#: A Chess.com game link: /game/live/<id>, /game/daily/<id>, /live/game/<id>, /daily/game/<id>, /game/<id>, and the
+#: same under /analysis/ (FIX-B8 D, owner note 3).
+_CHESSCOM_URL = re.compile(r"chess\.com/(?:analysis/)?(?:game/(?:live/|daily/)?|live/(?:game/)?|daily/(?:game/)?)(\d+)")
+#: A Lichess game link: lichess.org/<8-character id>, or the 12-character link a player's own view uses (the game's
+#: id and 4 more), with /white, /black or a #ply after it.
+_LICHESS_URL = re.compile(r"lichess\.org/([a-z0-9]{8})(?:[a-z0-9]{4})?(?=$|[/?#])", re.IGNORECASE)
+
+
+def id_from_link(query: str) -> str | None:
+    """The platform game id in a pasted Chess.com or Lichess game link, else None."""
+    q = query.strip()
+    m = _CHESSCOM_URL.search(q) or _LICHESS_URL.search(q)
+    return m.group(1).lower() if m else None
+
+
 def matches_id(query: str, game_id: int, external_id: str | None) -> bool:
     """Whether *query* names the game by id: "#483" is the app's id only; a bare token is the
     app's id or the platform's (chess.com numeric, Lichess 8 characters), exactly, never as a
-    substring ("483" must not pull in every opponent whose name holds 483)."""
+    substring ("483" must not pull in every opponent whose name holds 483); a pasted game link
+    names the platform's id it holds (FIX-B8 D)."""
     q = query.strip().lower()
     if not q:
         return False
     if q.startswith("#"):
         return q[1:] == str(game_id)
+    link = id_from_link(q)
+    if link is not None:
+        return external_id is not None and link == external_id.lower()
     return q == str(game_id) or (external_id is not None and q == external_id.lower())
 
 
@@ -219,7 +240,7 @@ def matches(row: Row, q: GamesQuery, since: datetime | None, until: datetime | N
         return False
     s = q.search.strip().lower()
     if s and not matches_id(s, row.id, row.external_id):
-        if s.startswith("#") or s not in _search_text(row, tz):
+        if s.startswith("#") or id_from_link(s) is not None or s not in _search_text(row, tz):
             return False
     return True
 

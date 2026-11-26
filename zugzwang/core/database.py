@@ -1520,6 +1520,36 @@ class Database:
         ).fetchall()
         return [GameRecord(**dict(r)) for r in rows]
 
+    def games_pending_for_sync(self, source: str, min_depth: int = 0, *,
+                               recent: int, gap_limit: int) -> list[GameRecord]:
+        """What a sync analyses automatically (BETA-PUB Q4; FIX-B8 D, owner note 12), newest first: the pending
+        games among the source's *recent* most recent games, and up to *gap_limit* pending games played on or
+        after the source's oldest game with a satisfying standard run (a gap: a game a later sync brought in,
+        dated inside the span already analysed). Q4's first-sync backlog, every game older than the oldest
+        analysed one, still waits for "Analyse more". Before FIX-B8 a gap was never analysed by any sync, so
+        Settings' "N games from Chess.com waiting for analysis" stayed after every sync."""
+        window = self.games_pending_analysis(source, min_depth, recent=recent)
+        oldest = self._conn.execute(
+            """SELECT MIN(g.played_at) FROM games g
+               WHERE g.source = ? AND {owned}
+                 AND EXISTS (SELECT 1 FROM analysis_runs r WHERE r.game_id = g.id
+                             AND r.completed_at IS NOT NULL AND {standard}
+                             AND (r.engine_name != 'Stockfish' OR r.depth >= ?))"""
+            .replace("{owned}", self._not_foreign_sql()).replace("{standard}", standard_run_sql()),
+            (source, min_depth),
+        ).fetchone()[0]
+        seen = {g.id for g in window}
+        gaps: list[GameRecord] = []
+        if oldest is not None and gap_limit > 0:
+            for g in self.games_pending_analysis(source, min_depth):
+                if len(gaps) >= gap_limit or (g.played_at or "") < oldest:
+                    break               # newest first: the rest are older still
+                if g.id not in seen:
+                    gaps.append(g)
+        out = window + gaps
+        out.sort(key=lambda g: (g.played_at or "", g.id), reverse=True)
+        return out
+
     def games_with_standard_run(self, game_ids, min_depth: int = 0) -> set[int]:
         """Of *game_ids*, those that already have a satisfying complete standard run — the
         test `games_pending_analysis` makes, for an explicit set of games of any source

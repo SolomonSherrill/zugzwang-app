@@ -147,7 +147,47 @@ def test_the_loose_piece_has_its_own_words():
     after.push_uci("e1e2")
     left = CO.Moment(ply=0, kind="threat", outcome="missed", themes=["hangingPiece"], fen=after.fen(),
                      line=["a8a2"], played="e1e2", key_move="a8a2", move_type="other", mate=False, gain=3.0)
-    assert CO.sentence(left, "hangingPiece", FORK_FEN) == "1. Ke2 left a piece loose: 1... Ra2+ takes it."
+    assert CO.sentence(left, "hangingPiece", FORK_FEN) == "1. Ke2 left a piece hanging: 1... Ra2+ takes it."
+
+
+# ── FIX-B8, rulings D9a and D9b (owner, 2026-11-25; COACH.md "Owner rulings, 2026-11-25, second") ──
+
+LOOSE_KNIGHT_FEN = "4k3/4p3/8/3n4/8/8/8/3RK3 b - - 0 1"   # Black to move; Rxd5 would take the knight
+
+
+def _parry(played, next_pv):
+    after = _after(LOOSE_KNIGHT_FEN, played)
+    plies = [_ply(0, LOOSE_KNIGHT_FEN, played, [played, *next_pv[:1]], -20, -20),
+             _ply(1, after, next_pv[0], next_pv, 20, 20)]
+    return CO.parried_threat_at(plies, [], 0, ["d1d5"])
+
+
+def test_d9a_moving_the_attacked_piece_away_from_a_one_move_capture_is_not_a_catch():
+    assert CO.moved_away(CO.null_fen(LOOSE_KNIGHT_FEN), ["d1d5"], "d5f4")
+    assert _parry("d5f4", ["e1e2", "e8d7"]) is None
+
+
+def test_d9a_a_defence_still_counts_as_caught_and_so_does_moving_away_from_a_longer_threat():
+    m = _parry("e7e6", ["e1e2", "e8d7"])
+    assert m is not None and m.outcome == "caught" and m.via == "parried" and m.line == ["d1d5"]
+    assert not CO.moved_away(CO.null_fen(LOOSE_KNIGHT_FEN), ["d1d5"], "e7e6")
+    # a threat longer than one move (the knight fork) is a catch even when the forked rook steps away
+    assert not CO.moved_away(CO.null_fen("r3k3/8/8/1N6/8/8/8/4K3 b - - 0 1"), FORK_LINE, "a8b8")
+    assert CO.COACH_VERSION == 2      # moments refill under the new rule
+
+
+def test_d9b_the_threat_side_says_hanging_piece_the_chance_side_loose_piece():
+    assert CO.theme_name("threat", "hangingPiece") == "Hanging piece"
+    assert CO.theme_name("chance", "hangingPiece") == "Loose piece"
+    assert CO.theme_name("threat", "fork") == "Fork" == CO.theme_name("chance", "fork")
+    assert CO.item_title("threat", "hangingPiece") == "Hanging pieces against you"
+    assert CO.item_title("chance", "hangingPiece") == "Your own loose pieces"
+    m = _parry("e7e6", ["e1e2", "e8d7"])
+    assert CO.sentence(m, "hangingPiece", LOOSE_KNIGHT_FEN) == "1... e6 dealt with a hanging piece (Rxd5 would have taken it)."
+    game = CO.GameMoments(game_id=1, key="g1", played_at="2026-11-01", colour="black", opponent=None,
+                          fens={0: LOOSE_KNIGHT_FEN}, moments=[m])
+    pat = CO.report_patterns(game, {}, set())
+    assert [(p["kind"], p["name"]) for p in pat["items"]] == [("threat", "Hanging piece")]
 
 
 

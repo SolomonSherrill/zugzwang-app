@@ -165,14 +165,8 @@
           {/if}
         {/each}
       {/if}
-      {#if extras?.errorCounts}
-        <div class="row top err">
-          <dt>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-2)" stroke-width="2" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z" /></svg>Tactical errors
-          </dt>
-          {#each cols as s, i (s)}<dd class:opp={i === 1}>{extras.errorCounts[s].tactical}<span class="of">{' '}of {extras.errorCounts[s].errors}</span></dd>{/each}
-        </div>
-      {/if}
+      <!-- "Tactical errors: N of M" removed (ruling D10, FIX-B8, GAME_REPORT.md): it comes back once positional errors
+           can be named. review_extras still sends errorCounts. -->
     </dl>
   </div>
 
@@ -361,18 +355,6 @@
   .row.phase dt {
     color: var(--text-2);
     padding-left: 12px;
-  }
-  .row.err dt {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-weight: 400;
-  }
-  .of {
-    color: var(--text-3);
-  }
-  .row.err.top {
-    padding: 6px 0 4px;
   }
   .big {
     font-size: 17px;

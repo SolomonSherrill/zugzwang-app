@@ -422,9 +422,9 @@
             bind:this={searchEl}
             type="text"
             bind:value={gamesView.filters.search}
-            placeholder="Opponent, opening, ECO or game id"
+            placeholder="Opponent, opening, game id or link"
             aria-label="Search games"
-            title="A Chess.com or Lichess game id, or the app's id (#483), finds that game; Enter opens it."
+            title="A Chess.com or Lichess game id or link, or the app's id (#483), finds that game; Enter opens it."
             spellcheck="false"
             onkeydown={searchKey}
           />

@@ -119,11 +119,12 @@ describe.skipIf(!ready)(`Review: one arrow key, one ply (B6) [${harnessBrowserNa
     await page.close()
   }, 30_000)
 
-  it('the Report prints tactical errors as "N of M", a space before "of" (UI-BUILD-4 E)', async () => {
+  it('the Report has no "Tactical errors" row (ruling D10, FIX-B8; it replaced UI-BUILD-4 E\'s "N of M" check)', async () => {
     const page = await openReview()
-    const cells = page.locator('.row.err dd')
-    await cells.first().waitFor()
-    for (const t of await cells.allTextContents()) expect(t).toMatch(/^\d+ of \d+$/)
+    await page.getByRole('tab', { name: 'Report' }).click()
+    await page.locator('.row.top').first().waitFor()
+    expect(await page.locator('.row.err').count()).toBe(0)
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain('Tactical errors')
     await page.close()
   }, 30_000)
 

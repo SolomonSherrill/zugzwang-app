@@ -37,7 +37,7 @@
   import { alreadyHandled } from '../ui/keyTargets'
   import { BETA } from '../build'
   import {
-    clocksAt, gameMeta, materialSeries, moveLabel, players, sideOfPly, toMoveAt, type Side,
+    clocksAt, gameMeta, materialSeries, moveLabel, players, runFromPly, sideOfPly, toMoveAt, type Side,
   } from './reviewModel'
   import { emptyTree, type NodeId, type VarTree } from '../variations'
   import {
@@ -458,7 +458,7 @@
   const onPly = (d: Record<string, unknown>) => {
     const e = d as unknown as AnalysisPlyEvent
     if (e.gameId !== gameId) return
-    run = { state: 'running', done: e.ply + 1, total: e.total, depth: run?.depth ?? 14 }
+    run = runFromPly(e, run)
   }
   const onDone = (d: Record<string, unknown>) => {
     if ((d as { gameId?: number }).gameId !== gameId) return
@@ -474,7 +474,7 @@
   const onError = (d: Record<string, unknown>) => {
     if (typeof d.fen === 'string') return // a live position's failure: the engine lines show it
     if ((d as { gameId?: number }).gameId !== undefined && (d as { gameId?: number }).gameId !== gameId) return
-    run = { state: 'error', done: run?.done ?? 0, total: n, depth: run?.depth ?? 14, message: String((d as { message?: string }).message ?? 'unknown error') }
+    run = { state: 'error', done: run?.done ?? 0, total: n, depth: (d as { depth?: number | null }).depth ?? run?.depth ?? 14, message: String((d as { message?: string }).message ?? 'unknown error') }
   }
 
   // ── commands, keys ──────────────────────────────────────────────────────
