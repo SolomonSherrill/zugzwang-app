@@ -535,8 +535,20 @@ BRILLIANT_OTHER_PIECE = False
 # thread, the candidates only; the search is not run while labelling, its result is passed
 # in); (3) BR-E2's failure shapes (an endgame, a queen offered, the exchange) excluded.
 # Rebuilt in BRIL-2 (owner 2026-11-26): also not when the material was already lost, trapped or
-# forked (`labelling.already_lost`); off until the owner's second read (review/reads/BRIL-2-eval.md).
-BRILLIANT_EVAL_SOUND = False
+# forked (`labelling.already_lost`). ON since classifier version 11 (BRIL-3, owner 2026-11-27): the owner's second
+# read (review/reads/BRIL-2-verdicts.md) found 17 of 20 brilliant, past BR-G's 12. A ply whose depth-22 search is not
+# stored yet keeps version 10's label; the app's backfill (core/brilliant_backfill.py) runs the search and relabels it.
+BRILLIANT_EVAL_SOUND = True
+# T1 (BRIL-3, owner 2026-11-27; BRILLIANT.md "BRIL-3"): BR-F's "already lost" also catches a piece lost on the
+# opponent's next move after its best retreat, or where it stands (`labelling._trapped_next`). OFF, by the ruling's
+# own condition: it excludes 12. Nxb6 but not 18. Nxb5, whose bishop's retreat (Bb3, then ...a4) still has a safe
+# square on g8 by the SEE and two-ply tools (review/scratch/bril3/probe_t1.out). It kept every brilliant read.
+BRILLIANT_T1 = False
+# M1 (BRIL-3, owner 2026-11-27; BRILLIANT.md "BRIL-3"): "The only move that avoids mate." on a brilliant move's
+# explanation, only when its stored proof holds (every other legal move, searched at depth 14, gives the opponent a
+# forced mate; core/brilliant_backfill.only_move_proof). OFF until the owner reads review/reads/BRIL-3-only-move.md;
+# the proofs are computed and stored either way.
+ONLY_MOVE_AVOIDS_MATE = False
 BRILLIANT_LINE_DOWN_PLIES = 5
 BRILLIANT_VERIFY_DEPTH = 22
 

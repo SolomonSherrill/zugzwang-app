@@ -162,6 +162,10 @@ class MoveAnalysis:
     verify_cp: int | None = None
     verify_mate: int | None = None
     verify_depth: int | None = None
+    # BRIL-3 C (owner, 2026-11-27): M1's proof ("The only move that avoids mate."), written by the brilliant
+    # backfill for brilliant plies only (`core/brilliant_backfill.only_move_proof`); None: not searched (migration v26).
+    avoids_mate_depth: int | None = None
+    avoids_mate_json: str | None = None
 
 
 @dataclass
@@ -292,7 +296,7 @@ class GameRecord:
 #: itself by probing `PRAGMA table_info`, which is what lets them run
 #: unconditionally on every open and stay correct on a database whose stored
 #: version says nothing useful. Bump this when adding a migration.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -641,6 +645,7 @@ class Database:
         self._migrate_v23()
         self._migrate_v24()
         self._migrate_v25()
+        self._migrate_v26()
         # Stamped last, and overwritten rather than inserted-if-absent: the old
         # `INSERT OR IGNORE` meant the first value a database ever received was
         # the only one it ever had. On the live database that value was '1',
@@ -954,6 +959,20 @@ class Database:
                 moments_json   TEXT    NOT NULL,
                 computed_at    TEXT    NOT NULL
             )""")
+
+    def _migrate_v26(self) -> None:
+        # BRIL-3 C (owner, 2026-11-27): M1's proof per brilliant ply (`avoids_mate_depth`, NULL: not searched;
+        # `avoids_mate_json`, core/brilliant_backfill.only_move_proof) and the brilliant backfill's key per run
+        # (`analysis_runs.brilliant_backfill`, "<classifier version>.<backfill version>"; NULL: not backfilled). Both
+        # die with their run. Additive, nullable, no backfill here: the app's job fills them.
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(move_analyses)").fetchall()}
+        if "avoids_mate_depth" not in cols:
+            self._conn.execute("ALTER TABLE move_analyses ADD COLUMN avoids_mate_depth INTEGER")
+        if "avoids_mate_json" not in cols:
+            self._conn.execute("ALTER TABLE move_analyses ADD COLUMN avoids_mate_json TEXT")
+        rcols = {row[1] for row in self._conn.execute("PRAGMA table_info(analysis_runs)").fetchall()}
+        if "brilliant_backfill" not in rcols:
+            self._conn.execute("ALTER TABLE analysis_runs ADD COLUMN brilliant_backfill TEXT")
 
     def _migrate_v25(self) -> None:
         # BRIL-2 B (owner, 2026-11-26): BR-F's depth-22 verification result per candidate ply
@@ -2377,7 +2396,8 @@ class Database:
                    score_before_cp, score_before_mate, score_after_cp, score_after_mate,
                    second_best_uci, second_best_cp, second_best_mate,
                    classification, is_book, lines_json, after_search_cp, after_search_mate,
-                   hard_only_move, verify_cp, verify_mate, verify_depth
+                   hard_only_move, verify_cp, verify_mate, verify_depth,
+                   avoids_mate_depth, avoids_mate_json
             FROM move_analyses WHERE run_id=? ORDER BY ply
             """,
             (run_id,),
@@ -2409,6 +2429,8 @@ class Database:
                 verify_cp=r["verify_cp"],
                 verify_mate=r["verify_mate"],
                 verify_depth=r["verify_depth"],
+                avoids_mate_depth=r["avoids_mate_depth"],
+                avoids_mate_json=r["avoids_mate_json"],
             )
             for r in rows
         ]

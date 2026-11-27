@@ -23,6 +23,11 @@ export interface CoachJob {
   done: number
   total: number
 }
+/** BRIL-3 C: the brilliant backfill (core/brilliant_backfill.py), runs read of runs to read */
+export interface BrilliantJob {
+  done: number
+  total: number
+}
 export interface PuzzleJob {
   run: number
   kind: 'lichess' | 'file' | null
@@ -35,6 +40,7 @@ export interface Jobs {
   analysis: AnalysisJob | null
   sync: SyncJob | null
   coach: CoachJob | null
+  brilliant: BrilliantJob | null
   puzzles: PuzzleJob | null
   /** run ids whose end was announced */
   endedSync: number[]
@@ -42,13 +48,15 @@ export interface Jobs {
   endedAnalysis: number[]
 }
 
-export const EMPTY: Jobs = { analysis: null, sync: null, coach: null, puzzles: null, endedSync: [], endedPuzzles: [], endedAnalysis: [] }
+export const EMPTY: Jobs = { analysis: null, sync: null, coach: null, brilliant: null, puzzles: null, endedSync: [], endedPuzzles: [], endedAnalysis: [] }
 
 /** the background_jobs RPC's answer (sidecar/main.py rpc_background_jobs) */
 export interface JobsSnapshot {
   sync: { running: boolean; run: number; kind: 'sync' | 'analyse' | null; progress: { phase: 'fetching' | 'analyzing'; done: number; total: number } | null }
   analysis: AnalysisJob | null
   coach: CoachJob | null
+  /** absent from a sidecar older than BRIL-3 */
+  brilliant?: BrilliantJob | null
   puzzles: { running: boolean; run: number; kind: 'lichess' | 'file' | null; progress: { bytes: number; totalBytes: number | null; imported: number } | null }
 }
 
@@ -66,6 +74,7 @@ export function fromSnapshot(j: Jobs, s: JobsSnapshot): Jobs {
   if (a && !j.endedAnalysis.includes(a.runId) && (!j.analysis || j.analysis.runId <= a.runId)) out.analysis = { ...a }
   else if (!a && j.analysis && j.analysis.done === 0) out.analysis = null
   out.coach = s.coach && s.coach.total > s.coach.done ? { ...s.coach } : null
+  out.brilliant = s.brilliant && s.brilliant.total > s.brilliant.done ? { ...s.brilliant } : null
   const p = s.puzzles
   if (p.running && !j.endedPuzzles.includes(p.run) && (!j.puzzles || j.puzzles.run <= p.run))
     out.puzzles = { run: p.run, kind: p.kind, bytes: p.progress?.bytes ?? 0, totalBytes: p.progress?.totalBytes ?? null, imported: p.progress?.imported ?? 0, finishing: false }
@@ -113,6 +122,11 @@ export function applyEvent(j: Jobs, event: string, d: Record<string, unknown>): 
       const total = num(d.total) ?? 0
       return { ...j, coach: d.finished || total <= done ? null : { done, total } }
     }
+    case 'brilliant_progress': {
+      const done = num(d.done) ?? 0
+      const total = num(d.total) ?? 0
+      return { ...j, brilliant: d.finished || total <= done ? null : { done, total } }
+    }
     case 'puzzle_import_progress': {
       if (run !== undefined && j.endedPuzzles.includes(run)) return j
       return {
@@ -144,12 +158,13 @@ export const EVENTS = [
   'sync_progress', 'sync_finished', 'sync_cancelled',
   'analysis_ply', 'analysis_done', 'analysis_cancelled', 'analysis_error',
   'coach_progress',
+  'brilliant_progress',
   'puzzle_import_progress', 'puzzle_import_finishing', 'puzzle_import_done', 'puzzle_import_cancelled', 'puzzle_import_error',
 ] as const
 
 export type JobTarget = { route: 'review'; gameId: number } | { route: 'games' } | { route: 'coach' } | { route: 'puzzles' }
 export interface JobLine {
-  key: 'analysis' | 'sync' | 'puzzles' | 'coach'
+  key: 'analysis' | 'sync' | 'puzzles' | 'coach' | 'brilliant'
   text: string
   /** 0..1, or null for no bar */
   fraction: number | null
@@ -184,7 +199,13 @@ export function coachText(c: CoachJob): string {
   return `The coach is reading your games: ${fmt(c.done)} of ${fmt(c.total)}`
 }
 
-/** the lines to show, most specific first: a game's analysis, the sync, a puzzle download, the coach's reading */
+/** BRIL-3 C: "Checking brilliant moves: 120 of 3,722 games" */
+export function brilliantText(b: BrilliantJob): string {
+  return `Checking brilliant moves: ${fmt(b.done)} of ${fmt(b.total)} games`
+}
+
+/** the lines to show, most specific first: a game's analysis, the sync, a puzzle download, the coach's reading, the
+ *  brilliant backfill */
 export function jobLines(j: Jobs): JobLine[] {
   const out: JobLine[] = []
   if (j.analysis) {
@@ -200,6 +221,8 @@ export function jobLines(j: Jobs): JobLine[] {
     out.push({ key: 'puzzles', text: puzzleText(p), fraction: p.totalBytes && !p.finishing ? p.bytes / p.totalBytes : null, target: { route: 'puzzles' } })
   }
   if (j.coach) out.push({ key: 'coach', text: coachText(j.coach), fraction: j.coach.total ? j.coach.done / j.coach.total : null, target: { route: 'coach' } })
+  if (j.brilliant)
+    out.push({ key: 'brilliant', text: brilliantText(j.brilliant), fraction: j.brilliant.total ? j.brilliant.done / j.brilliant.total : null, target: { route: 'games' } })
   return out
 }
 

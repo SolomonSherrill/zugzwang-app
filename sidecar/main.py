@@ -71,6 +71,7 @@ from zugzwang.core.engine_supervisor import (
     is_engine_death,
 )
 from zugzwang.core.explain import RULE_VERSION, stored_ply_row
+from zugzwang.core.brilliant_backfill import only_move_sentence
 from zugzwang.core.compose import explain_ply_full
 from zugzwang.core.explain_text import UNKNOWN_SIDE
 from zugzwang.core import provenance
@@ -506,6 +507,72 @@ class AnalysisRunner:
         stats = {"runs": len(run_ids), "computed": 0, "t0": time.monotonic()}
         self._jobs.put(("coach", (db_path, list(run_ids), on_rows, on_done, stats, None)))
 
+    #: Runs per brilliant backfill job (BRIL-3 C). Most runs have no candidate and cost a labelling pass (tens of ms);
+    #: a candidate costs a depth-22 search (BRIL-2 measured a median of 2.1 s, a maximum of 16.7 s), so a game the user
+    #: asks to analyse waits for one batch at most.
+    BRILLIANT_BATCH = 10
+    #: While an interactive screen is open (Play, Review, Puzzles: EngineBudget), the backfill waits this long and looks
+    #: again, so its depth-22 searches never compete with the screen the user is on.
+    BRILLIANT_YIELD_S = 5.0
+
+    def refill_brilliant(self, db_path: Path, run_ids: list[int], on_result, on_done,
+                         interactive=lambda: False) -> None:
+        """BRIL-3 C: BR-F's verification search and M1's proof for complete runs that lack them
+        (core/brilliant_backfill.py), on this thread and engine, a batch at a time behind any game analysis, waiting
+        while *interactive()* says a screen needs the engines. *on_result(result)* (one per run) and *on_done(stats)*
+        are posted to the app thread, which writes."""
+        stats = {"runs": len(run_ids), "done": 0, "candidates": 0, "searches": 0, "searchSeconds": 0.0,
+                 "proofs": 0, "proven": 0, "failed": 0, "t0": time.monotonic()}
+        self._jobs.put(("brilliant", (db_path, list(run_ids), on_result, on_done, stats, None, interactive)))
+
+    def _do_brilliant(self, db_path, todo, on_result, on_done, stats, ro, interactive) -> None:
+        from zugzwang.core import brilliant_backfill as BB
+        if self._stopping:
+            if ro is not None:
+                ro.close()
+            return
+        payload = (db_path, todo, on_result, on_done, stats, ro, interactive)
+        if interactive():
+            # yield: look again later, behind whatever is queued then (a timer, never a sleep on this thread)
+            t = threading.Timer(self.BRILLIANT_YIELD_S, lambda: self._jobs.put(("brilliant", payload)))
+            t.daemon = True
+            t.start()
+            return
+        if ro is None:
+            ro = Database(db_path, read_only=True)
+        batch, rest = todo[:self.BRILLIANT_BATCH], todo[self.BRILLIANT_BATCH:]
+        for i, run_id in enumerate(batch):
+            if self._stopping or interactive():
+                rest = batch[i:] + rest
+                break
+            try:
+                loaded = BB.load_run(ro, run_id)
+                if loaded is None:
+                    stats["done"] += 1
+                    continue
+                plies, final, ratings = loaded
+                res = BB.compute_run(plies, final, ratings, run_id, self._engine,
+                                     interrupted=lambda: self._stopping)
+            except Exception:
+                logger.exception("brilliant backfill for run %s not computed", run_id)
+                stats["failed"] += 1
+                stats["done"] += 1
+                continue
+            stats["done"] += 1
+            stats["candidates"] += len(res.candidates)
+            stats["searches"] += res.searches
+            stats["searchSeconds"] = round(stats["searchSeconds"] + res.seconds, 1)
+            stats["proofs"] += len(res.proofs)
+            stats["proven"] += sum(1 for p in res.proofs.values() if p.get("proven"))
+            stats["failed"] += int(res.failed)
+            self._post(lambda r=res, d=stats["done"]: on_result(r, d))
+        if rest and not self._stopping:
+            self._jobs.put(("brilliant", (db_path, rest, on_result, on_done, stats, ro, interactive)))
+            return
+        ro.close()
+        stats["seconds"] = round(time.monotonic() - stats.pop("t0"), 1)
+        self._post(lambda st=dict(stats): on_done(st))
+
     def cancel(self) -> None:
         self._cancel = True
 
@@ -578,9 +645,14 @@ class AnalysisRunner:
                     self._do_facts(*payload)
                 elif kind == "coach":
                     self._do_coach(*payload)
+                elif kind == "brilliant":
+                    self._do_brilliant(*payload)
             except Exception as exc:
                 if kind == "coach":
                     logger.exception("coach refill failed")
+                    continue
+                if kind == "brilliant":
+                    logger.exception("brilliant backfill failed")
                     continue
                 if kind == "facts":
                     logger.exception("pattern facts refill failed")
@@ -1924,7 +1996,7 @@ class Server:
         self._sync = SyncRunner(self.post_call, self._budget)
         self._insights: InsightsRunner | None = None  # created in _boot, needs db_path
         self._relabel = RelabelRunner(
-            on_done=lambda: self.post_call(self._start_facts_refill))
+            on_done=lambda: self.post_call(self._after_relabel))
         self._books = BookRunner(self.post_call)
         # Friends (FRIENDS-1 C): created here, its threads start at the first friends_ call
         self._friends = FriendsRunner(self.post_call, _emit, lambda: self._db_path)
@@ -1933,7 +2005,11 @@ class Server:
         self._facts_refill_running = False
         # COACH-1 C: the coach's moments refill (analysis thread) and the overview (its own thread)
         self._coach: CoachRunner | None = None       # created in _boot, needs db_path
-        self._sync.on_finished = self._start_coach_refill
+        self._sync.on_finished = self._after_sync
+        # BRIL-3 C: the brilliant backfill (analysis thread); its reading for background_jobs (None: not running)
+        self._brilliant_running = False
+        self._brilliant_again = False
+        self._brilliant_reading: dict | None = None
         self._coach_refill_running = False
         self._coach_again = False
         # COACH-2 D (ruling CB1): what background_jobs reports. A game analysis by its run id (the latest is
@@ -2016,6 +2092,74 @@ class Server:
                 self._refill_dirty_facts()
 
         self._analysis.refill_facts(self._db_path, todo, on_rows, on_done)
+
+    def _after_relabel(self) -> None:
+        """A relabel on open finished (RelabelRunner, posted here): the pattern facts it made stale, then the brilliant
+        backfill of the runs now at this classifier version. App thread."""
+        self._start_facts_refill()
+        try:
+            self._start_brilliant_backfill()
+        except Exception:
+            logger.exception("brilliant backfill not started")
+
+    def _after_sync(self) -> None:
+        """A sync finished: the coach's moments, then the brilliant backfill of what it analysed. App thread."""
+        self._start_coach_refill()
+        try:
+            self._start_brilliant_backfill()
+        except Exception:
+            logger.exception("brilliant backfill not started")
+
+    def _start_brilliant_backfill(self) -> None:
+        """BRIL-3 C (owner, 2026-11-27; BRILLIANT.md "BRIL-3"): BR-F's depth-22 search for every candidate of a complete
+        run at this classifier version that has none stored, the run relabelled, and M1's proof for its brilliant
+        plies (core/brilliant_backfill.py), on the analysis thread in small batches, waiting while Play, Review or
+        Puzzles is open (EngineBudget's interactive screens). Dev and beta alike. A run at an older classifier version
+        waits for its relabel. Asked again while running: once more when it ends. App thread."""
+        from zugzwang.core import brilliant_backfill as BB
+        if self._db is None or self._db_path is None:
+            return
+        if self._brilliant_running:
+            self._brilliant_again = True
+            return
+        todo = BB.runs_to_backfill(self._db._conn)
+        if not todo:
+            return
+        self._brilliant_running = True
+        logger.info("brilliant backfill: %d runs (key %s)", len(todo), BB.backfill_key())
+        self._brilliant_reading = {"done": 0, "total": len(todo)}
+        _emit("brilliant_progress", dict(self._brilliant_reading))
+        changed = {"labels": 0, "runs": 0}
+
+        def on_result(res, done: int) -> None:
+            try:
+                n = BB.apply(self._db._conn, res)
+            except Exception:
+                logger.exception("brilliant backfill: write failed for run %s", res.run_id)
+                n = 0
+            if n:
+                changed["labels"] += n
+                changed["runs"] += 1
+                self._facts_dirty.add(res.run_id)       # its labels changed: its pattern facts are stale
+            self._brilliant_reading = {"done": min(done, len(todo)), "total": len(todo)}
+            if done == len(todo) or done % 25 == 0 or n:
+                _emit("brilliant_progress", dict(self._brilliant_reading))
+
+        def on_done(stats: dict) -> None:
+            self._brilliant_running = False
+            self._brilliant_reading = None
+            stats.update(labelsChanged=changed["labels"], runsChanged=changed["runs"])
+            logger.info("brilliant backfill done: %s", stats)
+            _emit("brilliant_progress", {"done": len(todo), "total": len(todo), "finished": True,
+                                         "labelsChanged": changed["labels"]})
+            if self._facts_dirty:
+                self._refill_dirty_facts()
+            if self._brilliant_again:
+                self._brilliant_again = False
+                self._start_brilliant_backfill()
+
+        self._analysis.refill_brilliant(self._db_path, todo, on_result, on_done,
+                                        interactive=self._budget._interactive)
 
     def _start_coach_refill(self) -> None:
         """COACH-1 C: compute the coach's moments for every standard run of the user's that has none at
@@ -2287,6 +2431,13 @@ class Server:
             self._start_coach_refill()
         except Exception:
             logger.exception("coach refill not started")
+        # BRIL-3 C: the brilliant backfill of runs at this classifier version; a relabel in progress starts it when
+        # it finishes (_after_relabel)
+        try:
+            if self._relabel.state != "running":
+                self._start_brilliant_backfill()
+        except Exception:
+            logger.exception("brilliant backfill not started")
         # BOOK-DL: a book switch the app closed during resumes (its download is done; it
         # backs up again and relabels what is left).
         try:
@@ -2745,7 +2896,10 @@ class Server:
             # (reversed precedence, owner 2026-11-09, provisional), else the rule sentences.
             "claims": [{"type": "claim", "source": src, "text": t,
                         **({"line": list(full.pv_claim_line)} if src == "engine_line" else {})}
-                       for src, t in full.shown_claims],
+                       for src, t in full.shown_claims]
+            # BRIL-3 C, M1: "The only move that avoids mate." after them, on a brilliant ply whose stored proof holds;
+            # only while ONLY_MOVE_AVOIDS_MATE is on (off until the owner's read, review/reads/BRIL-3-only-move.md)
+            + [{"type": "claim", "source": "avoids_mate", "text": t} for t in [only_move_sentence(match)] if t],
             "descriptions": [{"type": "description", "descriptor": k, "text": str(t)}
                              for k, t in full.descriptions],
             "bestSan": full.best_san,
@@ -2934,6 +3088,10 @@ class Server:
                 self._start_coach_refill()        # COACH-1 C: this game's moments, then the overview
             except Exception:
                 logger.exception("coach refill not started")
+            try:
+                self._start_brilliant_backfill()  # BRIL-3 C: M1's proof for this run's brilliants
+            except Exception:
+                logger.exception("brilliant backfill not started")
         elif kind == "cancelled":
             _emit("analysis_cancelled", {"gameId": game_id, **tag})
         elif kind == "error":
@@ -3151,6 +3309,8 @@ class Server:
                      "progress": sync.last_progress if sync.running() else None},
             "analysis": dict(analysis) if analysis else None,
             "coach": dict(self._coach_reading) if self._coach_reading else None,
+            # BRIL-3 C: the brilliant backfill's reading by runs done of runs to read
+            "brilliant": dict(self._brilliant_reading) if getattr(self, "_brilliant_reading", None) else None,
             "puzzles": {"running": imp.running(), "run": imp.run_id, "kind": imp.kind if imp.running() else None,
                         "progress": imp.last_progress if imp.running() else None},
         }

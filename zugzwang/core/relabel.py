@@ -111,6 +111,19 @@ def _hom(v) -> int | None:
 
 def relabel_run(con: sqlite3.Connection, run_id: int) -> int:
     """Relabel one run in its own transaction; returns how many labels changed."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        changed = relabel_rows(con, run_id)
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    return changed
+
+
+def relabel_rows(con: sqlite3.Connection, run_id: int) -> int:
+    """Relabel one run from its stored rows inside the caller's transaction (`relabel_run`; the brilliant backfill,
+    `core/brilliant_backfill.apply`); returns how many labels changed."""
     fl = con.execute("SELECT r.final_lines_json, g.source, g.pgn FROM analysis_runs r "
                      "JOIN games g ON g.id = r.game_id WHERE r.id=?", (run_id,)).fetchone()
     if fl is None:
@@ -123,23 +136,17 @@ def relabel_run(con: sqlite3.Connection, run_id: int) -> int:
                                ratings=labelling.game_ratings(fl[1], fl[2]))
     summ = labelling.summary(new)
     changed = sum(1 for old, m in zip(plies, new) if old.classification != m.classification)
-    con.execute("BEGIN IMMEDIATE")
-    try:
-        con.executemany(
-            "UPDATE move_analyses SET classification=?, score_after_cp=?, "
-            "score_after_mate=?, after_search_cp=?, after_search_mate=?, "
-            "hard_only_move=? WHERE id=?",
-            [(m.classification, m.score_after_cp, m.score_after_mate, m.after_search_cp,
-              m.after_search_mate, _hom(m.hard_only_move), r[0]) for r, m in zip(rows, new)])
-        con.execute(
-            "UPDATE analysis_runs SET payload_json=?, white_accuracy=?, black_accuracy=?, "
-            "classifier_version=? WHERE id=?",
-            (json.dumps(summ), summ["white"]["accuracy"], summ["black"]["accuracy"],
-             CLASSIFIER_VERSION, run_id))
-        con.execute("COMMIT")
-    except BaseException:
-        con.execute("ROLLBACK")
-        raise
+    con.executemany(
+        "UPDATE move_analyses SET classification=?, score_after_cp=?, "
+        "score_after_mate=?, after_search_cp=?, after_search_mate=?, "
+        "hard_only_move=? WHERE id=?",
+        [(m.classification, m.score_after_cp, m.score_after_mate, m.after_search_cp,
+          m.after_search_mate, _hom(m.hard_only_move), r[0]) for r, m in zip(rows, new)])
+    con.execute(
+        "UPDATE analysis_runs SET payload_json=?, white_accuracy=?, black_accuracy=?, "
+        "classifier_version=? WHERE id=?",
+        (json.dumps(summ), summ["white"]["accuracy"], summ["black"]["accuracy"],
+         CLASSIFIER_VERSION, run_id))
     return changed
 
 

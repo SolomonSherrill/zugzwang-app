@@ -50,6 +50,14 @@ describe('the background jobs store (COACH-2 D, ruling CB1)', () => {
     const j = run(EMPTY, ['sync_progress', { phase: 'fetching', done: 0, total: 0, run: 3 }])
     expect(fromSnapshot(j, snap({ sync: { running: false, run: 3, kind: 'sync', progress: null } })).sync).toBeNull()
   })
+  it('the brilliant backfill (BRIL-3 C): its line, its end, the snapshot', () => {
+    let j = run(EMPTY, ['brilliant_progress', { done: 120, total: 3722 }])
+    expect(jobLines(j)[0]).toEqual({ key: 'brilliant', text: 'Checking brilliant moves: 120 of 3,722 games', fraction: 120 / 3722, target: { route: 'games' } })
+    j = run(j, ['brilliant_progress', { done: 3722, total: 3722, finished: true }])
+    expect(j.brilliant).toBeNull()
+    expect(fromSnapshot(EMPTY, snap({ brilliant: { done: 5, total: 9 } })).brilliant).toEqual({ done: 5, total: 9 })
+    expect(fromSnapshot(EMPTY, snap()).brilliant).toBeNull()        // a sidecar older than BRIL-3 sends none
+  })
   it('the coach reading, and a puzzle download', () => {
     let j = run(EMPTY, ['coach_progress', { done: 10, total: 412 }])
     expect(jobLines(j)[0].text).toBe('The coach is reading your games: 10 of 412')

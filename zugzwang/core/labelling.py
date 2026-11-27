@@ -715,6 +715,45 @@ def _threatened(null: chess.Board, sq: int) -> list[chess.Move]:
             if m.to_square == sq and null.is_capture(m) and see(null, m) >= 1.0]
 
 
+def _trapped_next(pos: chess.Board, sq: int) -> bool:
+    """T1 (BRIL-3, owner 2026-11-27): in *pos* (the opponent to move), the opponent has a reply after which the
+    mover's piece on *sq* is lost: the reply hangs nothing by SEE on its own square (no capture of it by the mover
+    wins a pawn or more), and then, with the mover's turn passed, a capture of the piece wins a pawn or more by SEE
+    and no move of the piece reaches a safe square (`_reaches_safety`). The ruling's two misses: 18. Nxb5 (after the
+    bishop's retreat to b3, ...a4 traps it) and 12. Nxb6 (the knight on a8 stays, ...Bb7 wins it)."""
+    for reply in list(pos.legal_moves):
+        if reply.to_square == sq:
+            continue                    # a capture of the piece itself: `_reaches_safety`'s question
+        pos.push(reply)
+        try:
+            if pos.piece_at(sq) is None:
+                continue
+            if any(pos.is_capture(m) and see(pos, m) >= 1.0
+                   for m in pos.legal_moves if m.to_square == reply.to_square):
+                continue                # the trapping move hangs: not a threat the mover must answer
+            null = pos.copy(stack=False)
+            null.push(chess.Move.null())
+            if not _threatened(null, sq):
+                continue
+            if not any(_reaches_safety(pos, m) for m in pos.legal_moves if m.from_square == sq):
+                return True
+        finally:
+            pos.pop()
+    return False
+
+
+def _lasting_safety(board: chess.Board, move: chess.Move) -> bool:
+    """The piece's *move* reaches a safe square (`_reaches_safety`) and, with T1 on (`BRILLIANT_T1`), is not lost on
+    the opponent's next move there (`_trapped_next`)."""
+    if not _reaches_safety(board, move):
+        return False
+    if not C.BRILLIANT_T1:
+        return True
+    pos = board.copy(stack=False)
+    pos.push(move)
+    return not _trapped_next(pos, move.to_square)
+
+
 def already_lost(board: chess.Board, move: chess.Move) -> str | None:
     """BR-F rebuilt (BRIL-2, owner 2026-11-26): the material the sacrifice gives up was already lost
     before *move*. With the mover's turn passed (a null move), the opponent wins a piece of the
@@ -740,7 +779,9 @@ def already_lost(board: chess.Board, move: chess.Move) -> str | None:
     threats = _threatened(null, sq)
     if any(_forker_threat(null, m.from_square) >= 1.0 for m in threats):
         return "forked"
-    if threats and not any(_reaches_safety(board, m) for m in board.legal_moves if m.from_square == sq):
+    # T1 (BRIL-3): staying is lost too when the opponent's next move traps the piece where it stands
+    lost_staying = bool(threats) or (C.BRILLIANT_T1 and _trapped_next(null, sq))
+    if lost_staying and not any(_lasting_safety(board, m) for m in board.legal_moves if m.from_square == sq):
         return "trapped"
     gives_up = -net_on_landing(board, move)
     for other in board.piece_map():
@@ -749,13 +790,13 @@ def already_lost(board: chess.Board, move: chess.Move) -> str | None:
             continue
         if _VALUE[piece.piece_type] < gives_up or not _threatened(null, other):
             continue
-        if not any(_reaches_safety(board, m) for m in board.legal_moves if m.from_square == other):
+        if not any(_lasting_safety(board, m) for m in board.legal_moves if m.from_square == other):
             return "trapped"
     return None
 
 def eval_sound_candidate(ma: MoveAnalysis, line: Sequence[str],
                          after: tuple[int | None, int | None]) -> bool:
-    """BR-F (BRIL-1; switch `BRILLIANT_EVAL_SOUND`, off) without its search: for a piece offered on
+    """BR-F (BRIL-1; switch `BRILLIANT_EVAL_SOUND`, on since version 11, BRIL-3) without its search: for a piece offered on
     the landing square that B4 and B4b do not prove, the depth-14 after-score is scored (X1c then
     holds it within WPL_EXCELLENT of the before-score: option (e)), check (1)
     `down_along_line`, check (3) no `failure_shape`, and (BRIL-2's rebuild) the material was not
@@ -861,9 +902,10 @@ def brilliant(ma: MoveAnalysis,
 
     Version 9 (BRIL-1, owner 2026-11-25): **D2** excludes capturing the piece that threatened at
     least what the move gives up (`captures_the_forker`). Version 10 (BRIL-2): **BR-A/C** reads
-    the 0.90 / 0.30 bounds on the rating-aware curve (`bound_win_prob`, the mover's *rating*). Behind switches, off:
-    **BR-F** passes B4 by the engine's evaluation (`eval_sound_candidate` and `eval_holds` on
-    *verify*'s search); **BR-E** passes for another piece left en prise (`other_piece_offered`).
+    the 0.90 / 0.30 bounds on the rating-aware curve (`bound_win_prob`, the mover's *rating*). Version 11
+    (BRIL-3): **BR-F** passes B4 by the engine's evaluation (`eval_sound_candidate` and `eval_holds` on
+    *verify*'s search; switch `BRILLIANT_EVAL_SOUND`, on). Behind its switch, off: **BR-E** passes for another piece
+    left en prise (`other_piece_offered`).
 
     Checking sacrifices are included (ruling 9: "keep checking sacrifices, even if it's a
     book move it's still brilliant"); B4's minimax answers checks."""
