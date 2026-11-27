@@ -32,16 +32,19 @@ expected for this build.
 
 ### macOS
 
-1. Open the `.dmg` and drag **Zugzwang** into **Applications**.
-2. Open Zugzwang from Applications. macOS says it cannot verify the developer — click
-   **Done** (or **Cancel**), not *Move to Bin*.
-3. Open **System Settings → Privacy & Security**, scroll to the message about Zugzwang,
-   and click **Open Anyway**; confirm with your password. Then open the app again.
+**Open it with System Settings → Privacy & Security → Open Anyway.** Zugzwang isn't notarized by Apple yet. This is a one-time step; updates install normally afterwards.
+
+1. Open the `.dmg` and drag **Zugzwang** into **Applications**, then open Zugzwang from
+   Applications. macOS says it cannot verify the developer: click **Done** (or **Cancel**),
+   not *Move to Bin*.
+2. Open **System Settings → Privacy & Security**, scroll down to the message about Zugzwang,
+   and click **Open Anyway**; confirm with your password. Then open Zugzwang again.
    (If nothing at all happens when you open Zugzwang — no window, no warning — go straight
    to this step.)
 
-If macOS instead says the app "is damaged and can't be opened", run this once in
-**Terminal**, then open it again:
+Only if that does not work (there is no **Open Anyway**, or macOS says the app "is damaged and
+can't be opened"): run this once in **Terminal**, then open Zugzwang again. It removes the
+download warning from Zugzwang alone, nothing else.
 
 ```
 xattr -dr com.apple.quarantine /Applications/Zugzwang.app

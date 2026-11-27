@@ -154,9 +154,11 @@ def test_the_sentence_only_with_the_switch_a_brilliant_and_a_proof(monkeypatch):
                       score_before_mate=None, score_after_cp=0, score_after_mate=None, second_best_uci=None,
                       second_best_cp=None, second_best_mate=None, classification="brilliant", is_book=False,
                       avoids_mate_depth=14, avoids_mate_json=json.dumps({"proven": True}))
-    assert C.ONLY_MOVE_AVOIDS_MATE is False and BB.only_move_sentence(ma) is None      # off until the owner's read
-    monkeypatch.setattr(C, "ONLY_MOVE_AVOIDS_MATE", True)
+    assert C.ONLY_MOVE_AVOIDS_MATE is True                                  # on since FIX-B9 (owner, 2026-11-27)
     assert BB.only_move_sentence(ma) == "The only move that avoids mate."
+    monkeypatch.setattr(C, "ONLY_MOVE_AVOIDS_MATE", False)
+    assert BB.only_move_sentence(ma) is None
+    monkeypatch.setattr(C, "ONLY_MOVE_AVOIDS_MATE", True)
     from dataclasses import replace
     assert BB.only_move_sentence(replace(ma, classification="best")) is None
     assert BB.only_move_sentence(replace(ma, avoids_mate_json=json.dumps({"proven": False}))) is None
@@ -170,9 +172,9 @@ def test_the_explanation_carries_the_sentence_only_with_the_switch(db, monkeypat
     srv = object.__new__(sidecar.Server)
     srv._db = db
     texts = lambda: [c for c in srv.rpc_explain_move(gid, 0)["claims"] if c["source"] == "avoids_mate"]  # noqa: E731
-    assert texts() == []                                     # off until the owner's read
-    monkeypatch.setattr(C, "ONLY_MOVE_AVOIDS_MATE", True)
-    assert texts() == [{"type": "claim", "source": "avoids_mate", "text": "The only move that avoids mate."}]
+    assert texts() == [{"type": "claim", "source": "avoids_mate", "text": "The only move that avoids mate."}]  # FIX-B9: on
+    monkeypatch.setattr(C, "ONLY_MOVE_AVOIDS_MATE", False)
+    assert texts() == []
 
 
 def _runner(engine):

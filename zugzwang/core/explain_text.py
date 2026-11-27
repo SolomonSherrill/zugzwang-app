@@ -1283,14 +1283,97 @@ def best_move_bookkeeping_beside_mate(f: Finding, row) -> str | None:
     return None
 
 
-def stored_lines_contradict(f: Finding, row, run: RunPlies | None) -> str | None:
+# ── FIX-B9 (owner, 2026-11-27; EXPLANATIONS.md "FIX-B9"): sentences that say less ──────────────────────────────
+#
+# EXPLAIN-0's precision read (review/scratch/explain0/precision_marks.tsv) marked these misleading or false; each
+# check silences a sentence, none adds one. Keyed cases: EXPLAIN-0 n=42, 45, 48, 49, 50 (S1), n=79 (S2), n=93 and
+# n=95 (S3). S4 is in the rule itself (`explain._captures_out`), S5 in `render_pv_claim`.
+
+def rescue_not_taken_in_reply(f: Finding, row, run: RunPlies | None) -> str | None:
+    """S1: "Nc3 would have defended the pawn on d5" / "Ne7+ would have saved the knight" only where the played move's
+    stored reply line (ply N+1's first stored line, the final lines on the last ply) takes that same piece: the
+    played move, then that line, replayed from the position before the move, tracking the piece from where it stood
+    (for `best_saves_piece`, the best move's origin; the finding carries where it would have gone), and the capture
+    wins it (not a trade, at once or later in the line: n=49). With no stored
+    reply line it is silent: nothing shows the piece was lost. A caller with no run (a constructed position) is not
+    tested."""
+    if f.kind not in RESCUE_KINDS or not f.pieces or run is None:
+        return None
+    move = lead_move(f)
+    if move is None:
+        return None
+    square = move.uci[:2] if f.kind == "best_saves_piece" else f.pieces[0].square
+    reply = _first_line(after_lines(run))
+    if reply is None:
+        return "no stored reply line to show the piece is taken"
+    fen = row["fen_before"]
+    w = _walk(fen, [row["played_uci"], *reply], chess.Board(fen).turn, square, 0)
+    if w.captured_at is None:
+        return "the played move's stored reply line never takes the piece"
+    # "Takes" is a loss, not a trade: settled right after the capture (the mover's best recapture counted), the mover
+    # is at least a pawn below both the balance before the played move and the balance just before the capture.
+    # EXPLAIN-0 n=49: the bishop goes on c5 sixteen half-moves in, in an exchange of bishop for knight (the balance
+    # before 12...Qxd4 is not lost). n=48 stays: 20.Nxc8 wins the bishop (...Rxc8 Qxc8), and ...Qxb4 gets a pawn back.
+    if min(w.raw[0], w.raw[w.captured_at]) - w.settled[w.captured_at + 1] < PAWN:
+        return "the played move's stored reply line takes the piece in a trade"
+    return None
+
+
+def missed_gain_not_kept(f: Finding, row) -> str | None:
+    """S2: "Bxc6 would have won the knight" only where the named gain survives the recapture in the best line: in
+    ply N's stored line (which starts with the best move), settled after the capture and the reply, the mover is up
+    at least the named piece's value (a pawn's tolerance below it, `PAWN` / 2). EXPLAIN-0 n=79: Bxc6 bxc6 is a trade
+    that nets a pawn (Qxc6), so the knight is not what is won. A line that mates for the mover there stands; with no
+    stored line starting with the move it is not tested (as AUDIT-1's cases)."""
+    if f.kind != "missed_material" or not f.pieces:
+        return None
+    best = lead_move(f)
+    if best is None:
+        return None
+    pv = _first_line(_lines_of(row))
+    if not pv or pv[0] != best.uci:
+        return None
+    from zugzwang.core import pv_reading as P
+    fen = row["fen_before"]
+    board = chess.Board(fen)
+    mover = board.turn
+    piece = chess.Piece.from_symbol(f.pieces[0].piece).piece_type
+    kept, mated = _settled_after(fen, pv, mover, 2)
+    if mated:
+        return None
+    if kept - P.balance(board, mover) < P.VALUE[piece] - PAWN / 2:
+        return "the named gain does not survive the recapture in the best line"
+    return None
+
+
+def best_move_mate_not_lost(f: Finding, row) -> str | None:
+    """S3: a walks-into-mate sentence on the stored best move (played == best) only where it says the position was
+    lost either way (`QUAL_LOST`: the win probability before the move at most `LOST`), n=95's shape, which the owner
+    accepted; otherwise silent (n=93's shape: "h6 allows a forced mate in 11" on the engine's own move, where the
+    position was not lost before). `_stored_pairs` also drops such a sentence rendered without the clause."""
+    if f.kind != "walks_into_mate" or not row["best_uci"] or row["best_uci"] != row["played_uci"]:
+        return None
+    cp, mate = row["score_before_cp"], row["score_before_mate"]
+    if cp is None and mate is None:
+        return "the stored best move, with no score to show the position was lost"
+    if win_prob(cp, mate) > LOST:
+        return "the stored best move, and the position was not lost either way"
+    return None
+
+
+def stored_lines_contradict(f: Finding, row, run: RunPlies | None, fix_b9: bool = True) -> str | None:
     """Why the run's stored data contradicts `f`'s sentence, by the audit rulings of
-    2026-11-11, or None. Applied in `_stored_pairs` after the adjacent-ply check."""
+    2026-11-11 and FIX-B9's S1–S3 (2026-11-27), or None. Applied in `_stored_pairs` after the adjacent-ply check.
+    `fix_b9=False` leaves S1–S3 out, for `silenced_by_fix_b9` alone."""
     return (missed_material_contradicted(f, row, run)
             or found_tactic_on_an_error(f, row)
             or motif_piece_does_not_fall(f, row, run)
             or rescue_taken_anyway(f, row)
-            or best_move_bookkeeping_beside_mate(f, row))
+            or best_move_bookkeeping_beside_mate(f, row)
+            or (fix_b9 and (rescue_not_taken_in_reply(f, row, run)
+                            or missed_gain_not_kept(f, row)
+                            or best_move_mate_not_lost(f, row)))
+            or None)
 
 
 def chain_forms(findings: list[Finding], run: RunPlies | None) -> dict[tuple[str, str], str]:
@@ -1500,8 +1583,15 @@ def deep_of(run: RunPlies | None) -> tuple[bool, int | None]:
     return deep_after(run.rows.get(run.ply + 1), run.final_lines)
 
 
+def silenced_by_fix_b9(row, player_color: str | None, cap: int = CAP, *, run: RunPlies | None = None) -> bool:
+    """True where the ply would show a rule sentence but for FIX-B9's checks S1–S3. Only meaningful where the ply shows
+    none: `compose` then keeps the slot empty, so nothing the fixes silenced is replaced by a description or the
+    only-move line (FIX-B9: the fixes make the app say less; 10 descriptions appeared on the copy without this)."""
+    return bool(_stored_pairs(row, player_color, cap, run, fix_b9=False)[1])
+
+
 def _stored_pairs(
-    row, player_color: str | None, cap: int, run: RunPlies | None = None
+    row, player_color: str | None, cap: int, run: RunPlies | None = None, fix_b9: bool = True
 ) -> tuple[list[Finding], list[tuple[Finding, str]]]:
     # The mate rules read the deeper stored search after the move where there is one
     # (owner rulings AUDIT-4, -5, -13, 2026-11-11).
@@ -1510,7 +1600,7 @@ def _stored_pairs(
         # The adjacent-ply check: a capture claim ply N+1 contradicts stays silent.
         findings = [f for f in findings if next_ply_contradicts(f, run) is None]
     # The audit rulings (2026-11-11): what the stored lines contradict stays silent.
-    findings = [f for f in findings if stored_lines_contradict(f, row, run) is None]
+    findings = [f for f in findings if stored_lines_contradict(f, row, run, fix_b9) is None]
     findings = [g for g in (forced_clause(f, row) for f in findings) if g is not None]
     cp, mate = row["score_before_cp"], row["score_before_mate"]
     acp, am = row["score_after_cp"], row["score_after_mate"]
@@ -1531,6 +1621,10 @@ def _stored_pairs(
         loss=loss,
         forms=chain_forms(findings, run),
     )
+    if fix_b9 and row["best_uci"] and row["best_uci"] == row["played_uci"]:
+        # S3 (FIX-B9): on the stored best move a walks-into-mate sentence shows only with its "lost either way" clause,
+        # which `describe_ply_pairs` gives the first qualified sentence alone.
+        pairs = [(f, s) for f, s in pairs if f.kind != "walks_into_mate" or QUAL_LOST in s]
     return findings, pairs
 
 
@@ -1610,17 +1704,18 @@ def _last_move_number(fen: str, ucis) -> int:
 def render_pv_claim(claim, *, fen_before: str, best_san: str,
                     player_color: str | None) -> ClaimText:
     """One `ProvenClaim` (findings.py) as one sentence. Material is named in pieces,
-    from the line's own captures; "by force" stands for the proof (the reader does not
-    need the gate's reasons); a move not played takes "would have"; a line longer than
-    `config.PV_PRINT_MAX_PLIES` is summarised by the move it reaches rather than printed."""
+    from the line's own captures; a move not played takes "would have"; a line longer than
+    `config.PV_PRINT_MAX_PLIES` is summarised by the move it reaches rather than printed. No "by force" (S5, FIX-B9,
+    owner 2026-11-27): the words stood for the proof and read as more than the line shows; D8's wording ("in the
+    engine's line") waits for EXPLAIN-1."""
     from zugzwang import config as C
     from zugzwang.core.findings import ProvenClaim
     assert isinstance(claim, ProvenClaim)
     p = claim.proof
     short = len(p.line) <= C.PV_PRINT_MAX_PLIES
-    # Long lines: "by move 40, by force" — not "by force by move 40" (owner, 2026-11-08).
+    # Long lines: "by move 40" (was "by move 40, by force", owner 2026-11-08; S5 dropped "by force", 2026-11-27).
     by = "" if short else f" by move {_last_move_number(p.start_fen, p.line)}"
-    tail = f" by force: {_numbered_line(p.start_fen, p.line)}." if short else f"{by}, by force."
+    tail = f": {_numbered_line(p.start_fen, p.line)}." if short else f"{by}."
     mate_tail = f": {_numbered_line(p.start_fen, p.line)}." if short else f"{by}."
     what = material_phrase(claim.took, claim.gave)
     if claim.subject == "played":

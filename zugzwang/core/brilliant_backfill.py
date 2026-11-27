@@ -7,7 +7,7 @@ a relabel never runs. A run analysed before version 11 has no such search, so it
 1. **BR-F**: every ply where `labelling.brilliant_path` asks for the verification search (a candidate) and none is
    stored gets the search (`verification_search`: the position after the move, depth `BRILLIANT_VERIFY_DEPTH`, one
    search in a new game, as the analysis loop runs it). A failed search is not stored ("not searched").
-2. **M1**, "The only move that avoids mate." (behind `ONLY_MOVE_AVOIDS_MATE`, off): every brilliant ply of the run, as
+2. **M1**, "The only move that avoids mate." (behind `ONLY_MOVE_AVOIDS_MATE`, on since FIX-B9): every brilliant ply of the run, as
    labelled with those searches, gets its proof (`only_move_proof`): each other legal move searched at depth 14
    (`ONLY_MOVE_DEPTH`); proven only when every one gives the opponent a forced mate. It stops at the first that does not.
    Never read from the three stored lines: they only order the search.
@@ -122,7 +122,7 @@ def stored_proof(ma: MoveAnalysis) -> dict | None:
 
 def only_move_sentence(ma: MoveAnalysis) -> str | None:
     """"The only move that avoids mate." for a brilliant ply whose stored proof holds, while
-    `ONLY_MOVE_AVOIDS_MATE` is on (off until the owner's read, review/reads/BRIL-3-only-move.md); None otherwise."""
+    `ONLY_MOVE_AVOIDS_MATE` is on (on since FIX-B9: the owner approved its one proven case); None otherwise."""
     if not C.ONLY_MOVE_AVOIDS_MATE or ma.classification != "brilliant":
         return None
     proof = stored_proof(ma)

@@ -237,6 +237,8 @@ jobs:
         run: |
           # Not --prerelease: the updater's endpoint is .../releases/latest/download/latest.json,
           # and GitHub's "latest" skips prereleases. A draft stays invisible until published.
+          # The notes: what's new and the install steps (FIX-B9 E): packaging/release_notes.py.
+          python packaging/release_notes.py "$TAG" "$GITHUB_REPOSITORY" > release-notes.md && cat release-notes.md
           gh release create "$TAG" artifacts/* --draft \
             --title "Zugzwang $TAG" \
-            --notes "Beta build $TAG. Which file to download and how to open it: [TESTERS.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/TESTERS.md). Source: the tag $TAG."
+            --notes-file release-notes.md

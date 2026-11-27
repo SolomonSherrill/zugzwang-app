@@ -40,6 +40,7 @@ from zugzwang.core.explain_text import (
     explain_and_describe_stored_ply,
     render_only_move,
     render_pv_claim,
+    silenced_by_fix_b9,
 )
 from zugzwang.core.findings import Description, ProvenClaim
 from zugzwang.core.labelling import captured_on_next_move
@@ -148,9 +149,9 @@ def _shown_at(rows: Mapping[int, Mapping], ply: int, player_color: str | None,
     candidates = [d for d in candidates if not _hidden(d.descriptor, rows[ply])]
     if not candidates or not _diverges(rows[ply]):
         return []
-    _, sentences = explain_and_describe_stored_ply(
-        rows[ply], player_color, run=run_plies(rows, ply, final_lines))
-    if sentences:
+    run = run_plies(rows, ply, final_lines)
+    _, sentences = explain_and_describe_stored_ply(rows[ply], player_color, run=run)
+    if sentences or silenced_by_fix_b9(rows[ply], player_color, run=run):
         return []
     out = _engine_output(rows, ply, final_lines)
     if isinstance(out, ProvenClaim):
@@ -231,13 +232,18 @@ def explain_ply_full(rows: Mapping[int, Mapping], ply: int, player_color: str | 
             if descs:
                 notes["descriptions"] = "suppressed beside a claim"
             descs = []
+        elif descs and silenced_by_fix_b9(row, player_color, run=run_plies(rows, ply, final_lines)):
+            # FIX-B9 (owner, 2026-11-27): a sentence S1–S3 silenced leaves the ply as it was, not a description
+            notes["descriptions"] = "suppressed where a FIX-B9 check silenced the rule sentence"
+            descs = []
     shown = tuple(("engine_line", str(t)) for t in pv_claims) if pv_claims else \
         tuple(("rules", t) for t in sentences)
     if not shown:
         # T4 (CLS-V3-T4, 2026-11-12): a critical-move miss with nothing else to say shows
-        # the one fact the stored lines prove — never beside a claim or a rule sentence.
+        # the one fact the stored lines prove — never beside a claim or a rule sentence
+        # (nor where a FIX-B9 check silenced one).
         only = render_only_move(row)
-        if only is not None:
+        if only is not None and not silenced_by_fix_b9(row, player_color, run=run_plies(rows, ply, final_lines)):
             shown = (("only_move", str(only)),)
     return PlyExplanation(
         findings=findings, sentences=sentences, pv_claims=tuple(pv_claims),

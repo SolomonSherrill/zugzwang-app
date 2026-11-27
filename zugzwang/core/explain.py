@@ -38,7 +38,11 @@ from .findings import MoveAbout, MoveRole
 # 21 (MECH-NAME, owner rulings M1–M7, 2026-11-14): back rank and discovered attack/check named
 # as a clause on a shown engine-line claim (`mechanisms`, `compose`).
 # 22 (P1, owner 2026-11-19): pin and skewer named the same way, only at the claim's hold.
-RULE_VERSION = 22
+# 23 (FIX-B9, owner 2026-11-27; EXPLANATIONS.md "FIX-B9"): five fixes that make the text say less. S1 a rescue sentence
+# only where the played move's stored reply line takes that piece; S2 "would have won X" only where the gain survives
+# the recapture in the best line; S3 walks-into-mate on the stored best move only as "lost either way"; S4 no trapped
+# piece that can capture its way out (`_captures_out`); S5 no "by force" in an engine-line claim.
+RULE_VERSION = 23
 
 # Two mate lengths, deliberately not one (owner rulings, stage B and 2026-10-21).
 #
@@ -543,6 +547,33 @@ def _boxed_in(board: chess.Board, pov: chess.Color) -> set[int]:
     }
 
 
+def _see_pieces(board: chess.Board, move: chess.Move) -> float:
+    """`see` counting the pieces taken only: no promotion is a gain, on the move or on any recapture. The
+    material a capture *holds* in the exchange of pieces on its square (S4)."""
+    victim = chess.PAWN if board.is_en_passant(move) else board.piece_type_at(move.to_square)
+    gain = _VALUE[victim] if victim is not None else 0.0
+    board.push(move)
+    try:
+        recaptures = [m for m in board.legal_moves if m.to_square == move.to_square]
+        if not recaptures:
+            return gain
+        best = min(recaptures, key=lambda m: _VALUE[board.piece_at(m.from_square).piece_type])
+        return gain - max(0.0, _see_pieces(board, best))
+    finally:
+        board.pop()
+
+
+def _captures_out(after: chess.Board, square: int) -> bool:
+    """S4 (FIX-B9, owner 2026-11-27; EXPLANATIONS.md "FIX-B9"): the piece on `square` (its side to move) has a capture
+    that holds material by SEE, so it is not trapped: it can capture its way out. "Holds" reads the exchange of pieces
+    on the square (`_see_pieces`): a recapture that promotes still counts as an even trade, which is the required case
+    (EXPLAIN-0 n=86, 47...Rb1: the a1 rook takes the b1 rook and a2xb1 recaptures, promoting; `see` reads that −8)."""
+    for m in after.legal_moves:
+        if m.from_square == square and after.is_capture(m) and _see_pieces(after, m) >= 0.0:
+            return True
+    return False
+
+
 def _trapped_candidates(
     board: chess.Board, move: chess.Move
 ) -> list[tuple[int, frozenset[int]]]:
@@ -569,6 +600,8 @@ def _trapped_candidates(
     * **Pieces that were already trapped**, tested with a null move so that the
       opponent gets the turn without anything else changing. Without it the rule
       credits this move for a piece that had been stuck for ten plies.
+
+    And a fourth (S4, FIX-B9): **a piece that can capture its way out** (`_captures_out`).
     """
     pov = board.turn
     after = board.copy(stack=False)
@@ -578,6 +611,8 @@ def _trapped_candidates(
 
     them = not pov
     now = {s for s in _boxed_in(after, pov) if not after.is_pinned(them, s)}
+    # S4 (FIX-B9, owner 2026-11-27): not trapped when it can capture its way out.
+    now = {s for s in now if not _captures_out(after, s)}
     if not now:
         return []
     if not board.is_check():

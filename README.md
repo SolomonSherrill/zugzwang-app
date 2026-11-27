@@ -14,6 +14,14 @@ Download the latest build from **[Releases](https://github.com/SolomonSherrill/z
 and follow **[TESTERS.md](TESTERS.md)** — which file to pick, how to open an unsigned app, the
 first run, and how to flag anything that looks wrong.
 
+**On a Mac, open it the first time with System Settings → Privacy & Security → Open Anyway.**
+Zugzwang isn't notarized by Apple yet. This is a one-time step; updates install normally afterwards. Only if there is no **Open Anyway** (or macOS says the app "is damaged"), run this once in
+Terminal, then open Zugzwang again:
+
+```
+xattr -dr com.apple.quarantine /Applications/Zugzwang.app
+```
+
 ## Building from source
 
 Python 3.12+ (CI uses 3.15), Node 24, and a Rust toolchain.

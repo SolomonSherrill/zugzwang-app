@@ -2898,7 +2898,7 @@ class Server:
                         **({"line": list(full.pv_claim_line)} if src == "engine_line" else {})}
                        for src, t in full.shown_claims]
             # BRIL-3 C, M1: "The only move that avoids mate." after them, on a brilliant ply whose stored proof holds;
-            # only while ONLY_MOVE_AVOIDS_MATE is on (off until the owner's read, review/reads/BRIL-3-only-move.md)
+            # only while ONLY_MOVE_AVOIDS_MATE is on (on since FIX-B9, owner 2026-11-27: BRILLIANT.md "FIX-B9")
             + [{"type": "claim", "source": "avoids_mate", "text": t} for t in [only_move_sentence(match)] if t],
             "descriptions": [{"type": "description", "descriptor": k, "text": str(t)}
                              for k, t in full.descriptions],

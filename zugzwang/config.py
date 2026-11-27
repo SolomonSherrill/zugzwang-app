@@ -540,15 +540,15 @@ BRILLIANT_OTHER_PIECE = False
 # stored yet keeps version 10's label; the app's backfill (core/brilliant_backfill.py) runs the search and relabels it.
 BRILLIANT_EVAL_SOUND = True
 # T1 (BRIL-3, owner 2026-11-27; BRILLIANT.md "BRIL-3"): BR-F's "already lost" also catches a piece lost on the
-# opponent's next move after its best retreat, or where it stands (`labelling._trapped_next`). OFF, by the ruling's
-# own condition: it excludes 12. Nxb6 but not 18. Nxb5, whose bishop's retreat (Bb3, then ...a4) still has a safe
-# square on g8 by the SEE and two-ply tools (review/scratch/bril3/probe_t1.out). It kept every brilliant read.
-BRILLIANT_T1 = False
+# opponent's next move after its best retreat, or where it stands (`labelling._trapped_next`). Built off in BRIL-3 (it
+# excluded 12. Nxb6 but not 18. Nxb5); ON since classifier version 12 (FIX-B9, owner 2026-11-27; BRILLIANT.md "FIX-B9"):
+# the owner keeps 18. Nxb5 brilliant (the engine shows the bishop escapes: 18. Bb3 a4 ... Bg8), so T1 does what he asks.
+BRILLIANT_T1 = True
 # M1 (BRIL-3, owner 2026-11-27; BRILLIANT.md "BRIL-3"): "The only move that avoids mate." on a brilliant move's
 # explanation, only when its stored proof holds (every other legal move, searched at depth 14, gives the opponent a
-# forced mate; core/brilliant_backfill.only_move_proof). OFF until the owner reads review/reads/BRIL-3-only-move.md;
-# the proofs are computed and stored either way.
-ONLY_MOVE_AVOIDS_MATE = False
+# forced mate; core/brilliant_backfill.only_move_proof). ON since FIX-B9 (owner 2026-11-27, BRILLIANT.md "FIX-B9"): he
+# approved its one proven case (review/reads/BRIL-3-only-move.md, 24...Be4+). A sentence, not a label.
+ONLY_MOVE_AVOIDS_MATE = True
 BRILLIANT_LINE_DOWN_PLIES = 5
 BRILLIANT_VERIFY_DEPTH = 22
 

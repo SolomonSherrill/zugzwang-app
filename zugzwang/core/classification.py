@@ -26,10 +26,12 @@ from typing import NamedTuple, Sequence
 # label written today. Bump it with any change that can alter a label, and say in the
 # commit which rows it affects. NULL in the column means "written before the write path
 # stamped one" — every run from I3 until 2026-11-07 (W9, W22).
-CLASSIFIER_VERSION = 11  # 11: BRIL-3, brilliant BR-F on: a sacrifice B4 and B4b do not prove, sound by the engine's
+CLASSIFIER_VERSION = 12  # 12: FIX-B9, brilliant T1 on: BR-F's "already lost" also catches a piece lost on the
+                         # opponent's next move after its best retreat or where it stands (12. Nxb6 is not
+                         # brilliant; 18. Nxb5 stays), 2026-11-27. 11: BRIL-3, brilliant BR-F on: a sacrifice B4 and B4b do not prove, sound by the engine's
                          # evaluation (a piece down 5 plies into its own line, the depth-22 search stored per ply
                          # holding within 0.02, no failure shape, the material not already lost), 2026-11-27; a
-                         # ply without a stored search keeps version 10's label until the backfill runs. T1 off.
+                         # ply without a stored search keeps version 10's label until the backfill runs. T1 off (on in 12).
                          # 10: BRIL-2, brilliant BR-A/C on: the 0.90 ceiling and the 0.30 floor read the
                          # mover's rating curve (the PGN rating; none: the current curve), 2026-11-26 (every
                          # live run carried 8; 9 was never relabelled live). 9: BRIL-1, brilliant D2 (not for capturing the piece that threatened at least what
