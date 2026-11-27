@@ -276,9 +276,10 @@ def relabel_for_book(db_path: Path, new_book: Path | None, *, write: bool,
     relabelled_runs: list[int] = []
     try:
         runs = con.execute(
-            "SELECT id, classifier_version, final_lines_json FROM analysis_runs "
-            "WHERE completed_at IS NOT NULL ORDER BY id").fetchall()
-        for k, (rid, ver, fl) in enumerate(runs, 1):
+            "SELECT r.id, r.classifier_version, r.final_lines_json, g.source, g.pgn "
+            "FROM analysis_runs r JOIN games g ON g.id = r.game_id "
+            "WHERE r.completed_at IS NOT NULL ORDER BY r.id").fetchall()
+        for k, (rid, ver, fl, source, pgn) in enumerate(runs, 1):
             if cancelled is not None and cancelled():
                 raise Cancelled("book relabel cancelled")
             rows = con.execute(f"SELECT {_COLS} FROM move_analyses WHERE run_id=? ORDER BY ply",
@@ -292,7 +293,8 @@ def relabel_for_book(db_path: Path, new_book: Path | None, *, write: bool,
                 current = ver == CLASSIFIER_VERSION
                 if current:
                     plies = [replace(_to_ma(r), is_book=f) for r, f in zip(rows, flags)]
-                    new = labelling.label_game(plies, json.loads(fl) if fl else [])
+                    new = labelling.label_game(plies, json.loads(fl) if fl else [],
+                                               ratings=labelling.game_ratings(source, pgn))
                     labels = [m.classification for m in new]
                     opens: list[bool | None] = []
                     still = True

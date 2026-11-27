@@ -173,7 +173,7 @@ def test_analyse_again_accepts_24(server, monkeypatch):
         def cancel(self):
             pass
 
-        def analyze_game(self, game_id, run_id, pgn, depth, openings, cb):
+        def analyze_game(self, game_id, run_id, pgn, depth, openings, cb, ratings=None):
             started["depth"] = depth
     server._analysis = FakeAnalysis()
     server._openings = None

@@ -156,8 +156,16 @@ def analyze_game_plies(
     depth: int,
     openings: "OpeningsBook | None" = None,
     is_cancelled: Callable[[], bool] = lambda: False,
+    *,
+    ratings: tuple[int | None, int | None] | None = None,
 ) -> Iterator[tuple]:
-    """Walk every ply of the PGN, analyse with Stockfish, yield event tuples."""
+    """Walk every ply of the PGN, analyse with Stockfish, yield event tuples.
+
+    *ratings* (White's, Black's; `labelling.game_ratings` from the game's source and PGN, None for
+    a game without platform ratings) reach the classifier for BR-A/C's bounds (BRIL-2 B). BR-F's
+    verification search runs here and only here: `brilliant_path` calls `_verify` on a candidate
+    only, and only while `BRILLIANT_EVAL_SOUND` is on; its result is stored on the row
+    (`verify_*`) for every later relabel, which never searches."""
     game = chess.pgn.read_game(io.StringIO(pgn_str))
     if game is None:
         yield ("error", "Could not parse PGN.")
@@ -184,8 +192,31 @@ def analyze_game_plies(
     # rule, as `labelling.label_game` keeps it, so a relabel from the stored rows agrees.
     book_open = [True]
 
+    verified: dict[int, tuple[int | None, int | None]] = {}
+
+    def _verify(ma: MoveAnalysis) -> tuple[int | None, int | None] | None:
+        # BR-F check (2) (BRIL-1, as measured): the position after the move at depth
+        # BRILLIANT_VERIFY_DEPTH, one search in a new game (python-chess sends `ucinewgame`, so
+        # the result does not depend on this game's hash; the next search of the game starts
+        # from a cleared hash too, still a function of the game alone). A failed search proves
+        # nothing and is not stored: a relabel then reads "not searched", the same answer.
+        pos = chess.Board(ma.fen_before)
+        pos.push(chess.Move.from_uci(ma.played_uci))
+        try:
+            info = engine.analyse(pos, chess.engine.Limit(depth=C.BRILLIANT_VERIFY_DEPTH),
+                                  multipv=1, game=object())
+        except Exception as exc:
+            logger.warning("BR-F verification search failed at ply %d: %s", ma.ply, exc)
+            return None
+        verified[ma.ply] = _extract_score_negated(info[0] if info else None)
+        return verified[ma.ply]
+
     def _labelled(i: int, final: list[dict] | None) -> MoveAnalysis:
-        ma = label_ply(plies, i, final, book_open=book_open[0])
+        ma = label_ply(plies, i, final, book_open=book_open[0], ratings=ratings, verify=_verify)
+        if ma.ply in verified:
+            v_cp, v_mate = verified[ma.ply]
+            ma = replace(ma, verify_cp=v_cp, verify_mate=v_mate,
+                         verify_depth=C.BRILLIANT_VERIFY_DEPTH)
         book_open[0] = book_open[0] and in_book(ma)
         labelled.append(ma)
         return ma

@@ -154,6 +154,14 @@ class MoveAnalysis:
     # sacrifice outside the old obvious strata. Not a label; stored for the game report.
     # None on rows labelled before it existed (migration v18).
     hard_only_move: bool | None = None
+    # BRIL-2 B (owner, 2026-11-26; BRILLIANT.md "BRIL-2"): BR-F's verification search (check (2)), the
+    # score of the position after the move from the mover's side at depth `verify_depth`
+    # (`BRILLIANT_VERIFY_DEPTH`). Run by the analysis loop only, only on a BR-F candidate, only while
+    # `BRILLIANT_EVAL_SOUND` is on; a relabel reads it (`labelling.stored_verify`) and never searches.
+    # `verify_depth` None: no search was run (migration v25).
+    verify_cp: int | None = None
+    verify_mate: int | None = None
+    verify_depth: int | None = None
 
 
 @dataclass
@@ -284,7 +292,7 @@ class GameRecord:
 #: itself by probing `PRAGMA table_info`, which is what lets them run
 #: unconditionally on every open and stay correct on a database whose stored
 #: version says nothing useful. Bump this when adding a migration.
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -632,6 +640,7 @@ class Database:
         self._migrate_v22()
         self._migrate_v23()
         self._migrate_v24()
+        self._migrate_v25()
         # Stamped last, and overwritten rather than inserted-if-absent: the old
         # `INSERT OR IGNORE` meant the first value a database ever received was
         # the only one it ever had. On the live database that value was '1',
@@ -945,6 +954,18 @@ class Database:
                 moments_json   TEXT    NOT NULL,
                 computed_at    TEXT    NOT NULL
             )""")
+
+    def _migrate_v25(self) -> None:
+        # BRIL-2 B (owner, 2026-11-26): BR-F's depth-22 verification result per candidate ply
+        # (`MoveAnalysis.verify_*`), so a label stays a function of stored data. Nullable, no
+        # backfill: NULL `verify_depth` means "not searched".
+        cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(move_analyses)").fetchall()
+        }
+        for col in ("verify_cp", "verify_mate", "verify_depth"):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE move_analyses ADD COLUMN {col} INTEGER")
 
     def _migrate_v24(self) -> None:
         # COACH-2 C (rulings CP1, 1, 5, 6; core/practice.py): Practice. `practice_items`: a missed moment of the user's
@@ -2152,8 +2173,8 @@ class Database:
                  score_before_cp, score_before_mate, score_after_cp, score_after_mate,
                  second_best_uci, second_best_cp, second_best_mate,
                  classification, is_book, lines_json, after_search_cp, after_search_mate,
-                 hard_only_move)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 hard_only_move, verify_cp, verify_mate, verify_depth)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, ma.ply, ma.fen_before, ma.played_uci, ma.best_uci, ma.pv_uci,
@@ -2164,6 +2185,7 @@ class Database:
                 json.dumps(ma.lines) if ma.lines else None,
                 ma.after_search_cp, ma.after_search_mate,
                 None if ma.hard_only_move is None else int(ma.hard_only_move),
+                ma.verify_cp, ma.verify_mate, ma.verify_depth,
             ),
         )
 
@@ -2355,7 +2377,7 @@ class Database:
                    score_before_cp, score_before_mate, score_after_cp, score_after_mate,
                    second_best_uci, second_best_cp, second_best_mate,
                    classification, is_book, lines_json, after_search_cp, after_search_mate,
-                   hard_only_move
+                   hard_only_move, verify_cp, verify_mate, verify_depth
             FROM move_analyses WHERE run_id=? ORDER BY ply
             """,
             (run_id,),
@@ -2384,6 +2406,9 @@ class Database:
                 after_search_mate=r["after_search_mate"],
                 hard_only_move=(None if r["hard_only_move"] is None
                                 else bool(r["hard_only_move"])),
+                verify_cp=r["verify_cp"],
+                verify_mate=r["verify_mate"],
+                verify_depth=r["verify_depth"],
             )
             for r in rows
         ]

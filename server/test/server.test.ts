@@ -366,3 +366,49 @@ describe('limits and logs (ruling V4)', () => {
     expect(logged.join('\n')).not.toContain(marker)
   })
 })
+
+describe('the live socket retry (BRIL-2 D, FIX-B8 decided item 11)', () => {
+  /** env with a LOBBY whose first *fails* stubs throw *error*, the rest the real Lobby */
+  function flakyLobby(fails: number, error: () => unknown): { env: Env; gets: () => number } {
+    const real = (env as unknown as Env).LOBBY
+    let n = 0
+    const LOBBY = {
+      idFromName: (name: string) => real.idFromName(name),
+      get: (id: DurableObjectId) => {
+        n++
+        if (n <= fails) return { fetch: async () => { throw error() } }
+        return real.get(id)
+      },
+    }
+    const proxied = new Proxy(env as unknown as Env, { get: (t, k) => (k === 'LOBBY' ? LOBBY : (t as any)[k]) })
+    return { env: proxied, gets: () => n }
+  }
+  const reset = () => Object.assign(new Error('Durable Object reset because its code was updated.'), { retryable: true })
+
+  it('retries a retryable error once and opens the lobby', async () => {
+    const c = await signup('retry_once')
+    const f = flakyLobby(1, reset)
+    const res = await c.liveResponse('/v1/live', { env: f.env })
+    expect(res.status).toBe(101)
+    expect(f.gets()).toBe(2)
+    res.webSocket!.accept()
+    res.webSocket!.close()
+  })
+  it('answers 503 with Retry-After, not 500, when the retry fails the same way', async () => {
+    const c = await signup('retry_twice')
+    const f = flakyLobby(2, reset)
+    const res = await c.liveResponse('/v1/live', { env: f.env })
+    expect(res.status).toBe(503)
+    expect(res.headers.get('Retry-After')).toBe('2')
+    expect(await res.json()).toMatchObject({ error: 'try_again' })
+    expect(f.gets()).toBe(2)
+  })
+  it('does not retry an error that is not retryable: 500 as before', async () => {
+    const c = await signup('retry_never')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const f = flakyLobby(1, () => new Error('boom'))
+    const res = await c.liveResponse('/v1/live', { env: f.env })
+    expect(res.status).toBe(500)
+    expect(f.gets()).toBe(1)
+  })
+})

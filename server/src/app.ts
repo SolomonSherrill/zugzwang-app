@@ -564,20 +564,43 @@ async function cancelChallenge(ctx: Ctx, id: string): Promise<Response> {
   return json(200, { status: 'cancelled' })
 }
 
-function forward(ctx: Ctx, stub: { fetch(req: Request): Promise<Response> }, path: string): Promise<Response> | Response {
+/** Cloudflare marks a Durable Object error that a fresh stub may not hit (the object reset or moved) `retryable`. */
+function retryable(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { retryable?: unknown }).retryable === true
+}
+
+/**
+ * A live socket to a Durable Object. BRIL-2 D (FIX-B8 decided item 11): a `retryable` error, which is
+ * what a request meets while the platform resets the object, is retried once with a fresh stub; if the
+ * retry fails the same way the answer is 503 with Retry-After (the app reconnects), never 500. Any
+ * other error is thrown on to `handle()` as before.
+ */
+async function forward(ctx: Ctx, stub: () => { fetch(req: Request): Promise<Response> }, path: string): Promise<Response> {
   if (ctx.req.headers.get('Upgrade') !== 'websocket') return err(426, 'upgrade_required', 'This route is a WebSocket.')
-  return stub.fetch(new Request('https://do' + path, {
+  const req = () => new Request('https://do' + path, {
     headers: { Upgrade: 'websocket', 'X-Zz-Account-Id': String(ctx.account!.id), 'X-Zz-Handle': ctx.account!.handle },
-  }))
+  })
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await stub().fetch(req())
+    } catch (e) {
+      if (!retryable(e)) throw e
+      if (attempt >= 1) {
+        const r = err(503, 'try_again', 'The server is restarting. Try again in a moment.')
+        r.headers.set('Retry-After', '2')
+        return r
+      }
+    }
+  }
 }
 
 async function lobbyLive(ctx: Ctx): Promise<Response> {
-  return await forward(ctx, lobby(ctx.env), '/live')
+  return await forward(ctx, () => lobby(ctx.env), '/live')
 }
 
 async function gameLive(ctx: Ctx, id: string): Promise<Response> {
   if (!GAME_ID.test(id)) return err(404, 'no_such_game', 'No such game.')
-  return await forward(ctx, game(ctx.env, id), '/live')
+  return await forward(ctx, () => game(ctx.env, id), '/live')
 }
 
 async function gameResult(ctx: Ctx, id: string): Promise<Response> {

@@ -62,15 +62,20 @@ export class Client {
 
   /** a signed WebSocket (FRIENDS-2): the lobby (/v1/live) or a game (/v1/games/<id>/live) */
   async live(path: string, o: SendOptions = {}): Promise<Live> {
+    const res = await this.liveResponse(path, o)
+    if (res.status !== 101 || !res.webSocket) throw new Error(`live ${path}: ${res.status} ${await res.text()}`)
+    return new Live(res.webSocket)
+  }
+
+  /** the signed WebSocket request's response as it is (BRIL-2 D: the retry's tests read a 503) */
+  async liveResponse(path: string, o: SendOptions = {}): Promise<Response> {
     const now = o.now ?? Date.now()
     const time = String(now)
     const nonce = b64urlEncode(crypto.getRandomValues(new Uint8Array(16)))
     const msg = canonical('GET', path, time, nonce, await sha256Hex(''))
     const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, this.keys.privateKey, new TextEncoder().encode(msg)))
     const headers = { Upgrade: 'websocket', 'CF-Connecting-IP': this.ip, 'X-Zz-Key': this.pub, 'X-Zz-Time': time, 'X-Zz-Nonce': nonce, 'X-Zz-Sig': b64urlEncode(sig) }
-    const res = await handle(new Request('https://friends.test' + path, { headers }), (o.env ?? env) as Env, now)
-    if (res.status !== 101 || !res.webSocket) throw new Error(`live ${path}: ${res.status} ${await res.text()}`)
-    return new Live(res.webSocket)
+    return await handle(new Request('https://friends.test' + path, { headers }), (o.env ?? env) as Env, now)
   }
 }
 

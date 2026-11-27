@@ -564,7 +564,7 @@ def captures_the_forker(board: chess.Board, move: chess.Move) -> bool:
 
 
 def bound_win_prob(cp: int | None, mate: int | None, rating: int | None) -> float:
-    """BR-A + BR-C (BRIL-1; switch `BRILLIANT_RATING_BOUNDS`, off): the win probability the
+    """BR-A + BR-C (BRIL-1; switch `BRILLIANT_RATING_BOUNDS`, on since version 10, BRIL-2): the win probability the
     brilliant bounds (0.90, 0.30) are judged on. With the switch on, a centipawn score and a
     rating inside a row of `BRILLIANT_RATING_CURVE` read that row's fitted curve; anything else
     (switch off, no rating, outside the fitted range, a mate) reads `win_prob`, the current
@@ -585,6 +585,31 @@ def ratings_from_pgn(pgn: str | None) -> tuple[int | None, int | None]:
         m = re.search(r'^\[' + tag + r' "(\d+)"\]', pgn or "", re.M)
         out.append(int(m.group(1)) if m else None)
     return out[0], out[1]
+
+
+#: BRIL-2 B (owner, 2026-11-26): the sources whose PGN WhiteElo / BlackElo are the players' platform
+#: ratings, which BR-A/C's curve was fitted on. A game against Stockfish ("local") or with a friend
+#: ("friends", unrated) has none, and reads the current curve.
+RATED_SOURCES = ("chesscom", "lichess", "imported")
+
+
+def game_ratings(source: str | None, pgn: str | None) -> tuple[int | None, int | None] | None:
+    """BRIL-2 B: (White's, Black's) rating for `label_ply`'s *ratings*, from the PGN of a game of a
+    rated source (`RATED_SOURCES`); None for any other source or when neither header holds a
+    number. A side without a rating reads the current curve (`bound_win_prob`)."""
+    if source not in RATED_SOURCES:
+        return None
+    ratings = ratings_from_pgn(pgn)
+    return None if ratings == (None, None) else ratings
+
+
+def stored_verify(ma: MoveAnalysis) -> tuple[int | None, int | None] | None:
+    """BRIL-2 B: BR-F's verification result as stored on the row (`verify_*`, written by the
+    analysis loop for a candidate while `BRILLIANT_EVAL_SOUND` was on); None when no search was
+    run. Every relabel reads this and never searches, so a label stays a function of stored data."""
+    if getattr(ma, "verify_depth", None) is None:
+        return None
+    return ma.verify_cp, ma.verify_mate
 
 
 def other_piece_offered(board: chess.Board, move: chess.Move) -> list[int]:
@@ -669,18 +694,79 @@ def failure_shape(board: chess.Board, move: chess.Move) -> str | None:
     return None
 
 
+# ── BRIL-2 (owner, 2026-11-26; BRILLIANT.md "BRIL-2"): BR-F rebuilt ───────────────────────────────
+
+def _reaches_safety(board: chess.Board, move: chess.Move) -> bool:
+    """BR-F's exclusion: after *move*, the piece that moved is not lost on its new square: nothing
+    captures it there, or by SEE it loses nothing on landing (a trade counts as safe), or the
+    opponent's best capture of it fails the two-ply minimax (`_holds_after_reply`, B4's test)."""
+    pos = board.copy(stack=False)
+    pos.push(move)
+    takes = [m for m in pos.legal_moves if m.to_square == move.to_square and pos.is_capture(m)]
+    if not takes or net_on_landing(board, move) >= 0:
+        return True
+    return _holds_after_reply(pos, max(takes, key=lambda m: see(pos, m)), 1.0) is None
+
+
+def _threatened(null: chess.Board, sq: int) -> list[chess.Move]:
+    """The opponent's captures of the unit on *sq* that win a pawn or more by SEE, in *null* (the
+    position with the opponent to move)."""
+    return [m for m in null.legal_moves
+            if m.to_square == sq and null.is_capture(m) and see(null, m) >= 1.0]
+
+
+def already_lost(board: chess.Board, move: chess.Move) -> str | None:
+    """BR-F rebuilt (BRIL-2, owner 2026-11-26): the material the sacrifice gives up was already lost
+    before *move*. With the mover's turn passed (a null move), the opponent wins a piece of the
+    mover's (a capture of it at an SEE gain of a pawn or more) and:
+
+    - "forked": a piece threatening the sacrificed piece forks it (D2's test, `_forker_threat`); in
+      check, where no null move exists, a checking piece that also attacks the sacrificed piece for
+      a pawn or more by SEE (a fork of the king and the piece);
+    - "trapped": no move of the threatened piece reaches a safe square (`_reaches_safety`). The
+      threatened piece is the sacrificed one, or another piece (not a pawn, not the king) whose loss
+      the sacrifice replaces: the move gives up no more than that piece is worth.
+
+    None otherwise."""
+    sq = move.from_square
+    null = board.copy(stack=False)
+    if board.is_check():
+        null.turn = not null.turn
+        for c in board.checkers():
+            if null.attacks(c) & chess.BB_SQUARES[sq] and see(null, chess.Move(c, sq)) >= 1.0:
+                return "forked"
+        return None
+    null.push(chess.Move.null())
+    threats = _threatened(null, sq)
+    if any(_forker_threat(null, m.from_square) >= 1.0 for m in threats):
+        return "forked"
+    if threats and not any(_reaches_safety(board, m) for m in board.legal_moves if m.from_square == sq):
+        return "trapped"
+    gives_up = -net_on_landing(board, move)
+    for other in board.piece_map():
+        piece = board.piece_at(other)
+        if other == sq or piece.color != board.turn or piece.piece_type in (chess.PAWN, chess.KING):
+            continue
+        if _VALUE[piece.piece_type] < gives_up or not _threatened(null, other):
+            continue
+        if not any(_reaches_safety(board, m) for m in board.legal_moves if m.from_square == other):
+            return "trapped"
+    return None
+
 def eval_sound_candidate(ma: MoveAnalysis, line: Sequence[str],
                          after: tuple[int | None, int | None]) -> bool:
     """BR-F (BRIL-1; switch `BRILLIANT_EVAL_SOUND`, off) without its search: for a piece offered on
     the landing square that B4 and B4b do not prove, the depth-14 after-score is scored (X1c then
     holds it within WPL_EXCELLENT of the before-score: option (e)), check (1)
-    `down_along_line`, check (3) no `failure_shape`. The candidates are what the verification
+    `down_along_line`, check (3) no `failure_shape`, and (BRIL-2's rebuild) the material was not
+    already lost (`already_lost`: trapped or forked). The candidates are what the verification
     search (check (2), `eval_holds`) is run on."""
     if not _scored(*after) or not _scored(ma.score_before_cp, ma.score_before_mate):
         return False
     board = chess.Board(ma.fen_before)
-    return down_along_line(ma.fen_before, line) and \
-        failure_shape(board, chess.Move.from_uci(ma.played_uci)) is None
+    move = chess.Move.from_uci(ma.played_uci)
+    return down_along_line(ma.fen_before, line) and failure_shape(board, move) is None and \
+        already_lost(board, move) is None                            # BRIL-2: the rebuild
 
 
 def eval_holds(ma: MoveAnalysis, deep_after: tuple[int | None, int | None] | None) -> bool:
@@ -774,8 +860,8 @@ def brilliant(ma: MoveAnalysis,
       score since version 3. An unscored after-score cannot be judged and does not exclude.
 
     Version 9 (BRIL-1, owner 2026-11-25): **D2** excludes capturing the piece that threatened at
-    least what the move gives up (`captures_the_forker`). Behind switches, off: **BR-A/C** reads
-    the 0.90 / 0.30 bounds on the rating-aware curve (`bound_win_prob`, the mover's *rating*);
+    least what the move gives up (`captures_the_forker`). Version 10 (BRIL-2): **BR-A/C** reads
+    the 0.90 / 0.30 bounds on the rating-aware curve (`bound_win_prob`, the mover's *rating*). Behind switches, off:
     **BR-F** passes B4 by the engine's evaluation (`eval_sound_candidate` and `eval_holds` on
     *verify*'s search); **BR-E** passes for another piece left en prise (`other_piece_offered`).
 
@@ -832,8 +918,11 @@ def label_ply(
     transposes back into a book position. The caller keeps it (`label_game` and the
     analysis loop, in ply order); the stored `is_book` stays the probe.
 
-    *ratings* (White's, Black's; `ratings_from_pgn`) and *verify* reach `brilliant` only: BR-A/C
-    and BR-F, both behind switches that are off (BRIL-1), read them."""
+    *ratings* (White's, Black's; `game_ratings`) and *verify* reach `brilliant` only: BR-A/C
+    and BR-F, each behind its switch, read them. *verify* None reads the row's stored result
+    (`stored_verify`): only the analysis loop passes a search (BRIL-2 B)."""
+    if verify is None:
+        verify = stored_verify
     ma = plies[i]
     book = ma.is_book and book_open
     s_cp, s_mate = search_after(ma)

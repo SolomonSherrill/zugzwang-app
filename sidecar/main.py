@@ -74,6 +74,7 @@ from zugzwang.core.explain import RULE_VERSION, stored_ply_row
 from zugzwang.core.compose import explain_ply_full
 from zugzwang.core.explain_text import UNKNOWN_SIDE
 from zugzwang.core import provenance
+from zugzwang.core import labelling
 from zugzwang.core.positions import legal_board
 from zugzwang.core.game_report import build_report, opening_exit, opening_sentence
 from zugzwang.core import review_extras as RX
@@ -480,9 +481,9 @@ class AnalysisRunner:
         threading.Thread(target=self._run, name="analysis", daemon=True).start()
 
     def analyze_game(self, game_id: int, run_id: int, pgn: str, depth: int,
-                     openings: OpeningsBook | None, on_event) -> None:
+                     openings: OpeningsBook | None, on_event, ratings=None) -> None:
         self.games_pending += 1
-        self._jobs.put(("game", (game_id, run_id, pgn, depth, openings, on_event)))
+        self._jobs.put(("game", (game_id, run_id, pgn, depth, openings, on_event, ratings)))
 
     #: Runs per refill job. Each job re-queues the rest behind it, so a game the user asks
     #: to analyse waits for one batch at most (about 2 s on the owner's games), not the lot.
@@ -615,7 +616,7 @@ class AnalysisRunner:
         stats["seconds"] = round(time.monotonic() - stats.pop("t0"), 1)
         self._post(lambda st=dict(stats): on_done(st))
 
-    def _do_game(self, game_id, run_id, pgn, depth, openings, on_event) -> None:
+    def _do_game(self, game_id, run_id, pgn, depth, openings, on_event, ratings=None) -> None:
         # The supervisor restarts a dead engine itself; touching `.engine` here only
         # surfaces a missing binary before the first ply.
         self._engine.engine
@@ -626,7 +627,7 @@ class AnalysisRunner:
         try:
             for event in analyze_game_plies(
                 engine, pgn, depth, openings=openings,
-                is_cancelled=lambda: self._cancel,
+                is_cancelled=lambda: self._cancel, ratings=ratings,
             ):
                 # bind via default arg — the app thread saves to DB and emits
                 self._post(lambda ev=event: on_event(game_id, run_id, ev))
@@ -1334,6 +1335,7 @@ class SyncRunner:
                     for event in analyze_game_plies(
                         engine, rec.pgn, depth, openings=openings,
                         is_cancelled=stopped,
+                        ratings=labelling.game_ratings(rec.source, rec.pgn),   # BRIL-2 B
                     ):
                         if event[0] == "ply":
                             analyses.append(event[3])
@@ -2885,6 +2887,7 @@ class Server:
                                        "total": 0}
         self._analysis.analyze_game(
             game_id, run_id, rec.pgn, depth, self._openings, self._on_analysis_event,
+            ratings=labelling.game_ratings(rec.source, rec.pgn),     # BRIL-2 B: BR-A/C's rating
         )
         return {"runId": run_id, "depth": depth}
 

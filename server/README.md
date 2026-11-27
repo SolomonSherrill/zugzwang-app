@@ -81,7 +81,7 @@ roughly 750 (100,000 / about 135); far above what Friends will see in beta.
 ## Deploy
 
 **Deployed 2026-11-22** (FRIENDS-1B C; redeployed 2026-11-23 by BETA-5 C: the Chess.com code lasts 24 hours,
-ruling K3): the Worker `zugzwang-friends` over the D1 database
+ruling K3; redeployed 2026-11-27 04:28 UTC by BRIL-2 D: a live socket retries a retryable Durable Object error once): the Worker `zugzwang-friends` over the D1 database
 `zugzwang-friends` (region ENAM), served **only at https://api.zugzwangapp.com**, a Workers custom domain on
 the owner's zone `zugzwangapp.com` (FRIENDS.md ruling V8). `workers_dev = false`: the Worker is not served on workers.dev.
 The account's workers.dev subdomain (`zugzwangapp`) was created on 2026-11-23 by FRIENDS-2 B through the API

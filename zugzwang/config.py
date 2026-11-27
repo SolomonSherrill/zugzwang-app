@@ -505,7 +505,9 @@ BRILLIANT_MIN_LEGAL = 2
 # BR-A + BR-C: the 0.90 ceiling and the 0.30 floor are judged on a rating-aware curve
 # (`labelling.bound_win_prob`): the mover's expected score from the depth-14 evaluation at his
 # rating band. Brilliant only; labels and accuracy keep the Lichess curve.
-BRILLIANT_RATING_BOUNDS = False
+# ON since classifier version 10 (BRIL-2, owner 2026-11-26): the owner's read of 20 found 9 brilliant,
+# 9 borderline and 2 not, below BR-G's 12; shipped as an owner-recorded exception (BRILLIANT.md "BRIL-2").
+BRILLIANT_RATING_BOUNDS = True
 # The fitted curve (review/scratch/bril1/fit_curve.py, the fit half): rows (lowest rating,
 # highest rating, k) with expected score 1 / (1 + exp(-k * cp)), cp clamped as `win_prob`
 # clamps it. A rating outside every row, an unknown rating, or a mate score uses the current
@@ -522,6 +524,8 @@ BRILLIANT_RATING_CURVE: tuple[tuple[int, int, float], ...] = (
 )
 # BR-E: another piece (not a pawn, not the king, not the one that moved) newly left en prise,
 # whose best capture fails the two-ply minimax (`labelling.other_piece_offered`).
+# DROPPED (BRIL-2, owner 2026-11-26): 4 of 20 read brilliant; most of the owner's notes say the move
+# attacks the queen or a rook, an obvious counter-threat. Kept off; W3's drop stands.
 BRILLIANT_OTHER_PIECE = False
 # BR-F: soundness by the engine's evaluation (`labelling.eval_sound`), all three checks:
 # (1) the mover still a piece down this many plies into the played move's own stored line
@@ -530,6 +534,8 @@ BRILLIANT_OTHER_PIECE = False
 # WPL_EXCELLENT of the before-score at a verification search of this depth (Stockfish, one
 # thread, the candidates only; the search is not run while labelling, its result is passed
 # in); (3) BR-E2's failure shapes (an endgame, a queen offered, the exchange) excluded.
+# Rebuilt in BRIL-2 (owner 2026-11-26): also not when the material was already lost, trapped or
+# forked (`labelling.already_lost`); off until the owner's second read (review/reads/BRIL-2-eval.md).
 BRILLIANT_EVAL_SOUND = False
 BRILLIANT_LINE_DOWN_PLIES = 5
 BRILLIANT_VERIFY_DEPTH = 22
